@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MyNote</title>
-<link rel="manifest" href="#" id="manifest-link">
 <style>
   :root {
     --sky: #B8D8EA;
@@ -13,8 +12,6 @@
     --sky-dark: #7BAEC8;
     --sky-deep: #5A90B0;
     --white: #FFFFFF;
-    --gray: #6B7280;
-    --gray-light: #F3F8FB;
     --text: #2C4A5A;
     --text-light: #5A7A8A;
     --danger: #E07070;
@@ -25,27 +22,39 @@
   body {
     font-family: 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
     background: linear-gradient(135deg, #D6EEF8 0%, #EAF5FB 50%, #F0F8FF 100%);
-    min-height: 100vh;
-    color: var(--text);
+    min-height: 100vh; color: var(--text);
   }
 
-  /* ── AUTH SCREEN ── */
+  /* ── LOADING ── */
+  #loading-screen {
+    position: fixed; inset: 0;
+    background: linear-gradient(135deg, #D6EEF8, #EAF5FB);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 999;
+  }
+  .app-icon-big {
+    width: 80px; height: 80px; border-radius: 22px; margin: 0 auto 20px;
+    background: linear-gradient(135deg, var(--sky-dark), var(--sky-deep));
+    display: flex; align-items: center; justify-content: center; font-size: 36px;
+    box-shadow: 0 6px 20px rgba(90,144,176,0.4);
+  }
+  .spinner {
+    width: 36px; height: 36px; border: 3px solid var(--sky-mid);
+    border-top-color: var(--sky-dark); border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin-bottom: 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── AUTH ── */
   #auth-screen {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
     min-height: 100vh; padding: 24px;
   }
   .auth-box {
-    background: var(--white); border-radius: 24px; padding: 48px 40px;
-    box-shadow: var(--shadow); text-align: center; max-width: 360px; width: 100%;
+    background: var(--white); border-radius: 28px; padding: 48px 40px;
+    box-shadow: 0 8px 40px rgba(90,144,176,0.2); text-align: center; max-width: 360px; width: 100%;
   }
-  .app-icon-big {
-    width: 80px; height: 80px; border-radius: 20px; margin: 0 auto 20px;
-    background: linear-gradient(135deg, var(--sky-dark), var(--sky-deep));
-    display: flex; align-items: center; justify-content: center;
-    font-size: 36px; box-shadow: 0 6px 20px rgba(90,144,176,0.4);
-  }
-  .auth-box h1 { font-size: 28px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
-  .auth-box p { color: var(--text-light); margin-bottom: 32px; font-size: 14px; }
+  .auth-box h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .auth-box p { color: var(--text-light); font-size: 14px; margin-bottom: 32px; line-height: 1.6; }
   .btn-google {
     width: 100%; padding: 14px; border-radius: 12px; border: 2px solid var(--sky);
     background: var(--white); color: var(--text); font-size: 15px; font-weight: 600;
@@ -53,12 +62,26 @@
     transition: all 0.2s;
   }
   .btn-google:hover { background: var(--sky-light); border-color: var(--sky-dark); }
-  .btn-google svg { width: 20px; height: 20px; }
+
+  /* ── ACCESS DENIED ── */
+  #denied-screen {
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 24px;
+  }
+  .denied-box {
+    background: var(--white); border-radius: 28px; padding: 48px 40px;
+    box-shadow: 0 8px 40px rgba(90,144,176,0.2); text-align: center; max-width: 360px; width: 100%;
+  }
+  .denied-box h2 { font-size: 22px; font-weight: 700; margin-bottom: 10px; color: var(--danger); }
+  .denied-box p { color: var(--text-light); font-size: 14px; margin-bottom: 24px; line-height: 1.6; }
+  .btn-signout {
+    width: 100%; padding: 13px; border-radius: 12px; border: 1.5px solid var(--sky-mid);
+    background: transparent; color: var(--text-light); font-size: 14px; cursor: pointer;
+  }
 
   /* ── MAIN APP ── */
   #app { display: none; flex-direction: column; min-height: 100vh; }
 
-  /* Header */
   .header {
     background: var(--white); padding: 14px 20px;
     display: flex; align-items: center; justify-content: space-between;
@@ -70,82 +93,59 @@
     background: linear-gradient(135deg, var(--sky-dark), var(--sky-deep));
     display: flex; align-items: center; justify-content: center; font-size: 18px;
   }
-  .header h1 { font-size: 20px; font-weight: 700; color: var(--text); }
+  .header h1 { font-size: 20px; font-weight: 700; }
   .header-right { display: flex; align-items: center; gap: 10px; }
   .user-avatar {
     width: 34px; height: 34px; border-radius: 50%; overflow: hidden;
-    border: 2px solid var(--sky); cursor: pointer;
+    border: 2px solid var(--sky);
   }
   .user-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .user-avatar-default {
-    width: 34px; height: 34px; border-radius: 50%;
-    background: var(--sky-dark); color: white; font-weight: 700; font-size: 14px;
-    display: flex; align-items: center; justify-content: center;
-    border: 2px solid var(--sky); cursor: pointer;
-  }
+  .user-name { font-size: 13px; color: var(--text-light); font-weight: 600; }
   .btn-logout {
-    padding: 6px 14px; border-radius: 8px; border: 1.5px solid var(--sky-dark);
-    background: transparent; color: var(--sky-deep); font-size: 13px; cursor: pointer;
-    transition: all 0.2s;
+    padding: 7px 14px; border-radius: 10px; border: 1.5px solid var(--sky-dark);
+    background: transparent; color: var(--sky-deep); font-size: 13px; cursor: pointer; transition: all 0.2s;
   }
   .btn-logout:hover { background: var(--sky-light); }
 
-  /* Category Nav */
   .cat-nav {
-    padding: 16px 20px 0; display: flex; gap: 8px; overflow-x: auto;
-    scrollbar-width: none; background: var(--white);
-    box-shadow: 0 2px 10px rgba(90,144,176,0.08);
+    padding: 14px 20px 0; display: flex; gap: 8px; overflow-x: auto;
+    scrollbar-width: none; background: var(--white); box-shadow: 0 2px 10px rgba(90,144,176,0.08);
   }
   .cat-nav::-webkit-scrollbar { display: none; }
   .cat-btn {
     flex-shrink: 0; padding: 8px 16px; border-radius: 20px; border: none;
     background: var(--sky-light); color: var(--text-light); font-size: 13px; font-weight: 600;
-    cursor: pointer; transition: all 0.2s; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;
+    cursor: pointer; transition: all 0.2s; margin-bottom: 12px;
   }
   .cat-btn.active { background: var(--sky-dark); color: white; box-shadow: 0 3px 10px rgba(90,144,176,0.35); }
   .cat-btn:hover:not(.active) { background: var(--sky-mid); }
 
-  /* Content */
-  .content { flex: 1; padding: 20px; max-width: 900px; margin: 0 auto; width: 100%; }
-
-  /* Section Header */
-  .section-header {
-    display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
-  }
-  .section-title { font-size: 18px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 8px; }
-  .note-count {
-    background: var(--sky-dark); color: white; border-radius: 10px;
-    padding: 2px 8px; font-size: 12px; font-weight: 600;
-  }
+  .content { padding: 20px; max-width: 900px; margin: 0 auto; width: 100%; }
+  .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .section-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .note-count { background: var(--sky-dark); color: white; border-radius: 10px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
   .btn-add {
     padding: 10px 18px; border-radius: 12px; border: none;
     background: linear-gradient(135deg, var(--sky-dark), var(--sky-deep));
     color: white; font-size: 14px; font-weight: 600; cursor: pointer;
-    display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(90,144,176,0.35);
-    transition: all 0.2s;
+    display: flex; align-items: center; gap: 6px;
+    box-shadow: 0 4px 12px rgba(90,144,176,0.35); transition: all 0.2s;
   }
-  .btn-add:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(90,144,176,0.45); }
+  .btn-add:hover { transform: translateY(-1px); }
 
-  /* Notes Grid */
-  .notes-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;
-  }
-
-  /* Note Card */
+  .notes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
   .note-card {
     background: var(--white); border-radius: var(--radius); padding: 18px;
-    box-shadow: var(--shadow); transition: all 0.2s; cursor: pointer;
-    border: 1.5px solid transparent; position: relative;
+    box-shadow: var(--shadow); transition: all 0.2s; border: 1.5px solid transparent;
   }
   .note-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(90,144,176,0.22); border-color: var(--sky); }
   .note-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
-  .note-card-title { font-size: 15px; font-weight: 700; color: var(--text); flex: 1; }
+  .note-card-title { font-size: 15px; font-weight: 700; flex: 1; }
   .note-card-actions { display: flex; gap: 6px; }
   .btn-icon {
     width: 28px; height: 28px; border-radius: 8px; border: none;
     background: var(--sky-light); color: var(--text-light); font-size: 13px;
-    cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.15s;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s;
   }
   .btn-icon:hover { background: var(--sky-mid); }
   .btn-icon.danger:hover { background: #FDEAEA; color: var(--danger); }
@@ -156,12 +156,10 @@
   .note-date { font-size: 11px; color: #9BB5C5; }
   .note-img-count { font-size: 11px; color: var(--sky-dark); background: var(--sky-light); padding: 2px 8px; border-radius: 8px; }
 
-  /* Empty State */
-  .empty-state { text-align: center; padding: 60px 20px; }
+  .empty-state { text-align: center; padding: 60px 20px; grid-column: 1/-1; }
   .empty-icon { font-size: 56px; margin-bottom: 16px; opacity: 0.5; }
   .empty-state p { color: var(--text-light); font-size: 15px; }
 
-  /* Modal */
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(44,74,90,0.4); backdrop-filter: blur(4px);
     z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px;
@@ -171,19 +169,17 @@
     width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto;
     box-shadow: 0 20px 60px rgba(90,144,176,0.3);
   }
-  .modal h2 { font-size: 20px; font-weight: 700; margin-bottom: 20px; color: var(--text); }
+  .modal h2 { font-size: 20px; font-weight: 700; margin-bottom: 20px; }
   .form-group { margin-bottom: 16px; }
   .form-label { font-size: 13px; font-weight: 600; color: var(--text-light); margin-bottom: 6px; display: block; }
   .form-input, .form-textarea {
     width: 100%; padding: 12px 14px; border-radius: 12px;
     border: 1.5px solid var(--sky-mid); background: var(--sky-light);
-    font-size: 14px; color: var(--text); outline: none; transition: border-color 0.2s;
-    font-family: inherit;
+    font-size: 14px; color: var(--text); outline: none; transition: border-color 0.2s; font-family: inherit;
   }
   .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: white; }
   .form-textarea { min-height: 120px; resize: vertical; }
 
-  /* Image Upload */
   .img-upload-area {
     border: 2px dashed var(--sky); border-radius: 12px; padding: 20px;
     text-align: center; cursor: pointer; transition: all 0.2s; background: var(--sky-light);
@@ -198,25 +194,20 @@
     border-radius: 50%; background: var(--danger); color: white; border: none;
     font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center;
   }
-
-  /* Voice Input */
   .voice-btn {
     width: 100%; padding: 12px; border-radius: 12px;
     border: 1.5px solid var(--sky); background: var(--sky-light);
     color: var(--text-light); font-size: 13px; cursor: pointer;
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    transition: all 0.2s;
+    display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s;
   }
   .voice-btn.recording { background: #FDEAEA; border-color: var(--danger); color: var(--danger); animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 
-  /* Modal Actions */
   .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
   .btn-primary {
     flex: 1; padding: 13px; border-radius: 12px; border: none;
     background: linear-gradient(135deg, var(--sky-dark), var(--sky-deep));
-    color: white; font-size: 15px; font-weight: 700; cursor: pointer;
-    transition: all 0.2s;
+    color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.2s;
   }
   .btn-primary:hover { transform: translateY(-1px); }
   .btn-secondary {
@@ -224,52 +215,50 @@
     background: transparent; color: var(--text-light); font-size: 15px; cursor: pointer;
   }
 
-  /* Toast */
   .toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
     background: var(--text); color: white; padding: 12px 24px; border-radius: 12px;
-    font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s;
-    pointer-events: none;
+    font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none;
   }
   .toast.show { opacity: 1; }
-
-  /* Loading */
-  .loading-screen {
-    position: fixed; inset: 0; background: linear-gradient(135deg, #D6EEF8, #EAF5FB);
-    display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 999;
-  }
-  .spinner {
-    width: 40px; height: 40px; border: 3px solid var(--sky-mid);
-    border-top-color: var(--sky-dark); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 16px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
   @media (max-width: 480px) {
     .notes-grid { grid-template-columns: 1fr; }
     .modal { padding: 20px; }
     .content { padding: 14px; }
+    .user-name { display: none; }
   }
 </style>
 </head>
 <body>
 
 <!-- Loading -->
-<div class="loading-screen" id="loading-screen">
+<div id="loading-screen">
   <div class="app-icon-big">📝</div>
   <div class="spinner"></div>
-  <p style="color:var(--text-light);font-size:14px;">MyNote 불러오는 중...</p>
+  <p style="color:var(--text-light);font-size:14px">MyNote 불러오는 중...</p>
 </div>
 
 <!-- Auth -->
-<div id="auth-screen" style="display:none">
+<div id="auth-screen">
   <div class="auth-box">
     <div class="app-icon-big">📝</div>
     <h1>MyNote</h1>
-    <p>나만의 스마트 메모 앱<br>어디서나 동기화되는 소중한 기록</p>
+    <p>나만의 스마트 메모 앱<br>소중한 기록을 안전하게 보관하세요</p>
     <button class="btn-google" id="btn-google-login">
-      <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
       Google로 로그인
     </button>
+  </div>
+</div>
+
+<!-- Access Denied -->
+<div id="denied-screen">
+  <div class="denied-box">
+    <div style="font-size:56px;margin-bottom:16px">🚫</div>
+    <h2>접근 권한 없음</h2>
+    <p>이 앱은 허가된 계정만<br>사용할 수 있어요.<br><br><span id="denied-email" style="color:var(--text);font-weight:600"></span></p>
+    <button class="btn-signout" id="btn-denied-signout">다른 계정으로 로그인</button>
   </div>
 </div>
 
@@ -281,13 +270,12 @@
       <h1>MyNote</h1>
     </div>
     <div class="header-right">
-      <div id="user-display"></div>
+      <div class="user-avatar" id="user-avatar"></div>
+      <span class="user-name" id="user-name"></span>
       <button class="btn-logout" id="btn-logout">로그아웃</button>
     </div>
   </div>
-
   <nav class="cat-nav" id="cat-nav"></nav>
-
   <div class="content">
     <div class="section-header">
       <div class="section-title">
@@ -295,9 +283,7 @@
         <span id="current-cat-name"></span>
         <span class="note-count" id="note-count">0</span>
       </div>
-      <button class="btn-add" id="btn-add-note">
-        ✏️ 메모 추가
-      </button>
+      <button class="btn-add" id="btn-add-note">✏️ 메모 추가</button>
     </div>
     <div class="notes-grid" id="notes-grid"></div>
   </div>
@@ -314,9 +300,7 @@
     <div class="form-group">
       <label class="form-label">내용</label>
       <textarea class="form-textarea" id="note-body" placeholder="메모 내용을 입력하세요..."></textarea>
-      <button class="voice-btn" id="voice-btn" style="margin-top:8px">
-        🎤 음성으로 입력
-      </button>
+      <button class="voice-btn" id="voice-btn" style="margin-top:8px">🎤 음성으로 입력</button>
     </div>
     <div class="form-group">
       <label class="form-label">이미지 첨부</label>
@@ -348,14 +332,13 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- Firebase -->
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, Timestamp }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
-import { getStorage, ref, uploadString, getDownloadURL, deleteObject }
+import { getStorage, ref, uploadString, getDownloadURL }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
 
 const firebaseConfig = {
@@ -372,61 +355,67 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
+// ── 허가된 이메일 (본인 Google 계정만 접근 가능)
+// 아래에 본인 Google 이메일을 입력하세요
+const ALLOWED_EMAILS = [
+  '2gateless@gmail.com'  // ← 여기에 본인 Gmail 주소 입력
+];
+
 const CATEGORIES = [
-  { id: 'family',   name: '가족',   icon: '👨‍👩‍👧‍👦' },
-  { id: 'office',   name: '사무실', icon: '💼' },
-  { id: 'finance',  name: '금융',   icon: '💰' },
-  { id: 'realty',   name: '부동산', icon: '🏠' },
-  { id: 'memory',   name: '기억',   icon: '💭' },
-  { id: 'others',   name: '기타',   icon: '📌' },
+  { id: 'family',  name: '가족',   icon: '👨‍👩‍👧‍👦' },
+  { id: 'office',  name: '사무실', icon: '💼' },
+  { id: 'finance', name: '금융',   icon: '💰' },
+  { id: 'realty',  name: '부동산', icon: '🏠' },
+  { id: 'memory',  name: '기억',   icon: '💭' },
+  { id: 'others',  name: '기타',   icon: '📌' },
 ];
 
 let currentUser = null;
 let currentCat = CATEGORIES[0];
 let editingNoteId = null;
 let deleteTargetId = null;
-let pendingImages = []; // {dataUrl, name}
-let existingImages = []; // {url, path} from Firestore
+let pendingImages = [];
+let existingImages = [];
 let notesUnsubscribe = null;
 let recognition = null;
 let isRecording = false;
 
-// ── UI refs
-const loadingScreen = document.getElementById('loading-screen');
-const authScreen = document.getElementById('auth-screen');
-const appEl = document.getElementById('app');
-const catNav = document.getElementById('cat-nav');
-const notesGrid = document.getElementById('notes-grid');
-const noteModal = document.getElementById('note-modal');
-const delModal = document.getElementById('del-modal');
-const noteTitle = document.getElementById('note-title');
-const noteBody = document.getElementById('note-body');
-const imgInput = document.getElementById('img-input');
-const imgPreviewList = document.getElementById('img-preview-list');
-const voiceBtn = document.getElementById('voice-btn');
-const toastEl = document.getElementById('toast');
-const noteCount = document.getElementById('note-count');
-
 function showToast(msg) {
-  toastEl.textContent = msg;
-  toastEl.classList.add('show');
-  setTimeout(() => toastEl.classList.remove('show'), 2500);
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function showScreen(name) {
+  ['loading-screen','auth-screen','denied-screen','app'].forEach(id => {
+    const el = document.getElementById(id);
+    el.style.display = 'none';
+  });
+  const target = document.getElementById(name);
+  target.style.display = (name === 'app') ? 'flex' : 
+                          (name === 'loading-screen') ? 'flex' : 'flex';
+  if (name === 'auth-screen' || name === 'denied-screen') target.style.flexDirection = 'column';
 }
 
 // ── AUTH
 onAuthStateChanged(auth, user => {
-  loadingScreen.style.display = 'none';
   if (user) {
-    currentUser = user;
-    authScreen.style.display = 'none';
-    appEl.style.display = 'flex';
-    renderUserInfo();
-    renderCategories();
-    selectCategory(CATEGORIES[0]);
+    if (ALLOWED_EMAILS.includes(user.email)) {
+      currentUser = user;
+      renderUserInfo();
+      showScreen('app');
+      renderCategories();
+      selectCategory(CATEGORIES[0]);
+    } else {
+      document.getElementById('denied-email').textContent = user.email;
+      showScreen('denied-screen');
+      if (notesUnsubscribe) notesUnsubscribe();
+    }
   } else {
     currentUser = null;
-    authScreen.style.display = 'flex';
-    appEl.style.display = 'none';
+    showScreen('auth-screen');
     if (notesUnsubscribe) notesUnsubscribe();
   }
 });
@@ -434,22 +423,26 @@ onAuthStateChanged(auth, user => {
 document.getElementById('btn-google-login').onclick = async () => {
   try {
     await signInWithPopup(auth, new GoogleAuthProvider());
-  } catch(e) { showToast('로그인 실패: ' + e.message); }
+  } catch(e) {
+    showToast('로그인 실패: ' + e.message);
+    showScreen('auth-screen');
+  }
 };
 document.getElementById('btn-logout').onclick = () => signOut(auth);
+document.getElementById('btn-denied-signout').onclick = () => signOut(auth);
 
 function renderUserInfo() {
-  const d = document.getElementById('user-display');
+  const avatar = document.getElementById('user-avatar');
+  const name = document.getElementById('user-name');
   if (currentUser.photoURL) {
-    d.innerHTML = `<div class="user-avatar"><img src="${currentUser.photoURL}" alt="avatar"></div>`;
-  } else {
-    const initial = (currentUser.displayName || currentUser.email || 'U')[0].toUpperCase();
-    d.innerHTML = `<div class="user-avatar-default">${initial}</div>`;
+    avatar.innerHTML = `<img src="${currentUser.photoURL}" alt="프로필">`;
   }
+  name.textContent = currentUser.displayName || currentUser.email;
 }
 
 // ── CATEGORIES
 function renderCategories() {
+  const catNav = document.getElementById('cat-nav');
   catNav.innerHTML = '';
   CATEGORIES.forEach(cat => {
     const btn = document.createElement('button');
@@ -471,7 +464,8 @@ function selectCategory(cat) {
 // ── NOTES
 function loadNotes() {
   if (notesUnsubscribe) notesUnsubscribe();
-  notesGrid.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:10px">불러오는 중...</div>`;
+  const grid = document.getElementById('notes-grid');
+  grid.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:10px">불러오는 중...</div>`;
   const q = query(
     collection(db, 'notes'),
     where('uid', '==', currentUser.uid),
@@ -480,40 +474,35 @@ function loadNotes() {
   );
   notesUnsubscribe = onSnapshot(q, snap => {
     const notes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    noteCount.textContent = notes.length;
+    document.getElementById('note-count').textContent = notes.length;
     renderNotes(notes);
   }, err => {
-    if (err.code === 'failed-precondition') {
-      notesGrid.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:10px">⚠️ Firestore 색인이 필요합니다. Firebase 콘솔에서 색인을 생성해주세요.<br><br><small>${err.message}</small></div>`;
-    } else {
-      showToast('오류: ' + err.message);
-    }
+    grid.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:10px">⚠️ ${err.message}</div>`;
   });
 }
 
 function renderNotes(notes) {
+  const grid = document.getElementById('notes-grid');
   if (notes.length === 0) {
-    notesGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+    grid.innerHTML = `<div class="empty-state">
       <div class="empty-icon">${currentCat.icon}</div>
       <p>${currentCat.name} 메모가 없어요.<br>첫 번째 메모를 추가해보세요!</p>
     </div>`;
     return;
   }
-  notesGrid.innerHTML = '';
+  grid.innerHTML = '';
   notes.forEach(note => {
     const card = document.createElement('div');
     card.className = 'note-card';
     const date = note.createdAt?.toDate ? note.createdAt.toDate().toLocaleDateString('ko-KR') : '';
     const imgs = note.images || [];
-    const thumbs = imgs.slice(0, 3).map(img =>
-      `<img class="note-thumb" src="${img.url}" alt="이미지" onclick="event.stopPropagation()">`
-    ).join('');
+    const thumbs = imgs.slice(0,3).map(img => `<img class="note-thumb" src="${img.url}" alt="이미지">`).join('');
     card.innerHTML = `
       <div class="note-card-header">
         <div class="note-card-title">${escHtml(note.title || '제목 없음')}</div>
         <div class="note-card-actions">
-          <button class="btn-icon" title="수정">✏️</button>
-          <button class="btn-icon danger" title="삭제">🗑️</button>
+          <button class="btn-icon">✏️</button>
+          <button class="btn-icon danger">🗑️</button>
         </div>
       </div>
       <div class="note-card-body">${escHtml(note.body || '')}</div>
@@ -522,91 +511,75 @@ function renderNotes(notes) {
         <span class="note-date">${date}</span>
         ${imgs.length > 0 ? `<span class="note-img-count">📷 ${imgs.length}</span>` : ''}
       </div>`;
-    card.querySelectorAll('.btn-icon')[0].onclick = e => { e.stopPropagation(); openEditModal(note); };
-    card.querySelectorAll('.btn-icon')[1].onclick = e => { e.stopPropagation(); openDelModal(note.id); };
-    notesGrid.appendChild(card);
+    card.querySelectorAll('.btn-icon')[0].onclick = () => openEditModal(note);
+    card.querySelectorAll('.btn-icon')[1].onclick = () => openDelModal(note.id);
+    grid.appendChild(card);
   });
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-// ── ADD / EDIT MODAL
+// ── MODAL
 document.getElementById('btn-add-note').onclick = openAddModal;
 document.getElementById('btn-cancel').onclick = closeModal;
 document.getElementById('btn-save').onclick = saveNote;
 
 function openAddModal() {
-  editingNoteId = null;
-  pendingImages = [];
-  existingImages = [];
-  noteTitle.value = '';
-  noteBody.value = '';
-  imgPreviewList.innerHTML = '';
+  editingNoteId = null; pendingImages = []; existingImages = [];
+  document.getElementById('note-title').value = '';
+  document.getElementById('note-body').value = '';
+  document.getElementById('img-preview-list').innerHTML = '';
   document.getElementById('modal-title').textContent = '새 메모';
-  noteModal.style.display = 'flex';
+  document.getElementById('note-modal').style.display = 'flex';
 }
-
 function openEditModal(note) {
-  editingNoteId = note.id;
-  pendingImages = [];
-  existingImages = (note.images || []).map(i => ({ ...i }));
-  noteTitle.value = note.title || '';
-  noteBody.value = note.body || '';
+  editingNoteId = note.id; pendingImages = [];
+  existingImages = (note.images || []).map(i => ({...i}));
+  document.getElementById('note-title').value = note.title || '';
+  document.getElementById('note-body').value = note.body || '';
   document.getElementById('modal-title').textContent = '메모 수정';
   renderImgPreviews();
-  noteModal.style.display = 'flex';
+  document.getElementById('note-modal').style.display = 'flex';
 }
-
 function closeModal() {
-  noteModal.style.display = 'none';
+  document.getElementById('note-modal').style.display = 'none';
   stopRecording();
 }
 
-// Image upload
-document.getElementById('img-upload-area').onclick = () => imgInput.click();
-imgInput.onchange = e => {
-  const files = Array.from(e.target.files);
-  files.forEach(f => {
+document.getElementById('img-upload-area').onclick = () => document.getElementById('img-input').click();
+document.getElementById('img-input').onchange = e => {
+  Array.from(e.target.files).forEach(f => {
     const reader = new FileReader();
-    reader.onload = ev => {
-      pendingImages.push({ dataUrl: ev.target.result, name: f.name });
-      renderImgPreviews();
-    };
+    reader.onload = ev => { pendingImages.push({ dataUrl: ev.target.result, name: f.name }); renderImgPreviews(); };
     reader.readAsDataURL(f);
   });
-  imgInput.value = '';
+  e.target.value = '';
 };
 
 function renderImgPreviews() {
-  imgPreviewList.innerHTML = '';
+  const list = document.getElementById('img-preview-list');
+  list.innerHTML = '';
   existingImages.forEach((img, i) => {
     const item = document.createElement('div');
     item.className = 'img-preview-item';
     item.innerHTML = `<img src="${img.url}"><button class="img-remove-btn">×</button>`;
     item.querySelector('button').onclick = () => { existingImages.splice(i,1); renderImgPreviews(); };
-    imgPreviewList.appendChild(item);
+    list.appendChild(item);
   });
   pendingImages.forEach((img, i) => {
     const item = document.createElement('div');
     item.className = 'img-preview-item';
     item.innerHTML = `<img src="${img.dataUrl}"><button class="img-remove-btn">×</button>`;
     item.querySelector('button').onclick = () => { pendingImages.splice(i,1); renderImgPreviews(); };
-    imgPreviewList.appendChild(item);
+    list.appendChild(item);
   });
 }
 
 async function saveNote() {
-  const title = noteTitle.value.trim();
-  const body = noteBody.value.trim();
+  const title = document.getElementById('note-title').value.trim();
+  const body = document.getElementById('note-body').value.trim();
   if (!title) { showToast('제목을 입력해주세요'); return; }
-
-  document.getElementById('btn-save').textContent = '저장 중...';
-  document.getElementById('btn-save').disabled = true;
-
+  const btn = document.getElementById('btn-save');
+  btn.textContent = '저장 중...'; btn.disabled = true;
   try {
-    // Upload pending images
     const uploadedImgs = [];
     for (const img of pendingImages) {
       const path = `notes/${currentUser.uid}/${Date.now()}_${img.name}`;
@@ -616,85 +589,69 @@ async function saveNote() {
       uploadedImgs.push({ url, path });
     }
     const allImages = [...existingImages, ...uploadedImgs];
-
     if (editingNoteId) {
-      await updateDoc(doc(db, 'notes', editingNoteId), {
-        title, body, images: allImages, updatedAt: Timestamp.now()
-      });
+      await updateDoc(doc(db, 'notes', editingNoteId), { title, body, images: allImages, updatedAt: Timestamp.now() });
       showToast('메모가 수정되었어요 ✅');
     } else {
       await addDoc(collection(db, 'notes'), {
-        uid: currentUser.uid,
-        category: currentCat.id,
-        title, body, images: allImages,
-        createdAt: Timestamp.now()
+        uid: currentUser.uid, category: currentCat.id,
+        title, body, images: allImages, createdAt: Timestamp.now()
       });
       showToast('메모가 저장되었어요 ✅');
     }
     closeModal();
-  } catch(e) {
-    showToast('저장 실패: ' + e.message);
-  } finally {
-    document.getElementById('btn-save').textContent = '💾 저장';
-    document.getElementById('btn-save').disabled = false;
-  }
+  } catch(e) { showToast('저장 실패: ' + e.message); }
+  finally { btn.textContent = '💾 저장'; btn.disabled = false; }
 }
 
 // ── DELETE
-function openDelModal(id) {
-  deleteTargetId = id;
-  delModal.style.display = 'flex';
-}
-document.getElementById('del-cancel').onclick = () => { delModal.style.display = 'none'; };
+function openDelModal(id) { deleteTargetId = id; document.getElementById('del-modal').style.display = 'flex'; }
+document.getElementById('del-cancel').onclick = () => { document.getElementById('del-modal').style.display = 'none'; };
 document.getElementById('del-confirm').onclick = async () => {
   if (!deleteTargetId) return;
   try {
-    // Delete images from storage if any
-    // (skip for simplicity; storage cleanup can be done via Cloud Functions)
     await deleteDoc(doc(db, 'notes', deleteTargetId));
     showToast('메모가 삭제되었어요 🗑️');
   } catch(e) { showToast('삭제 실패: ' + e.message); }
-  delModal.style.display = 'none';
+  document.getElementById('del-modal').style.display = 'none';
   deleteTargetId = null;
 };
 
-// ── VOICE INPUT
-voiceBtn.onclick = () => {
+// ── VOICE
+document.getElementById('voice-btn').onclick = () => {
   if (isRecording) { stopRecording(); return; }
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) { showToast('이 브라우저는 음성 입력을 지원하지 않아요'); return; }
-  recognition = new SpeechRecognition();
-  recognition.lang = 'ko-KR';
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  let finalTranscript = '';
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { showToast('이 브라우저는 음성 입력을 지원하지 않아요'); return; }
+  recognition = new SR();
+  recognition.lang = 'ko-KR'; recognition.continuous = true; recognition.interimResults = true;
+  let final = '';
   recognition.onresult = e => {
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) finalTranscript += e.results[i][0].transcript;
+      if (e.results[i].isFinal) final += e.results[i][0].transcript;
       else interim += e.results[i][0].transcript;
     }
-    noteBody.value = (noteBody.value ? noteBody.value + ' ' : '') + finalTranscript + interim;
-    finalTranscript = '';
+    document.getElementById('note-body').value += final + interim;
+    final = '';
   };
   recognition.onerror = () => { stopRecording(); showToast('음성 인식 오류'); };
   recognition.onend = () => { if (isRecording) stopRecording(); };
   recognition.start();
   isRecording = true;
-  voiceBtn.textContent = '🔴 녹음 중... (클릭하여 종료)';
-  voiceBtn.classList.add('recording');
+  const vb = document.getElementById('voice-btn');
+  vb.textContent = '🔴 녹음 중... (클릭하여 종료)';
+  vb.classList.add('recording');
 };
-
 function stopRecording() {
   if (recognition) { try { recognition.stop(); } catch(e){} recognition = null; }
   isRecording = false;
-  voiceBtn.textContent = '🎤 음성으로 입력';
-  voiceBtn.classList.remove('recording');
+  const vb = document.getElementById('voice-btn');
+  vb.textContent = '🎤 음성으로 입력';
+  vb.classList.remove('recording');
 }
 
-// ── CLOSE MODALS ON OVERLAY CLICK
-noteModal.addEventListener('click', e => { if(e.target === noteModal) closeModal(); });
-delModal.addEventListener('click', e => { if(e.target === delModal) delModal.style.display='none'; });
+document.getElementById('note-modal').addEventListener('click', e => { if(e.target.id==='note-modal') closeModal(); });
+document.getElementById('del-modal').addEventListener('click', e => { if(e.target.id==='del-modal') document.getElementById('del-modal').style.display='none'; });
 </script>
 </body>
 </html>
