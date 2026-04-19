@@ -439,11 +439,11 @@
     <div class="cat-grid" id="cat-grid">
       <div class="cat-row two">
         <div class="cat-card" data-cat="memory"><span class="cat-card-icon">💭</span><div class="cat-card-info"><div class="cat-card-name">기억</div><div class="cat-card-count" id="cnt-memory">메모 0개</div></div><span class="cat-card-badge" id="badge-memory" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="ref_science"><span class="cat-card-icon">🔬</span><div class="cat-card-info"><div class="cat-card-name">참고(과학)</div><div class="cat-card-count" id="cnt-ref_science">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_science" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="ref_science"><span class="cat-card-icon">🔬</span><div class="cat-card-info"><div class="cat-card-name">과학</div><div class="cat-card-count" id="cnt-ref_science">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_science" style="display:none">0</span></div>
       </div>
       <div class="cat-row two">
-        <div class="cat-card" data-cat="ref_art"><span class="cat-card-icon">🎨</span><div class="cat-card-info"><div class="cat-card-name">참고(예술)</div><div class="cat-card-count" id="cnt-ref_art">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_art" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="ref_others"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">참고(기타)</div><div class="cat-card-count" id="cnt-ref_others">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_others" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="ref_art"><span class="cat-card-icon">🎨</span><div class="cat-card-info"><div class="cat-card-name">예술</div><div class="cat-card-count" id="cnt-ref_art">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_art" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="ref_others"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">기타</div><div class="cat-card-count" id="cnt-ref_others">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_others" style="display:none">0</span></div>
       </div>
       <div class="cat-row two">
         <div class="cat-card" data-cat="finance"><span class="cat-card-icon">💰</span><div class="cat-card-info"><div class="cat-card-name">금융</div><div class="cat-card-count" id="cnt-finance">메모 0개</div></div><span class="cat-card-badge" id="badge-finance" style="display:none">0</span></div>
@@ -561,14 +561,14 @@ const storage = getStorage(app);
 const ALLOWED_EMAILS = ['2gateless@gmail.com'];
 
 const CATEGORIES = {
-  memory:      { name: '기억',       icon: '💭' },
-  ref_science: { name: '참고(과학)', icon: '🔬' },
-  ref_art:     { name: '참고(예술)', icon: '🎨' },
-  ref_others:  { name: '참고(기타)', icon: '📋' },
-  finance:     { name: '금융',       icon: '💰' },
-  realty:      { name: '부동산',     icon: '🏠' },
-  family:      { name: '가족',       icon: '👨‍👩‍👧‍👦' },
-  office:      { name: '사무실',     icon: '💼' },
+  memory:      { name: '기억',   icon: '💭' },
+  ref_science: { name: '과학',   icon: '🔬' },
+  ref_art:     { name: '예술',   icon: '🎨' },
+  ref_others:  { name: '기타',   icon: '📋' },
+  finance:     { name: '금융',   icon: '💰' },
+  realty:      { name: '부동산', icon: '🏠' },
+  family:      { name: '가족',   icon: '👨‍👩‍👧‍👦' },
+  office:      { name: '사무실', icon: '💼' },
 };
 
 let currentUser = null;
