@@ -21,7 +21,7 @@
     --sky-dark: #6A9EBA;
     --sky-deep: #4A80A0;
     --white: #E8F5E8;
-    --green-light: #DCEFD C;
+    --green-light: #DCEFD8;
     --green-pale: #E8F5E8;
     --text: #2C4A5A;
     --text-light: #5A7A8A;
@@ -618,8 +618,7 @@ onAuthStateChanged(auth, user => {
       currentUser = user;
       renderUserBar();
       showRootScreen('app');
-      await migrateCategories();
-      loadAllCounts();
+      migrateCategories().then(() => loadAllCounts());
     } else {
       document.getElementById('denied-email').textContent = user.email;
       showRootScreen('denied-screen');
@@ -629,6 +628,14 @@ onAuthStateChanged(auth, user => {
     showRootScreen('auth-screen');
   }
 });
+
+// 로딩 타임아웃 — 5초 후에도 auth 상태 미확인 시 로그인 화면으로
+setTimeout(() => {
+  const ls = document.getElementById('loading-screen');
+  if (ls && ls.style.display !== 'none') {
+    showRootScreen('auth-screen');
+  }
+}, 5000);
 
 document.getElementById('btn-google-login').onclick = async () => {
   try { await signInWithPopup(auth, new GoogleAuthProvider()); }
