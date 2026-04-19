@@ -10,6 +10,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="MyNote">
+<meta name="screen-orientation" content="portrait">
+<meta name="x5-orientation" content="portrait">
+<meta name="browsermode" content="application">
 <style>
   :root {
     --sky: #B8D8EA;
@@ -95,25 +98,25 @@
 
   /* ── HOME SCREEN ── */
   .home-header {
-    padding: 48px 24px 24px;
+    padding: 28px 24px 16px;
     text-align: center;
   }
   .home-logo {
-    display: inline-flex; align-items: center; gap: 12px; margin-bottom: 6px;
+    display: inline-flex; align-items: center; gap: 10px; margin-bottom: 4px;
   }
   .home-icon {
-    width: 48px; height: 48px; border-radius: 14px;
+    width: 40px; height: 40px; border-radius: 12px;
     background: linear-gradient(135deg, var(--sky-dark), var(--sky-deep));
-    display: flex; align-items: center; justify-content: center; font-size: 24px;
+    display: flex; align-items: center; justify-content: center; font-size: 20px;
     box-shadow: 0 4px 14px rgba(90,144,176,0.35);
   }
-  .home-title { font-size: 30px; font-weight: 800; color: var(--text); }
-  .home-subtitle { font-size: 13px; color: var(--text-light); margin-top: 4px; }
+  .home-title { font-size: 26px; font-weight: 800; color: var(--text); }
+  .home-subtitle { font-size: 12px; color: var(--text-light); margin-top: 2px; }
 
   /* Search */
-  .search-wrap { padding: 0 20px 20px; }
+  .search-wrap { padding: 0 20px 14px; }
   .search-box {
-    background: var(--white); border-radius: 16px; padding: 14px 18px;
+    background: var(--white); border-radius: 14px; padding: 11px 16px;
     display: flex; align-items: center; gap: 10px;
     box-shadow: var(--shadow); border: 1.5px solid transparent; transition: border-color 0.2s;
   }
@@ -145,30 +148,30 @@
   .search-no-result { text-align: center; padding: 32px; color: var(--text-light); font-size: 14px; }
 
   /* Category Grid */
-  .cat-grid { padding: 0 20px 32px; display: flex; flex-direction: column; gap: 12px; }
-  .cat-row { display: grid; gap: 12px; }
+  .cat-grid { padding: 0 20px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .cat-row { display: grid; gap: 10px; }
   .cat-row.two { grid-template-columns: 1fr 1fr; }
   .cat-row.one { grid-template-columns: 1fr; }
 
   .cat-card {
-    background: var(--white); border-radius: var(--radius); padding: 20px 18px;
+    background: var(--white); border-radius: 14px; padding: 14px 14px;
     box-shadow: var(--shadow); cursor: pointer; transition: all 0.2s;
-    border: 1.5px solid transparent; display: flex; align-items: center; gap: 12px;
+    border: 1.5px solid transparent; display: flex; align-items: center; gap: 10px;
   }
   .cat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(90,144,176,0.22); border-color: var(--sky); }
-  .cat-card-icon { font-size: 28px; }
+  .cat-card-icon { font-size: 24px; }
   .cat-card-info { flex: 1; }
-  .cat-card-name { font-size: 16px; font-weight: 700; color: var(--text); }
-  .cat-card-count { font-size: 12px; color: var(--text-light); margin-top: 2px; }
+  .cat-card-name { font-size: 15px; font-weight: 700; color: var(--text); }
+  .cat-card-count { font-size: 11px; color: var(--text-light); margin-top: 1px; }
   .cat-card-badge {
     background: var(--sky-dark); color: white; border-radius: 10px;
-    padding: 2px 9px; font-size: 12px; font-weight: 700;
+    padding: 2px 8px; font-size: 11px; font-weight: 700;
   }
 
   /* User bar */
   .user-bar {
-    margin: 0 20px 16px; background: var(--white); border-radius: 14px;
-    padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+    margin: 0 20px 12px; background: var(--white); border-radius: 12px;
+    padding: 10px 14px; display: flex; align-items: center; gap: 10px;
     box-shadow: var(--shadow);
   }
   .user-bar-avatar {
@@ -344,6 +347,11 @@
   .empty-list .ei { font-size: 52px; margin-bottom: 14px; opacity: 0.45; }
   .empty-list p { color: var(--text-light); font-size: 14px; }
 
+  .app-footer {
+    text-align: center; padding: 8px 20px 20px;
+    font-size: 10px; color: #B0C8D8; letter-spacing: 0.04em;
+  }
+
   /* PC */
   @media (min-width: 640px) {
     .modal, .del-modal {
@@ -440,6 +448,7 @@
       <span class="user-bar-name" id="user-bar-name"></span>
       <button class="btn-logout-sm" id="btn-logout">로그아웃</button>
     </div>
+    <div class="app-footer">2026 Spring &nbsp;·&nbsp; Claude Artifacts &nbsp;·&nbsp; gateless</div>
   </div>
 
   <!-- LIST SCREEN -->
@@ -536,7 +545,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-const ALLOWED_EMAILS = ['2gateless@gmail.com']; // ← 본인 Gmail
+const ALLOWED_EMAILS = ['your-email@gmail.com']; // ← 본인 Gmail
 
 const CATEGORIES = {
   memory:    { name: '기억',    icon: '💭' },
@@ -766,7 +775,17 @@ async function doSearch(keyword) {
       searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
       return;
     }
-    searchResults.innerHTML = `<div style="font-size:12px;color:var(--text-light);padding:0 4px 8px">${results.length}개 검색됨</div>`;
+    searchResults.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
+      <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
+      <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--sky-mid);background:transparent;color:var(--text-light);cursor:pointer">🏠 홈으로</button>
+    </div>`;
+    document.getElementById('search-home-btn').onclick = () => {
+      searchInput.value = '';
+      searchClear.style.display = 'none';
+      searchResults.style.display = 'none';
+      document.getElementById('cat-grid').style.display = '';
+      showAppScreen('home');
+    };
     results.forEach(note => {
       const item = document.createElement('div');
       item.className = 'search-result-item';
