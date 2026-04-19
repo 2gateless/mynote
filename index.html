@@ -20,7 +20,9 @@
     --sky-mid: #D0E9F5;
     --sky-dark: #7BAEC8;
     --sky-deep: #5A90B0;
-    --white: #FFFFFF;
+    --white: #F4FAF4;
+    --green-light: #EEF7EE;
+    --green-pale: #F4FAF4;
     --text: #2C4A5A;
     --text-light: #5A7A8A;
     --danger: #E07070;
@@ -30,7 +32,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
-    background: linear-gradient(135deg, #D6EEF8 0%, #EAF5FB 50%, #F0F8FF 100%);
+    background: linear-gradient(135deg, #E8F5E8 0%, #F0F8F0 50%, #F4FAF4 100%);
     min-height: 100vh; color: var(--text);
   }
 
@@ -262,6 +264,16 @@
     white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
     background: #EEF7EE; border-radius: 16px; padding: 20px;
     box-shadow: var(--shadow); min-height: 120px;
+  }
+  .form-input, .form-textarea {
+    width: 100%; padding: 13px 16px; border-radius: 12px;
+    border: 1.5px solid var(--sky-mid); background: #EEF7EE;
+    font-size: 15px; color: var(--text); outline: none; transition: border-color 0.2s; font-family: inherit;
+  }
+  .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: #E6F5E6; }
+  .img-upload-area {
+    border: 2px dashed var(--sky); border-radius: 12px; padding: 18px;
+    text-align: center; cursor: pointer; background: #EEF7EE;
   }
   .detail-images { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 10px; }
   .detail-img {
