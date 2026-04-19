@@ -536,7 +536,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-const ALLOWED_EMAILS = ['2gateless@gmail.com']; // ← 본인 Gmail
+const ALLOWED_EMAILS = ['your-email@gmail.com']; // ← 본인 Gmail
 
 const CATEGORIES = {
   memory:    { name: '기억',    icon: '💭' },
@@ -883,11 +883,18 @@ async function saveNote() {
   try {
     const uploadedImgs = [];
     for (const img of pendingImages) {
-      const path = `notes/${currentUser.uid}/${Date.now()}_${img.name}`;
-      const sRef = ref(storage, path);
-      await uploadString(sRef, img.dataUrl, 'data_url');
-      const url = await getDownloadURL(sRef);
-      uploadedImgs.push({ url, path });
+      try {
+        const path = `notes/${currentUser.uid}/${Date.now()}_${img.name}`;
+        const sRef = ref(storage, path);
+        // base64 데이터에서 헤더 제거 후 업로드
+        const base64Data = img.dataUrl.split(',')[1];
+        await uploadString(sRef, base64Data, 'base64');
+        const url = await getDownloadURL(sRef);
+        uploadedImgs.push({ url, path });
+      } catch(imgErr) {
+        console.error('이미지 업로드 오류:', imgErr);
+        showToast('이미지 업로드 실패 — 텍스트만 저장돼요');
+      }
     }
     const allImages = [...existingImages, ...uploadedImgs];
     if (editingNoteId) {
@@ -961,6 +968,29 @@ function stopRecording() {
 // overlay 클릭 닫기
 document.getElementById('note-modal').addEventListener('click', e => { if(e.target.id==='note-modal') closeModal(); });
 document.getElementById('del-modal').addEventListener('click', e => { if(e.target.id==='del-modal') document.getElementById('del-modal').style.display='none'; });
+
+// ── 뒤로가기 (Android/PWA)
+function currentScreen() {
+  if (document.getElementById('note-modal').style.display !== 'none') return 'modal';
+  if (document.getElementById('del-modal').style.display !== 'none') return 'del-modal';
+  const active = document.querySelector('.screen.active');
+  return active ? active.id.replace('screen-', '') : 'home';
+}
+
+window.addEventListener('popstate', e => {
+  const screen = currentScreen();
+  if (screen === 'modal') { closeModal(); history.pushState(null, '', location.href); return; }
+  if (screen === 'del-modal') { document.getElementById('del-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
+  if (screen === 'detail') { showAppScreen('list'); history.pushState(null, '', location.href); return; }
+  if (screen === 'list') {
+    if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+    showAppScreen('home'); history.pushState(null, '', location.href); return;
+  }
+  // 홈화면에서 뒤로가기 → 앱 종료 (기본 동작)
+});
+
+// 앱 시작 시 history state 설정
+history.pushState(null, '', location.href);
 </script>
 </body>
 </html>
