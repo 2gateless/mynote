@@ -545,7 +545,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-const ALLOWED_EMAILS = ['2gateless@gmail.com']; // ← 본인 Gmail
+const ALLOWED_EMAILS = ['2gateless@gmail.com'];
 
 const CATEGORIES = {
   memory:    { name: '기억',    icon: '💭' },
@@ -718,9 +718,18 @@ document.getElementById('list-back').onclick = () => {
 };
 
 // ── DETAIL
-function openDetail(note) {
+let detailFrom = 'list'; // 'list' or 'search'
+
+function openDetail(note, from) {
   currentNote = note;
+  detailFrom = from || 'list';
   document.getElementById('detail-header-title').textContent = note.title || '제목 없음';
+
+  // 뒤로가기 버튼 텍스트 변경
+  const backBtn = document.getElementById('detail-back');
+  backBtn.textContent = detailFrom === 'search' ? '🏠' : '←';
+  backBtn.title = detailFrom === 'search' ? '홈으로' : '목록으로';
+
   const content = document.getElementById('detail-content');
   const imgs = note.images || [];
   const imgHtml = imgs.length > 0
@@ -736,7 +745,18 @@ function openDetail(note) {
   showAppScreen('detail');
 }
 
-document.getElementById('detail-back').onclick = () => showAppScreen('list');
+document.getElementById('detail-back').onclick = () => {
+  if (detailFrom === 'search') {
+    // 검색 결과로 진입했으면 홈으로
+    searchInput.value = '';
+    searchClear.style.display = 'none';
+    searchResults.style.display = 'none';
+    document.getElementById('cat-grid').style.display = '';
+    showAppScreen('home');
+  } else {
+    showAppScreen('list');
+  }
+};
 document.getElementById('btn-edit-detail').onclick = () => openEditModal(currentNote);
 document.getElementById('btn-del-detail').onclick = () => openDelModal(currentNote.id);
 
@@ -797,7 +817,7 @@ async function doSearch(keyword) {
       item.onclick = () => {
         currentCat = note.category;
         document.getElementById('list-title').textContent = (cat?.icon || '') + ' ' + (cat?.name || '');
-        openDetail(note);
+        openDetail(note, 'search');
       };
       searchResults.appendChild(item);
     });
