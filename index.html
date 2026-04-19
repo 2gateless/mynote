@@ -15,24 +15,24 @@
 <meta name="browsermode" content="application">
 <style>
   :root {
-    --sky: #B8D8EA;
-    --sky-light: #E8F4FA;
-    --sky-mid: #D0E9F5;
-    --sky-dark: #7BAEC8;
-    --sky-deep: #5A90B0;
-    --white: #F4FAF4;
-    --green-light: #EEF7EE;
-    --green-pale: #F4FAF4;
+    --sky: #9DCAE0;
+    --sky-light: #D8EDF7;
+    --sky-mid: #BDE0F0;
+    --sky-dark: #6A9EBA;
+    --sky-deep: #4A80A0;
+    --white: #E8F5E8;
+    --green-light: #DCEFD C;
+    --green-pale: #E8F5E8;
     --text: #2C4A5A;
     --text-light: #5A7A8A;
     --danger: #E07070;
-    --shadow: 0 4px 16px rgba(90,144,176,0.15);
+    --shadow: 0 4px 16px rgba(90,144,176,0.18);
     --radius: 16px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
-    background: linear-gradient(135deg, #E8F5E8 0%, #F0F8F0 50%, #F4FAF4 100%);
+    background: linear-gradient(135deg, #D8EED8 0%, #E4F2E4 50%, #ECF8EC 100%);
     min-height: 100vh; color: var(--text);
   }
 
@@ -262,18 +262,18 @@
   .detail-body {
     font-size: 15px; color: var(--text); line-height: 1.8;
     white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
-    background: #EEF7EE; border-radius: 16px; padding: 20px;
+    background: #D8EED8; border-radius: 16px; padding: 20px;
     box-shadow: var(--shadow); min-height: 120px;
   }
   .form-input, .form-textarea {
     width: 100%; padding: 13px 16px; border-radius: 12px;
-    border: 1.5px solid var(--sky-mid); background: #EEF7EE;
+    border: 1.5px solid var(--sky-mid); background: #D8EED8;
     font-size: 15px; color: var(--text); outline: none; transition: border-color 0.2s; font-family: inherit;
   }
-  .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: #E6F5E6; }
+  .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: #CCE8CC; }
   .img-upload-area {
     border: 2px dashed var(--sky); border-radius: 12px; padding: 18px;
-    text-align: center; cursor: pointer; background: #EEF7EE;
+    text-align: center; cursor: pointer; background: #D8EED8;
   }
   .detail-images { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 10px; }
   .detail-img {
@@ -439,7 +439,11 @@
     <div class="cat-grid" id="cat-grid">
       <div class="cat-row two">
         <div class="cat-card" data-cat="memory"><span class="cat-card-icon">💭</span><div class="cat-card-info"><div class="cat-card-name">기억</div><div class="cat-card-count" id="cnt-memory">메모 0개</div></div><span class="cat-card-badge" id="badge-memory" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="reference"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">참고사항</div><div class="cat-card-count" id="cnt-reference">메모 0개</div></div><span class="cat-card-badge" id="badge-reference" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="ref_science"><span class="cat-card-icon">🔬</span><div class="cat-card-info"><div class="cat-card-name">참고(과학)</div><div class="cat-card-count" id="cnt-ref_science">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_science" style="display:none">0</span></div>
+      </div>
+      <div class="cat-row two">
+        <div class="cat-card" data-cat="ref_art"><span class="cat-card-icon">🎨</span><div class="cat-card-info"><div class="cat-card-name">참고(예술)</div><div class="cat-card-count" id="cnt-ref_art">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_art" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="ref_others"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">참고(기타)</div><div class="cat-card-count" id="cnt-ref_others">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_others" style="display:none">0</span></div>
       </div>
       <div class="cat-row two">
         <div class="cat-card" data-cat="finance"><span class="cat-card-icon">💰</span><div class="cat-card-info"><div class="cat-card-name">금융</div><div class="cat-card-count" id="cnt-finance">메모 0개</div></div><span class="cat-card-badge" id="badge-finance" style="display:none">0</span></div>
@@ -448,9 +452,6 @@
       <div class="cat-row two">
         <div class="cat-card" data-cat="family"><span class="cat-card-icon">👨‍👩‍👧‍👦</span><div class="cat-card-info"><div class="cat-card-name">가족</div><div class="cat-card-count" id="cnt-family">메모 0개</div></div><span class="cat-card-badge" id="badge-family" style="display:none">0</span></div>
         <div class="cat-card" data-cat="office"><span class="cat-card-icon">💼</span><div class="cat-card-info"><div class="cat-card-name">사무실</div><div class="cat-card-count" id="cnt-office">메모 0개</div></div><span class="cat-card-badge" id="badge-office" style="display:none">0</span></div>
-      </div>
-      <div class="cat-row one">
-        <div class="cat-card" data-cat="others"><span class="cat-card-icon">📌</span><div class="cat-card-info"><div class="cat-card-name">기타</div><div class="cat-card-count" id="cnt-others">메모 0개</div></div><span class="cat-card-badge" id="badge-others" style="display:none">0</span></div>
       </div>
     </div>
 
@@ -560,13 +561,14 @@ const storage = getStorage(app);
 const ALLOWED_EMAILS = ['2gateless@gmail.com'];
 
 const CATEGORIES = {
-  memory:    { name: '기억',    icon: '💭' },
-  reference: { name: '참고사항', icon: '📋' },
-  finance:   { name: '금융',    icon: '💰' },
-  realty:    { name: '부동산',  icon: '🏠' },
-  family:    { name: '가족',    icon: '👨‍👩‍👧‍👦' },
-  office:    { name: '사무실',  icon: '💼' },
-  others:    { name: '기타',    icon: '📌' },
+  memory:      { name: '기억',       icon: '💭' },
+  ref_science: { name: '참고(과학)', icon: '🔬' },
+  ref_art:     { name: '참고(예술)', icon: '🎨' },
+  ref_others:  { name: '참고(기타)', icon: '📋' },
+  finance:     { name: '금융',       icon: '💰' },
+  realty:      { name: '부동산',     icon: '🏠' },
+  family:      { name: '가족',       icon: '👨‍👩‍👧‍👦' },
+  office:      { name: '사무실',     icon: '💼' },
 };
 
 let currentUser = null;
@@ -616,6 +618,7 @@ onAuthStateChanged(auth, user => {
       currentUser = user;
       renderUserBar();
       showRootScreen('app');
+      await migrateCategories();
       loadAllCounts();
     } else {
       document.getElementById('denied-email').textContent = user.email;
@@ -644,6 +647,26 @@ function renderUserBar() {
     av.className = 'user-bar-avatar-default';
     av.textContent = (currentUser.displayName || 'U')[0].toUpperCase();
   }
+}
+
+// ── 데이터 마이그레이션 (reference → ref_science, others → ref_others)
+async function migrateCategories() {
+  try {
+    const migrations = [
+      { from: 'reference', to: 'ref_science' },
+      { from: 'others',    to: 'ref_others'  },
+    ];
+    for (const { from, to } of migrations) {
+      const q = query(collection(db, 'notes'),
+        where('uid', '==', currentUser.uid),
+        where('category', '==', from));
+      const snap = await getDocs(q);
+      for (const d of snap.docs) {
+        await updateDoc(doc(db, 'notes', d.id), { category: to });
+      }
+      if (snap.size > 0) console.log(`마이그레이션: ${from} → ${to} (${snap.size}건)`);
+    }
+  } catch(e) { console.error('마이그레이션 오류:', e); }
 }
 
 // ── COUNTS
