@@ -593,6 +593,16 @@ function showToast(msg) {
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+function linkify(text) {
+  const urlRegex = /(https?:\/\/[^\s<>"]+)/g;
+  return String(text).split(urlRegex).map((part, i) => {
+    if (i % 2 === 1) {
+      const escaped = escHtml(part);
+      return `<a href="${escaped}" target="_blank" rel="noopener noreferrer" style="color:var(--sky-deep);word-break:break-all;text-decoration:underline;">${escaped}</a>`;
+    }
+    return escHtml(part);
+  }).join('');
+}
 function fmtDate(ts) {
   if (!ts?.toDate) return '';
   return ts.toDate().toLocaleDateString('ko-KR', {year:'numeric',month:'long',day:'numeric'});
@@ -782,7 +792,7 @@ function openDetail(note, from) {
       <span class="detail-cat-badge">${CATEGORIES[note.category]?.icon} ${CATEGORIES[note.category]?.name}</span>
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
-    <div class="detail-body">${escHtml(note.body || '')}</div>
+    <div class="detail-body">${linkify(note.body || '')}</div>
     ${imgHtml}`;
   showAppScreen('detail');
 }
