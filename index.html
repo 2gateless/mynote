@@ -359,6 +359,22 @@
   .empty-list .ei { font-size: 52px; margin-bottom: 14px; opacity: 0.45; }
   .empty-list p { color: var(--text-light); font-size: 14px; }
 
+  /* Tags */
+  .tag-radio { display: none; }
+  .tag-label {
+    padding: 6px 14px; border-radius: 20px; background: var(--sky-light);
+    color: var(--text-light); font-size: 13px; font-weight: 600;
+    cursor: pointer; border: 1.5px solid transparent; transition: all 0.2s;
+    user-select: none;
+  }
+  .tag-radio:checked + .tag-label {
+    background: var(--sky-dark); color: white; border-color: var(--sky-deep);
+  }
+  .detail-tag-badge {
+    cursor: pointer; background: var(--sky-dark); color: white; border-radius: 8px;
+    padding: 4px 12px; font-size: 13px; font-weight: 600;
+  }
+
   .app-footer {
     text-align: center; padding: 8px 20px 20px;
     font-size: 10px; color: #B0C8D8; letter-spacing: 0.04em;
@@ -443,11 +459,11 @@
       </div>
       <div class="cat-row two">
         <div class="cat-card" data-cat="ref_art"><span class="cat-card-icon">🎨</span><div class="cat-card-info"><div class="cat-card-name">예술</div><div class="cat-card-count" id="cnt-ref_art">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_art" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="ref_others"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">기타</div><div class="cat-card-count" id="cnt-ref_others">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_others" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="nature"><span class="cat-card-icon">🌿</span><div class="cat-card-info"><div class="cat-card-name">식물/곤충</div><div class="cat-card-count" id="cnt-nature">메모 0개</div></div><span class="cat-card-badge" id="badge-nature" style="display:none">0</span></div>
       </div>
       <div class="cat-row two">
-        <div class="cat-card" data-cat="finance"><span class="cat-card-icon">💰</span><div class="cat-card-info"><div class="cat-card-name">금융</div><div class="cat-card-count" id="cnt-finance">메모 0개</div></div><span class="cat-card-badge" id="badge-finance" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="realty"><span class="cat-card-icon">🏠</span><div class="cat-card-info"><div class="cat-card-name">부동산</div><div class="cat-card-count" id="cnt-realty">메모 0개</div></div><span class="cat-card-badge" id="badge-realty" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="ref_others"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">기타</div><div class="cat-card-count" id="cnt-ref_others">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_others" style="display:none">0</span></div>
+        <div class="cat-card" data-cat="finance_realty"><span class="cat-card-icon">💰</span><div class="cat-card-info"><div class="cat-card-name">금융/부동산</div><div class="cat-card-count" id="cnt-finance_realty">메모 0개</div></div><span class="cat-card-badge" id="badge-finance_realty" style="display:none">0</span></div>
       </div>
       <div class="cat-row two">
         <div class="cat-card" data-cat="family"><span class="cat-card-icon">👨‍👩‍👧‍👦</span><div class="cat-card-info"><div class="cat-card-name">가족</div><div class="cat-card-count" id="cnt-family">메모 0개</div></div><span class="cat-card-badge" id="badge-family" style="display:none">0</span></div>
@@ -497,6 +513,10 @@
     <div class="form-group">
       <label class="form-label">제목</label>
       <input class="form-input" id="note-title" placeholder="메모 제목" maxlength="60">
+    </div>
+    <div class="form-group" id="tag-group" style="display:none">
+      <label class="form-label">태그 (선택)</label>
+      <div id="tag-options" style="display:flex;gap:8px;flex-wrap:wrap"></div>
     </div>
     <div class="form-group">
       <label class="form-label">내용</label>
@@ -561,18 +581,24 @@ const storage = getStorage(app);
 const ALLOWED_EMAILS = ['2gateless@gmail.com'];
 
 const CATEGORIES = {
-  memory:      { name: '기억',   icon: '💭' },
-  ref_science: { name: '과학',   icon: '🔬' },
-  ref_art:     { name: '예술',   icon: '🎨' },
-  ref_others:  { name: '기타',   icon: '📋' },
-  finance:     { name: '금융',   icon: '💰' },
-  realty:      { name: '부동산', icon: '🏠' },
-  family:      { name: '가족',   icon: '👨‍👩‍👧‍👦' },
-  office:      { name: '사무실', icon: '💼' },
+  memory:         { name: '기억',       icon: '💭' },
+  ref_science:    { name: '과학',       icon: '🔬' },
+  ref_art:        { name: '예술',       icon: '🎨' },
+  nature:         { name: '식물/곤충',  icon: '🌿' },
+  ref_others:     { name: '기타',       icon: '📋' },
+  finance_realty: { name: '금융/부동산', icon: '💰' },
+  family:         { name: '가족',       icon: '👨‍👩‍👧‍👦' },
+  office:         { name: '사무실',     icon: '💼' },
+};
+
+const SUB_TAGS = {
+  nature: ['나무', '꽃', '양치식물', '지의류', '곤충', '기타'],
+  finance_realty: ['금융', '부동산']
 };
 
 let currentUser = null;
 let currentCat = null;
+let currentTag = null;
 let currentNote = null;
 let editingNoteId = null;
 let deleteTargetId = null;
@@ -672,6 +698,8 @@ async function migrateCategories() {
     const migrations = [
       { from: 'reference', to: 'ref_science' },
       { from: 'others',    to: 'ref_others'  },
+      { from: 'finance',   to: 'finance_realty' },
+      { from: 'realty',    to: 'finance_realty' },
     ];
     for (const { from, to } of migrations) {
       const q = query(collection(db, 'notes'),
@@ -715,10 +743,13 @@ document.getElementById('cat-grid').addEventListener('click', e => {
 });
 
 // ── LIST
-function openList(catId) {
+function openList(catId, tag = null) {
   currentCat = catId;
+  currentTag = tag;
   const cat = CATEGORIES[catId];
-  document.getElementById('list-title').textContent = cat.icon + ' ' + cat.name;
+  let titleText = cat.icon + ' ' + cat.name;
+  if (tag) titleText += ` > #${tag}`;
+  document.getElementById('list-title').textContent = titleText;
   showAppScreen('list');
   loadList(catId);
 }
@@ -732,7 +763,10 @@ function loadList(catId) {
     where('category', '==', catId),
     orderBy('createdAt', 'desc'));
   listUnsubscribe = onSnapshot(q, snap => {
-    const notes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    let notes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (currentTag) {
+      notes = notes.filter(n => n.tag === currentTag);
+    }
     renderList(notes);
   }, err => {
     content.innerHTML = `<div style="color:var(--danger);font-size:13px">${err.message}</div>`;
@@ -756,7 +790,7 @@ function renderList(notes) {
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
         <div class="note-list-title">${escHtml(note.title || '제목 없음')}</div>
-        <div class="note-list-date">${fmtDate(note.createdAt)}</div>
+        <div class="note-list-date">${note.tag ? `<span style="color:var(--sky-dark);font-weight:600;margin-right:6px">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
       </div>
       <span class="note-list-arrow">›</span>`;
     item.onclick = () => openDetail(note);
@@ -790,6 +824,7 @@ function openDetail(note, from) {
   content.innerHTML = `
     <div class="detail-meta">
       <span class="detail-cat-badge">${CATEGORIES[note.category]?.icon} ${CATEGORIES[note.category]?.name}</span>
+      ${note.tag ? `<span class="detail-tag-badge" onclick="openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
     <div class="detail-body">${linkify(note.body || '')}</div>
@@ -865,6 +900,7 @@ async function doSearch(keyword) {
       item.innerHTML = `
         <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
         <span class="search-result-cat">${cat?.icon} ${cat?.name}</span>
+        ${note.tag ? `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${escHtml(note.body || '')}</div>`;
       item.onclick = () => {
         currentCat = note.category;
@@ -883,12 +919,30 @@ document.getElementById('btn-add-note').onclick = openAddModal;
 document.getElementById('btn-cancel').onclick = closeModal;
 document.getElementById('btn-save').onclick = saveNote;
 
+function renderTagOptions(catId, selectedTag) {
+  const tg = document.getElementById('tag-group');
+  const to = document.getElementById('tag-options');
+  if (SUB_TAGS[catId]) {
+    tg.style.display = 'block';
+    to.innerHTML = SUB_TAGS[catId].map((tag, i) => `
+      <label style="display:inline-flex">
+        <input type="radio" name="note-tag" value="${tag}" class="tag-radio" ${tag === selectedTag ? 'checked' : ''}>
+        <span class="tag-label">${tag}</span>
+      </label>
+    `).join('');
+  } else {
+    tg.style.display = 'none';
+    to.innerHTML = '';
+  }
+}
+
 function openAddModal() {
   editingNoteId = null; pendingImages = []; existingImages = [];
   document.getElementById('note-title').value = '';
   document.getElementById('note-body').value = '';
   document.getElementById('img-preview-list').innerHTML = '';
   document.getElementById('modal-title').textContent = `새 메모 — ${CATEGORIES[currentCat]?.name}`;
+  renderTagOptions(currentCat, currentTag || null);
   document.getElementById('note-modal').style.display = 'flex';
 }
 function openEditModal(note) {
@@ -897,6 +951,7 @@ function openEditModal(note) {
   document.getElementById('note-title').value = note.title || '';
   document.getElementById('note-body').value = note.body || '';
   document.getElementById('modal-title').textContent = '메모 수정';
+  renderTagOptions(note.category, note.tag || null);
   renderImgPreviews();
   document.getElementById('note-modal').style.display = 'flex';
 }
@@ -968,6 +1023,8 @@ function renderImgPreviews() {
 async function saveNote() {
   const title = document.getElementById('note-title').value.trim();
   const body = document.getElementById('note-body').value.trim();
+  const tagRadio = document.querySelector('input[name="note-tag"]:checked');
+  const tag = tagRadio ? tagRadio.value : null;
   if (!title) { showToast('제목을 입력해주세요'); return; }
   const btn = document.getElementById('btn-save');
   btn.textContent = '저장 중...'; btn.disabled = true;
@@ -989,14 +1046,14 @@ async function saveNote() {
     }
     const allImages = [...existingImages, ...uploadedImgs];
     if (editingNoteId) {
-      await updateDoc(doc(db, 'notes', editingNoteId), { title, body, images: allImages, updatedAt: Timestamp.now() });
+      await updateDoc(doc(db, 'notes', editingNoteId), { title, body, tag, images: allImages, updatedAt: Timestamp.now() });
       showToast('메모가 수정되었어요 ✅');
       // 상세화면 갱신
-      currentNote = { ...currentNote, title, body, images: allImages };
+      currentNote = { ...currentNote, title, body, tag, images: allImages };
       openDetail(currentNote);
     } else {
       await addDoc(collection(db, 'notes'), {
-        uid: currentUser.uid, category: currentCat,
+        uid: currentUser.uid, category: currentCat, tag,
         title, body, images: allImages, createdAt: Timestamp.now()
       });
       showToast('메모가 저장되었어요 ✅');
