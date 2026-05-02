@@ -231,6 +231,21 @@
   .note-list-date { font-size: 12px; color: #9BB5C5; margin-top: 3px; }
   .note-list-arrow { color: var(--sky-dark); font-size: 16px; }
 
+  /* Tag Filter Bar */
+  .list-tag-filter {
+    padding: 0 20px 10px; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+  }
+  .list-tag-filter::-webkit-scrollbar { display: none; }
+  .tag-filter-btn {
+    padding: 6px 14px; border-radius: 20px; background: var(--white);
+    color: var(--text-light); font-size: 13px; font-weight: 600;
+    cursor: pointer; border: 1.5px solid var(--sky-light); transition: all 0.2s;
+    white-space: nowrap; box-shadow: 0 2px 8px rgba(90,144,176,0.08);
+  }
+  .tag-filter-btn.active {
+    background: var(--sky-dark); color: white; border-color: var(--sky-deep);
+  }
+
   /* ── DETAIL SCREEN ── */
   .detail-header {
     background: var(--white); padding: 16px 20px;
@@ -487,6 +502,7 @@
       <span class="list-header-title" id="list-title"></span>
       <button class="btn-add-sm" id="btn-add-note">✏️ 추가</button>
     </div>
+    <div class="list-tag-filter" id="list-tag-filter" style="display:none"></div>
     <div class="list-content" id="list-content"></div>
   </div>
 
@@ -748,10 +764,27 @@ function openList(catId, tag = null) {
   currentTag = tag;
   const cat = CATEGORIES[catId];
   let titleText = cat.icon + ' ' + cat.name;
-  if (tag) titleText += ` > #${tag}`;
   document.getElementById('list-title').textContent = titleText;
+  
+  renderListTagFilter(catId, tag);
+  
   showAppScreen('list');
   loadList(catId);
+}
+
+function renderListTagFilter(catId, activeTag) {
+  const filterBar = document.getElementById('list-tag-filter');
+  const tags = SUB_TAGS[catId];
+  if (!tags || tags.length === 0) {
+    filterBar.style.display = 'none';
+    return;
+  }
+  filterBar.style.display = 'flex';
+  let html = `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" onclick="openList('${catId}', null)">전체</div>`;
+  tags.forEach(t => {
+    html += `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" onclick="openList('${catId}', '${t}')">#${t}</div>`;
+  });
+  filterBar.innerHTML = html;
 }
 
 function loadList(catId) {
@@ -790,7 +823,7 @@ function renderList(notes) {
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
         <div class="note-list-title">${escHtml(note.title || '제목 없음')}</div>
-        <div class="note-list-date">${note.tag ? `<span style="color:var(--sky-dark);font-weight:600;margin-right:6px">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
+        <div class="note-list-date">${note.tag ? `<span onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
       </div>
       <span class="note-list-arrow">›</span>`;
     item.onclick = () => openDetail(note);
@@ -824,7 +857,7 @@ function openDetail(note, from) {
   content.innerHTML = `
     <div class="detail-meta">
       <span class="detail-cat-badge">${CATEGORIES[note.category]?.icon} ${CATEGORIES[note.category]?.name}</span>
-      ${note.tag ? `<span class="detail-tag-badge" onclick="openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
+      ${note.tag ? `<span class="detail-tag-badge" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
     <div class="detail-body">${linkify(note.body || '')}</div>
@@ -900,7 +933,7 @@ async function doSearch(keyword) {
       item.innerHTML = `
         <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
         <span class="search-result-cat">${cat?.icon} ${cat?.name}</span>
-        ${note.tag ? `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(note.tag)}</span>` : ''}
+        ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${escHtml(note.body || '')}</div>`;
       item.onclick = () => {
         currentCat = note.category;
