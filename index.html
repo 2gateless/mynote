@@ -275,10 +275,19 @@
   .detail-date { font-size: 12px; color: #9BB5C5; }
   .detail-body {
     font-size: 15px; color: var(--text); line-height: 1.8;
-    white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
+    word-break: break-word; overflow-wrap: break-word;
     background: #D8EED8; border-radius: 16px; padding: 20px;
     box-shadow: var(--shadow); min-height: 120px;
   }
+  .detail-body h1, .detail-body h2, .detail-body h3 { margin-bottom: 10px; margin-top: 14px; line-height: 1.4; }
+  .detail-body p { margin-bottom: 10px; }
+  .detail-body p:last-child { margin-bottom: 0; }
+  .detail-body ul, .detail-body ol { margin-left: 20px; margin-bottom: 10px; }
+  .detail-body a { color: var(--sky-deep); text-decoration: underline; }
+  .detail-body blockquote { border-left: 4px solid var(--sky-dark); padding-left: 12px; margin-bottom: 10px; color: var(--text-light); }
+  .detail-body code { background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 4px; font-family: monospace; }
+  .detail-body pre { background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin-bottom: 10px; }
+  .detail-body pre code { background: transparent; padding: 0; }
   .form-input, .form-textarea {
     width: 100%; padding: 13px 16px; border-radius: 12px;
     border: 1.5px solid var(--sky-mid); background: #D8EED8;
@@ -292,7 +301,22 @@
   .detail-images { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 10px; }
   .detail-img {
     width: calc(50% - 5px); border-radius: 12px; object-fit: cover;
-    max-height: 220px; border: 1.5px solid var(--sky-mid);
+    max-height: 220px; border: 1.5px solid var(--sky-mid); cursor: pointer;
+  }
+  
+  /* Image Viewer */
+  .img-viewer-overlay {
+    position: fixed; inset: 0; background: rgba(44,74,90,0.85); z-index: 1000;
+    display: none; align-items: center; justify-content: center; backdrop-filter: blur(4px);
+  }
+  .img-viewer-img {
+    max-width: 90%; max-height: 90vh; border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5); object-fit: contain;
+  }
+  .img-viewer-close {
+    position: absolute; top: 20px; right: 20px; background: rgba(255,255,255,0.2);
+    border: none; color: white; width: 40px; height: 40px; border-radius: 50%;
+    font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center;
   }
 
   /* ── MODALS ── */
@@ -409,6 +433,8 @@
     .detail-content { max-width: 640px; margin: 0 auto; }
   }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.3/purify.min.js"></script>
 </head>
 <body>
 
@@ -568,6 +594,12 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Image Viewer -->
+<div class="img-viewer-overlay" id="img-viewer" style="display:none">
+  <button class="img-viewer-close" id="img-viewer-close">✕</button>
+  <img class="img-viewer-img" id="img-viewer-img" src="">
+</div>
 
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
@@ -853,15 +885,24 @@ function openDetail(note, from) {
   const content = document.getElementById('detail-content');
   const imgs = note.images || [];
   const imgHtml = imgs.length > 0
-    ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${i.url}" alt="이미지">`).join('')}</div>`
+    ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${i.url}" alt="이미지" onclick="openImageViewer('${i.url}')">`).join('')}</div>`
     : '';
+
+  const rawBody = note.body || '';
+  let parsedBody = '';
+  if (window.marked && window.DOMPurify) {
+    parsedBody = DOMPurify.sanitize(marked.parse(rawBody, { breaks: true }));
+  } else {
+    parsedBody = linkify(rawBody);
+  }
+
   content.innerHTML = `
     <div class="detail-meta">
       <span class="detail-cat-badge">${CATEGORIES[note.category]?.icon} ${CATEGORIES[note.category]?.name}</span>
       ${note.tag ? `<span class="detail-tag-badge" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
-    <div class="detail-body">${linkify(note.body || '')}</div>
+    <div class="detail-body">${parsedBody}</div>
     ${imgHtml}`;
   showAppScreen('detail');
 }
@@ -1150,6 +1191,18 @@ function stopRecording() {
 // overlay 클릭 닫기
 document.getElementById('note-modal').addEventListener('click', e => { if(e.target.id==='note-modal') closeModal(); });
 document.getElementById('del-modal').addEventListener('click', e => { if(e.target.id==='del-modal') document.getElementById('del-modal').style.display='none'; });
+
+window.openImageViewer = function(url) {
+  const viewer = document.getElementById('img-viewer');
+  document.getElementById('img-viewer-img').src = url;
+  viewer.style.display = 'flex';
+};
+document.getElementById('img-viewer-close').onclick = () => {
+  document.getElementById('img-viewer').style.display = 'none';
+};
+document.getElementById('img-viewer').addEventListener('click', e => {
+  if(e.target.id === 'img-viewer') document.getElementById('img-viewer').style.display = 'none';
+});
 
 // ── 뒤로가기 (Android/PWA)
 function currentScreen() {
