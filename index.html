@@ -967,7 +967,7 @@ document.getElementById('img-input').onchange = e => {
 };
 
 async function compressAndAdd(file) {
-  const MAX_W = 1200, MAX_H = 1200, QUALITY = 0.75;
+  const MAX_W = 800, MAX_H = 800, QUALITY = 0.6;
   try {
     const dataUrl = await new Promise((res, rej) => {
       const reader = new FileReader();
