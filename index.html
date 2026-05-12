@@ -231,6 +231,33 @@
   .note-list-date { font-size: 12px; color: #9BB5C5; margin-top: 3px; }
   .note-list-arrow { color: var(--sky-dark); font-size: 16px; }
 
+  /* 핀 고정 스타일 */
+  .note-list-item.pinned {
+    background: #CDDFE8;
+    border-color: #9BBDD4;
+  }
+  .pin-badge {
+    font-size: 15px;
+    color: var(--sky-deep);
+    flex-shrink: 0;
+    opacity: 0.75;
+    margin-left: 2px;
+  }
+  /* 핀 고정 토글 버튼 (폼 내부) */
+  .pin-toggle-wrap {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 16px; border-radius: 12px;
+    background: var(--sky-light); border: 1.5px solid var(--sky-mid);
+    cursor: pointer; user-select: none; transition: all 0.2s;
+  }
+  .pin-toggle-wrap.active {
+    background: #C2D8E8; border-color: var(--sky-dark);
+  }
+  .pin-toggle-wrap input[type="checkbox"] { display: none; }
+  .pin-toggle-icon { font-size: 18px; }
+  .pin-toggle-label { flex: 1; font-size: 14px; font-weight: 600; color: var(--text); }
+  .pin-toggle-status { font-size: 12px; color: var(--text-light); }
+
   /* Tag Filter Bar */
   .list-tag-filter {
     padding: 0 20px 10px; display: flex; gap: 8px; flex-wrap: wrap;
@@ -567,6 +594,15 @@
       <button class="voice-btn" id="voice-btn" style="margin-top:10px">🎤 음성으로 입력</button>
     </div>
     <div class="form-group">
+      <label class="form-label">핀 고정</label>
+      <label class="pin-toggle-wrap" id="pin-toggle-wrap" for="note-pinned">
+        <input type="checkbox" id="note-pinned">
+        <span class="pin-toggle-icon">📌</span>
+        <span class="pin-toggle-label">중요 메모로 최상단에 고정</span>
+        <span class="pin-toggle-status" id="pin-toggle-status">고정 안 됨</span>
+      </label>
+    </div>
+    <div class="form-group">
       <label class="form-label">이미지 첨부</label>
       <div class="img-upload-area" id="img-upload-area">
         <p>📷 클릭하여 이미지 선택</p>
@@ -850,17 +886,26 @@ function renderList(notes) {
     </div>`;
     return;
   }
+  // 핀 고정된 메모를 최상단에, 핀된 것끼리는 pinnedAt 내림차순(최신 핀이 위)
+  const pinned = notes.filter(n => n.pinned).sort((a, b) => {
+    const ta = a.pinnedAt?.toMillis ? a.pinnedAt.toMillis() : 0;
+    const tb = b.pinnedAt?.toMillis ? b.pinnedAt.toMillis() : 0;
+    return tb - ta;
+  });
+  const unpinned = notes.filter(n => !n.pinned);
+  const sorted = [...pinned, ...unpinned];
+
   content.innerHTML = '';
-  notes.forEach(note => {
+  sorted.forEach(note => {
     const item = document.createElement('div');
-    item.className = 'note-list-item';
+    item.className = 'note-list-item' + (note.pinned ? ' pinned' : '');
     item.innerHTML = `
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
         <div class="note-list-title">${escHtml(note.title || '제목 없음')}</div>
         <div class="note-list-date">${note.tag ? `<span onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
       </div>
-      <span class="note-list-arrow">›</span>`;
+      ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : '<span class="note-list-arrow">›</span>'}`;
     item.onclick = () => openDetail(note);
     content.appendChild(item);
   });
@@ -1057,6 +1102,19 @@ function renderTagOptions(catId, selectedTag) {
   }
 }
 
+function setPinToggleUI(isPinned) {
+  const cb = document.getElementById('note-pinned');
+  const wrap = document.getElementById('pin-toggle-wrap');
+  const status = document.getElementById('pin-toggle-status');
+  cb.checked = isPinned;
+  if (isPinned) {
+    wrap.classList.add('active');
+    status.textContent = '📌 고정됨';
+  } else {
+    wrap.classList.remove('active');
+    status.textContent = '고정 안 됨';
+  }
+}
 function openAddModal() {
   editingNoteId = null; pendingImages = []; existingImages = [];
   document.getElementById('note-title').value = '';
@@ -1064,6 +1122,7 @@ function openAddModal() {
   document.getElementById('img-preview-list').innerHTML = '';
   document.getElementById('modal-title').textContent = `새 메모 — ${CATEGORIES[currentCat]?.name}`;
   renderTagOptions(currentCat, currentTag || null);
+  setPinToggleUI(false);
   document.getElementById('note-modal').style.display = 'flex';
 }
 function openEditModal(note) {
@@ -1073,6 +1132,7 @@ function openEditModal(note) {
   document.getElementById('note-body').value = note.body || '';
   document.getElementById('modal-title').textContent = '메모 수정';
   renderTagOptions(note.category, note.tag || null);
+  setPinToggleUI(!!note.pinned);
   renderImgPreviews();
   document.getElementById('note-modal').style.display = 'flex';
 }
@@ -1146,6 +1206,7 @@ async function saveNote() {
   const body = document.getElementById('note-body').value.trim();
   const tagRadio = document.querySelector('input[name="note-tag"]:checked');
   const tag = tagRadio ? tagRadio.value : null;
+  const pinned = document.getElementById('note-pinned').checked;
   if (!title) { showToast('제목을 입력해주세요'); return; }
   const btn = document.getElementById('btn-save');
   btn.textContent = '저장 중...'; btn.disabled = true;
@@ -1166,18 +1227,29 @@ async function saveNote() {
       }
     }
     const allImages = [...existingImages, ...uploadedImgs];
+    // 핀 고정 상태에 따라 pinnedAt 처리
+    const prevPinned = editingNoteId ? !!currentNote?.pinned : false;
+    const pinnedAt = pinned
+      ? (prevPinned && currentNote?.pinnedAt ? currentNote.pinnedAt : Timestamp.now())
+      : null;
     if (editingNoteId) {
-      await updateDoc(doc(db, 'notes', editingNoteId), { title, body, tag, images: allImages, updatedAt: Timestamp.now() });
-      showToast('메모가 수정되었어요 ✅');
+      await updateDoc(doc(db, 'notes', editingNoteId), {
+        title, body, tag, images: allImages,
+        pinned, pinnedAt,
+        updatedAt: Timestamp.now()
+      });
+      showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       // 상세화면 갱신
-      currentNote = { ...currentNote, title, body, tag, images: allImages };
+      currentNote = { ...currentNote, title, body, tag, images: allImages, pinned, pinnedAt };
       openDetail(currentNote);
     } else {
       await addDoc(collection(db, 'notes'), {
         uid: currentUser.uid, category: currentCat, tag,
-        title, body, images: allImages, createdAt: Timestamp.now()
+        title, body, images: allImages,
+        pinned, pinnedAt,
+        createdAt: Timestamp.now()
       });
-      showToast('메모가 저장되었어요 ✅');
+      showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
     closeModal();
   } catch(e) { showToast('저장 실패: ' + e.message); }
@@ -1233,6 +1305,13 @@ function stopRecording() {
   vb.textContent = '🎤 음성으로 입력';
   vb.classList.remove('recording');
 }
+
+// 핀 토글 인터랙션
+document.getElementById('pin-toggle-wrap').addEventListener('click', () => {
+  const cb = document.getElementById('note-pinned');
+  cb.checked = !cb.checked;
+  setPinToggleUI(cb.checked);
+});
 
 // overlay 클릭 닫기
 document.getElementById('note-modal').addEventListener('click', e => { if(e.target.id==='note-modal') closeModal(); });
