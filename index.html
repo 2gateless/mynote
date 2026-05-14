@@ -412,6 +412,30 @@
     animation: slideUp 0.3s ease;
   }
 
+  /* Share Modal */
+  .share-modal {
+    background: var(--white); border-radius: 24px 24px 0 0; padding: 36px 24px 48px;
+    width: 100%; max-width: 640px; text-align: center;
+    box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
+    animation: slideUp 0.3s ease;
+  }
+  .share-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 24px;
+  }
+  .share-btn {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    background: transparent; border: none; cursor: pointer; font-size: 13px; color: var(--text);
+  }
+  .share-icon {
+    width: 52px; height: 52px; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 26px; color: white;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1); transition: transform 0.2s;
+  }
+  .share-btn:hover .share-icon { transform: translateY(-2px); }
+  .share-gmail { background: #EA4335; }
+  .share-kakao { background: #FEE500; color: #3A2929; }
+  .share-telegram { background: #2AABEE; }
+  .share-drive { background: #1FA463; }
+
   .toast {
     position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
     background: var(--text); color: white; padding: 12px 24px; border-radius: 14px;
@@ -447,7 +471,7 @@
 
   /* PC */
   @media (min-width: 640px) {
-    .modal, .del-modal {
+    .modal, .del-modal, .share-modal {
       border-radius: 24px; margin: auto; max-height: 85vh;
       animation: fadeIn 0.2s ease;
     }
@@ -566,6 +590,7 @@
       <button class="btn-back" id="detail-back">←</button>
       <span class="detail-header-title" id="detail-header-title"></span>
       <div class="detail-actions">
+        <button class="btn-share-detail" id="btn-share-detail" style="padding: 8px 14px; border-radius: 10px; border: none; background: #E8F5E9; color: #2E7D32; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s;">📤 공유</button>
         <button class="btn-edit-detail" id="btn-edit-detail">✏️ 수정</button>
         <button class="btn-del-detail" id="btn-del-detail">🗑️ 삭제</button>
       </div>
@@ -628,6 +653,34 @@
       <button class="btn-secondary" id="del-cancel">취소</button>
       <button class="btn-primary" id="del-confirm" style="background:linear-gradient(135deg,#E07070,#C05050)">삭제</button>
     </div>
+  </div>
+</div>
+
+<!-- Share Modal -->
+<div class="modal-overlay" id="share-modal" style="display:none">
+  <div class="share-modal">
+    <div class="modal-handle"></div>
+    <div style="font-size:48px;margin-bottom:14px">📤</div>
+    <h2 style="margin-bottom:8px;font-size:20px">메모 공유하기</h2>
+    <div class="share-grid">
+      <button class="share-btn" id="share-gmail">
+        <div class="share-icon share-gmail">📧</div>
+        <span>Gmail</span>
+      </button>
+      <button class="share-btn" id="share-kakao">
+        <div class="share-icon share-kakao" style="color:black">💬</div>
+        <span>KakaoTalk</span>
+      </button>
+      <button class="share-btn" id="share-telegram">
+        <div class="share-icon share-telegram">✈️</div>
+        <span>Telegram</span>
+      </button>
+      <button class="share-btn" id="share-drive">
+        <div class="share-icon share-drive">☁️</div>
+        <span>Drive</span>
+      </button>
+    </div>
+    <button class="btn-secondary" id="share-cancel" style="margin-top:28px;width:100%">취소</button>
   </div>
 </div>
 
@@ -1273,6 +1326,59 @@ document.getElementById('del-confirm').onclick = async () => {
   } catch(e) { showToast('삭제 실패: ' + e.message); }
 };
 
+// ── SHARE
+document.getElementById('btn-share-detail').onclick = () => {
+  document.getElementById('share-modal').style.display = 'flex';
+};
+document.getElementById('share-cancel').onclick = () => {
+  document.getElementById('share-modal').style.display = 'none';
+};
+
+function getShareText() {
+  if (!currentNote) return { title: '', body: '' };
+  return {
+    title: currentNote.title || '제목 없음',
+    body: currentNote.body || ''
+  };
+}
+
+document.getElementById('share-gmail').onclick = () => {
+  const { title, body } = getShareText();
+  window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`, '_blank');
+  document.getElementById('share-modal').style.display = 'none';
+};
+
+document.getElementById('share-telegram').onclick = () => {
+  const { title, body } = getShareText();
+  const text = `${title}\n\n${body}`;
+  window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
+  document.getElementById('share-modal').style.display = 'none';
+};
+
+document.getElementById('share-kakao').onclick = () => {
+  const { title, body } = getShareText();
+  const text = `${title}\n\n${body}`;
+  document.getElementById('share-modal').style.display = 'none';
+  
+  if (/android/i.test(navigator.userAgent)) {
+    location.href = `intent://send?text=${encodeURIComponent(text)}#Intent;scheme=kakaolink;package=com.kakao.talk;end`;
+  } else if (navigator.share) {
+    navigator.share({ title: title, text: text }).catch(console.error);
+  } else {
+    showToast('카카오톡 공유는 모바일에서 지원됩니다.');
+  }
+};
+
+document.getElementById('share-drive').onclick = () => {
+  const { title, body } = getShareText();
+  document.getElementById('share-modal').style.display = 'none';
+  if (navigator.share) {
+    navigator.share({ title: title, text: body }).catch(console.error);
+  } else {
+    showToast('Google Drive 공유는 모바일 기기에서 지원됩니다.');
+  }
+};
+
 // ── VOICE
 document.getElementById('voice-btn').onclick = () => {
   if (isRecording) { stopRecording(); return; }
@@ -1316,6 +1422,7 @@ document.getElementById('pin-toggle-wrap').addEventListener('click', () => {
 // overlay 클릭 닫기
 document.getElementById('note-modal').addEventListener('click', e => { if(e.target.id==='note-modal') closeModal(); });
 document.getElementById('del-modal').addEventListener('click', e => { if(e.target.id==='del-modal') document.getElementById('del-modal').style.display='none'; });
+document.getElementById('share-modal').addEventListener('click', e => { if(e.target.id==='share-modal') document.getElementById('share-modal').style.display='none'; });
 
 window.openImageViewer = function(url) {
   const viewer = document.getElementById('img-viewer');
@@ -1333,6 +1440,7 @@ document.getElementById('img-viewer').addEventListener('click', e => {
 function currentScreen() {
   if (document.getElementById('note-modal').style.display !== 'none') return 'modal';
   if (document.getElementById('del-modal').style.display !== 'none') return 'del-modal';
+  if (document.getElementById('share-modal').style.display !== 'none') return 'share-modal';
   const active = document.querySelector('.screen.active');
   return active ? active.id.replace('screen-', '') : 'home';
 }
@@ -1341,6 +1449,7 @@ window.addEventListener('popstate', e => {
   const screen = currentScreen();
   if (screen === 'modal') { closeModal(); history.pushState(null, '', location.href); return; }
   if (screen === 'del-modal') { document.getElementById('del-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
+  if (screen === 'share-modal') { document.getElementById('share-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
   if (screen === 'detail') { showAppScreen('list'); history.pushState(null, '', location.href); return; }
   if (screen === 'list') {
     if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
