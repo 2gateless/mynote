@@ -1344,15 +1344,29 @@ function getShareText() {
 
 document.getElementById('share-gmail').onclick = () => {
   const { title, body } = getShareText();
-  window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`, '_blank');
   document.getElementById('share-modal').style.display = 'none';
+  
+  if (/android|iphone|ipad|ipod/i.test(navigator.userAgent) && navigator.share) {
+    // 모바일 환경에서 안전하게 네이티브 공유 다이얼로그 호출 (오류 방지)
+    navigator.share({ title: title, text: body }).catch(console.error);
+  } else {
+    // 데스크톱 또는 네이티브 공유 미지원 시 기본 메일 클라이언트 호출
+    location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+  }
 };
 
 document.getElementById('share-telegram').onclick = () => {
   const { title, body } = getShareText();
   const text = `${title}\n\n${body}`;
-  window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
   document.getElementById('share-modal').style.display = 'none';
+  
+  if (/android|iphone|ipad|ipod/i.test(navigator.userAgent) && navigator.share) {
+    // 텔레그램 웹 팝업 오류 방지를 위해 모바일 네이티브 공유 호출
+    navigator.share({ title: title, text: text }).catch(console.error);
+  } else {
+    // 데스크톱 텔레그램
+    window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
+  }
 };
 
 document.getElementById('share-kakao').onclick = () => {
