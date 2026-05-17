@@ -315,6 +315,14 @@
   .detail-body code { background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 4px; font-family: monospace; }
   .detail-body pre { background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin-bottom: 10px; }
   .detail-body pre code { background: transparent; padding: 0; }
+  /* 마크다운으로 삽입된 이미지 스타일 */
+  .detail-body img {
+    max-width: 100%; border-radius: 10px;
+    border: 1.5px solid var(--sky-mid);
+    margin: 8px 0; display: block;
+    cursor: pointer;
+  }
+
   .form-input, .form-textarea {
     width: 100%; padding: 13px 16px; border-radius: 12px;
     border: 1.5px solid var(--sky-mid); background: #D8EED8;
@@ -391,6 +399,7 @@
     font-family: inherit;
   }
   .voice-btn.recording { background: #FDEAEA; border-color: var(--danger); color: var(--danger); animation: pulse 1s infinite; }
+  .voice-btn.uploading { background: #E8F0FE; border-color: #4285F4; color: #4285F4; animation: pulse 0.8s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 
   .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
@@ -616,7 +625,11 @@
     <div class="form-group">
       <label class="form-label">내용</label>
       <textarea class="form-textarea" id="note-body" placeholder="메모 내용을 입력하세요..."></textarea>
-      <button class="voice-btn" id="voice-btn" style="margin-top:10px">🎤 음성으로 입력</button>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="voice-btn" id="voice-btn" style="flex:1">🎤 음성으로 입력</button>
+        <button class="voice-btn" id="inline-img-btn" style="flex:none;padding:12px 16px;white-space:nowrap">🖼️ 본문에 이미지</button>
+        <input type="file" id="inline-img-input" accept="image/*" style="display:none">
+      </div>
     </div>
     <div class="form-group">
       <label class="form-label">핀 고정</label>
@@ -1024,7 +1037,7 @@ function openDetail(note, from) {
       });
     }
 
-    // ④ DOMPurify — KaTeX가 생성하는 태그/속성 허용
+    // ④ DOMPurify — KaTeX가 생성하는 태그/속성 허용 + 이미지 src/alt 허용
     parsedBody = DOMPurify.sanitize(html, {
       ADD_TAGS: ['math', 'mrow', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac',
                  'msubsup', 'mover', 'munder', 'moverunder', 'menclose',
@@ -1034,7 +1047,8 @@ function openDetail(note, from) {
                  'focusable', 'role', 'viewBox', 'width', 'height',
                  'preserveAspectRatio', 'fill', 'stroke', 'stroke-width',
                  'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r',
-                 'rx', 'ry', 'transform', 'points', 'encoding']
+                 'rx', 'ry', 'transform', 'points', 'encoding',
+                 'src', 'alt', 'loading', 'decoding']  // 마크다운 이미지 렌더링을 위해 추가
     });
   } else {
     parsedBody = linkify(rawBody);
@@ -1198,6 +1212,65 @@ document.getElementById('img-upload-area').onclick = () => document.getElementBy
 document.getElementById('img-input').onchange = e => {
   Array.from(e.target.files).forEach(f => compressAndAdd(f));
   e.target.value = '';
+};
+
+// ── 본문 안에 이미지 마크다운으로 삽입
+document.getElementById('inline-img-btn').onclick = () => document.getElementById('inline-img-input').click();
+document.getElementById('inline-img-input').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const btn = document.getElementById('inline-img-btn');
+  btn.textContent = '⏳ 업로드 중...';
+  btn.classList.add('uploading');
+  btn.disabled = true;
+  try {
+    // 압축 (최대 1200px, 품질 0.75 — 본문 이미지는 조금 더 선명하게)
+    const MAX = 1200, QUALITY = 0.75;
+    const dataUrl = await new Promise((res, rej) => {
+      const reader = new FileReader();
+      reader.onload = ev => res(ev.target.result);
+      reader.onerror = rej;
+      reader.readAsDataURL(file);
+    });
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = dataUrl;
+    });
+    let { width: w, height: h } = img;
+    if (w > MAX || h > MAX) {
+      const ratio = Math.min(MAX / w, MAX / h);
+      w = Math.round(w * ratio); h = Math.round(h * ratio);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    const compressed = canvas.toDataURL('image/jpeg', QUALITY);
+
+    // Firebase Storage 업로드
+    const path = `notes/${currentUser.uid}/inline_${Date.now()}.jpg`;
+    const sRef = ref(storage, path);
+    await uploadString(sRef, compressed.split(',')[1], 'base64');
+    const url = await getDownloadURL(sRef);
+
+    // 커서 위치에 마크다운 이미지 문법 삽입
+    const ta = document.getElementById('note-body');
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const mdImg = `\n![이미지](${url})\n`;
+    ta.value = ta.value.slice(0, start) + mdImg + ta.value.slice(end);
+    ta.selectionStart = ta.selectionEnd = start + mdImg.length;
+    ta.focus();
+    showToast('이미지가 본문에 삽입되었어요 🖼️');
+  } catch(e) {
+    showToast('업로드 실패: ' + e.message);
+  } finally {
+    btn.textContent = '🖼️ 본문에 이미지';
+    btn.classList.remove('uploading');
+    btn.disabled = false;
+  }
 };
 
 async function compressAndAdd(file) {
