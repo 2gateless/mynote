@@ -1225,8 +1225,8 @@ document.getElementById('inline-img-input').onchange = async e => {
   btn.classList.add('uploading');
   btn.disabled = true;
   try {
-    // 압축 (최대 1200px, 품질 0.75 — 본문 이미지는 조금 더 선명하게)
-    const MAX = 1200, QUALITY = 0.75;
+    // 압축: 최대 800px, 품질 0.6 (폰 화면에 충분한 해상도, 용량 최소화)
+    const MAX = 800, QUALITY = 0.6;
     const dataUrl = await new Promise((res, rej) => {
       const reader = new FileReader();
       reader.onload = ev => res(ev.target.result);
