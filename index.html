@@ -428,22 +428,26 @@
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
     animation: slideUp 0.3s ease;
   }
-  .share-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 24px;
+  .share-app-list {
+    display: flex; flex-direction: column; gap: 10px; margin-top: 20px;
   }
-  .share-btn {
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
-    background: transparent; border: none; cursor: pointer; font-size: 13px; color: var(--text);
+  .share-app-btn {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 18px; border-radius: 14px; border: 1.5px solid var(--sky-light);
+    background: var(--sky-light); cursor: pointer; font-size: 15px; font-weight: 600;
+    color: var(--text); transition: all 0.18s; text-align: left;
   }
-  .share-icon {
-    width: 52px; height: 52px; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 26px; color: white;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1); transition: transform 0.2s;
+  .share-app-btn:hover { background: var(--sky-mid); border-color: var(--sky); }
+  .share-app-icon {
+    width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center;
+    justify-content: center; font-size: 22px; color: white; flex-shrink: 0;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.12);
   }
-  .share-btn:hover .share-icon { transform: translateY(-2px); }
-  .share-gmail { background: #EA4335; }
-  .share-kakao { background: #FEE500; color: #3A2929; }
-  .share-telegram { background: #2AABEE; }
-  .share-drive { background: #1FA463; }
+  .share-gmail-bg { background: #EA4335; }
+  .share-kakao-bg { background: #FEE500; }
+  .share-telegram-bg { background: #2AABEE; }
+  .share-drive-bg { background: #1FA463; }
+  .share-native-bg { background: var(--sky-dark); }
 
   .toast {
     position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
@@ -626,8 +630,8 @@
       <label class="form-label">내용</label>
       <textarea class="form-textarea" id="note-body" placeholder="메모 내용을 입력하세요..."></textarea>
       <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="voice-btn" id="voice-btn" style="flex:1">🎤 음성으로 입력</button>
-        <button class="voice-btn" id="inline-img-btn" style="flex:none;padding:7px 11px;font-size:12px;white-space:nowrap">🖼️ 이미지 삽입</button>
+        <button class="voice-btn" id="voice-btn" style="flex:1">🎤 음성 입력</button>
+        <button class="voice-btn" id="inline-img-btn" style="flex:1;white-space:nowrap">🖼️ 이미지 삽입</button>
         <input type="file" id="inline-img-input" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif" style="display:none">
       </div>
     </div>
@@ -673,27 +677,27 @@
 <div class="modal-overlay" id="share-modal" style="display:none">
   <div class="share-modal">
     <div class="modal-handle"></div>
-    <div style="font-size:48px;margin-bottom:14px">📤</div>
-    <h2 style="margin-bottom:8px;font-size:20px">메모 공유하기</h2>
-    <div class="share-grid">
-      <button class="share-btn" id="share-gmail">
-        <div class="share-icon share-gmail">📧</div>
-        <span>Gmail</span>
+    <h2 style="margin-bottom:4px;font-size:20px">메모 공유하기</h2>
+    <p style="font-size:13px;color:var(--text-light);margin-bottom:4px">공유할 앱을 선택하세요</p>
+    <div class="share-app-list">
+      <button class="share-app-btn" id="share-gmail">
+        <div class="share-app-icon share-gmail-bg">📧</div>
+        <span>Gmail / 이메일</span>
       </button>
-      <button class="share-btn" id="share-kakao">
-        <div class="share-icon share-kakao" style="color:black">💬</div>
-        <span>KakaoTalk</span>
+      <button class="share-app-btn" id="share-kakao">
+        <div class="share-app-icon share-kakao-bg" style="color:#3A2929">💬</div>
+        <span>카카오톡</span>
       </button>
-      <button class="share-btn" id="share-telegram">
-        <div class="share-icon share-telegram">✈️</div>
+      <button class="share-app-btn" id="share-telegram">
+        <div class="share-app-icon share-telegram-bg">✈️</div>
         <span>Telegram</span>
       </button>
-      <button class="share-btn" id="share-drive">
-        <div class="share-icon share-drive">☁️</div>
-        <span>Drive</span>
+      <button class="share-app-btn" id="share-native">
+        <div class="share-app-icon share-native-bg">📤</div>
+        <span>다른 앱으로 공유</span>
       </button>
     </div>
-    <button class="btn-secondary" id="share-cancel" style="margin-top:28px;width:100%">취소</button>
+    <button class="btn-secondary" id="share-cancel" style="margin-top:20px;width:100%">취소</button>
   </div>
 </div>
 
@@ -1415,54 +1419,78 @@ function getShareText() {
   };
 }
 
+// Gmail / 이메일 공유
 document.getElementById('share-gmail').onclick = () => {
   const { title, body } = getShareText();
   document.getElementById('share-modal').style.display = 'none';
-  
-  if (/android|iphone|ipad|ipod/i.test(navigator.userAgent) && navigator.share) {
-    // 모바일 환경에서 안전하게 네이티브 공유 다이얼로그 호출 (오류 방지)
-    navigator.share({ title: title, text: body }).catch(console.error);
+  // 모바일: 네이티브 공유로 Gmail 선택 가능 / 데스크톱: mailto 링크
+  if (navigator.share) {
+    navigator.share({ title, text: body })
+      .catch(err => { if (err.name !== 'AbortError') location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`; });
   } else {
-    // 데스크톱 또는 네이티브 공유 미지원 시 기본 메일 클라이언트 호출
     location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
   }
 };
 
-document.getElementById('share-telegram').onclick = () => {
-  const { title, body } = getShareText();
-  const text = `${title}\n\n${body}`;
-  document.getElementById('share-modal').style.display = 'none';
-  
-  if (/android|iphone|ipad|ipod/i.test(navigator.userAgent) && navigator.share) {
-    // 텔레그램 웹 팝업 오류 방지를 위해 모바일 네이티브 공유 호출
-    navigator.share({ title: title, text: text }).catch(console.error);
-  } else {
-    // 데스크톱 텔레그램
-    window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
-  }
-};
-
+// 카카오톡 공유 — Android: 카카오톡 URL 스킴 → 실패 시 navigator.share 폴백
 document.getElementById('share-kakao').onclick = () => {
   const { title, body } = getShareText();
   const text = `${title}\n\n${body}`;
   document.getElementById('share-modal').style.display = 'none';
-  
-  if (/android/i.test(navigator.userAgent)) {
-    location.href = `intent://send?text=${encodeURIComponent(text)}#Intent;scheme=kakaolink;package=com.kakao.talk;end`;
+
+  const isAndroid = /android/i.test(navigator.userAgent);
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+  if (isAndroid) {
+    // Android: 카카오톡 공유 인텐트 (설치된 경우 바로 열림)
+    const intentUrl = `intent://send#Intent;action=android.intent.action.SEND;type=text/plain;S.android.intent.extra.TEXT=${encodeURIComponent(text)};package=com.kakao.talk;end`;
+    // 타이머로 폴백 처리 (앱 없을 경우)
+    const timer = setTimeout(() => {
+      if (navigator.share) navigator.share({ title, text }).catch(console.error);
+      else showToast('카카오톡이 설치되어 있지 않아요');
+    }, 1500);
+    window.addEventListener('pagehide', () => clearTimeout(timer), { once: true });
+    window.addEventListener('blur', () => clearTimeout(timer), { once: true });
+    location.href = intentUrl;
+  } else if (isIOS) {
+    // iOS: 카카오톡 URL 스킴
+    const kakaoUrl = `kakaolink://send?text=${encodeURIComponent(text)}`;
+    const timer = setTimeout(() => {
+      if (navigator.share) navigator.share({ title, text }).catch(console.error);
+      else showToast('카카오톡이 설치되어 있지 않아요');
+    }, 1500);
+    window.addEventListener('pagehide', () => clearTimeout(timer), { once: true });
+    window.addEventListener('blur', () => clearTimeout(timer), { once: true });
+    location.href = kakaoUrl;
   } else if (navigator.share) {
-    navigator.share({ title: title, text: text }).catch(console.error);
+    navigator.share({ title, text }).catch(console.error);
   } else {
     showToast('카카오톡 공유는 모바일에서 지원됩니다.');
   }
 };
 
-document.getElementById('share-drive').onclick = () => {
+// Telegram 공유
+document.getElementById('share-telegram').onclick = () => {
+  const { title, body } = getShareText();
+  const text = `${title}\n\n${body}`;
+  document.getElementById('share-modal').style.display = 'none';
+  if (navigator.share) {
+    // 모바일: 네이티브 공유 다이얼로그에서 Telegram 선택
+    navigator.share({ title, text })
+      .catch(err => { if (err.name !== 'AbortError') window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank'); });
+  } else {
+    window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
+  }
+};
+
+// 다른 앱으로 공유 (네이티브 공유 시트)
+document.getElementById('share-native').onclick = () => {
   const { title, body } = getShareText();
   document.getElementById('share-modal').style.display = 'none';
   if (navigator.share) {
-    navigator.share({ title: title, text: body }).catch(console.error);
+    navigator.share({ title, text: body }).catch(console.error);
   } else {
-    showToast('Google Drive 공유는 모바일 기기에서 지원됩니다.');
+    showToast('이 브라우저에서는 공유 기능을 지원하지 않아요');
   }
 };
 
@@ -1495,7 +1523,7 @@ function stopRecording() {
   if (recognition) { try { recognition.stop(); } catch(e){} recognition = null; }
   isRecording = false;
   const vb = document.getElementById('voice-btn');
-  vb.textContent = '🎤 음성으로 입력';
+  vb.textContent = '🎤 음성 입력';
   vb.classList.remove('recording');
 }
 
