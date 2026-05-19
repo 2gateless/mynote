@@ -354,6 +354,30 @@
     border: none; color: white; width: 40px; height: 40px; border-radius: 50%;
     font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center;
   }
+  .img-viewer-download {
+    position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+    background: rgba(255,255,255,0.22); backdrop-filter: blur(8px);
+    border: 1.5px solid rgba(255,255,255,0.4); color: white;
+    padding: 12px 28px; border-radius: 24px; font-size: 15px; font-weight: 700;
+    cursor: pointer; display: flex; align-items: center; gap: 8px;
+    transition: background 0.2s; white-space: nowrap;
+  }
+  .img-viewer-download:hover { background: rgba(255,255,255,0.35); }
+
+  /* 이미지 다운로드 컨텍스트 메뉴 */
+  .img-ctx-menu {
+    position: fixed; z-index: 2000;
+    background: var(--white); border-radius: 14px;
+    box-shadow: 0 8px 32px rgba(44,74,90,0.22); padding: 8px 0;
+    min-width: 180px; overflow: hidden;
+    animation: fadeIn 0.15s ease;
+  }
+  .img-ctx-item {
+    padding: 13px 20px; font-size: 15px; font-weight: 600; color: var(--text);
+    cursor: pointer; display: flex; align-items: center; gap: 10px;
+    transition: background 0.15s;
+  }
+  .img-ctx-item:hover { background: var(--sky-light); }
 
   /* ── MODALS ── */
   .modal-overlay {
@@ -708,6 +732,13 @@
 <div class="img-viewer-overlay" id="img-viewer" style="display:none">
   <button class="img-viewer-close" id="img-viewer-close">✕</button>
   <img class="img-viewer-img" id="img-viewer-img" src="">
+  <button class="img-viewer-download" id="img-viewer-download">⬇️ 이미지 저장</button>
+</div>
+
+<!-- Image Context Menu -->
+<div class="img-ctx-menu" id="img-ctx-menu" style="display:none">
+  <div class="img-ctx-item" id="img-ctx-view">🔍 크게 보기</div>
+  <div class="img-ctx-item" id="img-ctx-download">⬇️ 이미지 저장</div>
 </div>
 
 <script type="module">
@@ -1540,17 +1571,125 @@ document.getElementById('note-modal').addEventListener('click', e => { if(e.targ
 document.getElementById('del-modal').addEventListener('click', e => { if(e.target.id==='del-modal') document.getElementById('del-modal').style.display='none'; });
 document.getElementById('share-modal').addEventListener('click', e => { if(e.target.id==='share-modal') document.getElementById('share-modal').style.display='none'; });
 
+// ── 이미지 다운로드
+async function downloadImage(url) {
+  showToast('이미지 저장 중...');
+  try {
+    const response = await fetch(url);
+    const blob = await response.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ext = blob.type.includes('png') ? 'png' : blob.type.includes('gif') ? 'gif' : blob.type.includes('webp') ? 'webp' : 'jpg';
+    a.href = blobUrl;
+    a.download = `mynote_image_${Date.now()}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    showToast('이미지가 저장되었어요 ✅');
+  } catch(e) {
+    // fetch 실패 시 새 탭으로 열기 (폴백)
+    window.open(url, '_blank');
+    showToast('새 탭에서 이미지를 길게 눌러 저장하세요');
+  }
+}
+
 window.openImageViewer = function(url) {
   const viewer = document.getElementById('img-viewer');
   document.getElementById('img-viewer-img').src = url;
+  document.getElementById('img-viewer-download').dataset.url = url;
   viewer.style.display = 'flex';
 };
 document.getElementById('img-viewer-close').onclick = () => {
   document.getElementById('img-viewer').style.display = 'none';
 };
+document.getElementById('img-viewer-download').onclick = () => {
+  const url = document.getElementById('img-viewer-download').dataset.url;
+  if (url) downloadImage(url);
+};
 document.getElementById('img-viewer').addEventListener('click', e => {
   if(e.target.id === 'img-viewer') document.getElementById('img-viewer').style.display = 'none';
 });
+
+// ── 이미지 컨텍스트 메뉴 (우클릭 / 롱프레스)
+let ctxMenuUrl = null;
+let longPressTimer = null;
+const ctxMenu = document.getElementById('img-ctx-menu');
+
+function showImgCtxMenu(x, y, url) {
+  ctxMenuUrl = url;
+  // 화면 밖으로 나가지 않도록 위치 조정
+  ctxMenu.style.display = 'block';
+  const menuW = 200, menuH = 110;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  ctxMenu.style.left = Math.min(x, vw - menuW - 8) + 'px';
+  ctxMenu.style.top  = Math.min(y, vh - menuH - 8) + 'px';
+}
+function hideImgCtxMenu() {
+  ctxMenu.style.display = 'none';
+  ctxMenuUrl = null;
+}
+
+document.getElementById('img-ctx-view').onclick = () => {
+  if (ctxMenuUrl) openImageViewer(ctxMenuUrl);
+  hideImgCtxMenu();
+};
+document.getElementById('img-ctx-download').onclick = () => {
+  if (ctxMenuUrl) downloadImage(ctxMenuUrl);
+  hideImgCtxMenu();
+};
+
+// 바깥 클릭 시 메뉴 닫기
+document.addEventListener('click', e => {
+  if (!ctxMenu.contains(e.target)) hideImgCtxMenu();
+});
+document.addEventListener('contextmenu', e => {
+  if (!ctxMenu.contains(e.target)) hideImgCtxMenu();
+});
+
+// detail-content 이미지 이벤트 위임
+const detailContent = document.getElementById('detail-content');
+
+// PC: 우클릭 → 커스텀 컨텍스트 메뉴
+detailContent.addEventListener('contextmenu', e => {
+  const img = e.target.closest('img');
+  if (!img) return;
+  e.preventDefault();
+  showImgCtxMenu(e.clientX, e.clientY, img.src);
+});
+
+// 모바일: 롱프레스 → 커스텀 컨텍스트 메뉴
+detailContent.addEventListener('touchstart', e => {
+  const img = e.target.closest('img');
+  if (!img) return;
+  const touch = e.touches[0];
+  longPressTimer = setTimeout(() => {
+    showImgCtxMenu(touch.clientX, touch.clientY, img.src);
+  }, 600);
+}, { passive: true });
+detailContent.addEventListener('touchend', () => {
+  clearTimeout(longPressTimer);
+}, { passive: true });
+detailContent.addEventListener('touchmove', () => {
+  clearTimeout(longPressTimer);
+}, { passive: true });
+
+// 이미지 뷰어 내 롱프레스도 지원
+const viewerImg = document.getElementById('img-viewer-img');
+viewerImg.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const url = document.getElementById('img-viewer-download').dataset.url;
+  if (url) showImgCtxMenu(e.clientX, e.clientY, url);
+});
+viewerImg.addEventListener('touchstart', e => {
+  const touch = e.touches[0];
+  const url = document.getElementById('img-viewer-download').dataset.url;
+  longPressTimer = setTimeout(() => {
+    if (url) showImgCtxMenu(touch.clientX, touch.clientY, url);
+  }, 600);
+}, { passive: true });
+viewerImg.addEventListener('touchend', () => clearTimeout(longPressTimer), { passive: true });
+viewerImg.addEventListener('touchmove', () => clearTimeout(longPressTimer), { passive: true });
 
 // ── 뒤로가기 (Android/PWA)
 function currentScreen() {
