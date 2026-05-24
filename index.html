@@ -324,6 +324,34 @@
     cursor: pointer;
   }
 
+  /* 동영상 임베드 플레이어 */
+  .video-embed-wrap {
+    margin: 14px 0; border-radius: 14px; overflow: hidden;
+    background: rgba(0,0,0,0.06);
+    border: 1.5px solid var(--sky-mid);
+    box-shadow: 0 4px 16px rgba(90,144,176,0.15);
+  }
+  .video-embed-label {
+    padding: 7px 14px; font-size: 12px; font-weight: 700;
+    color: var(--sky-deep); background: var(--sky-light);
+    letter-spacing: 0.04em; border-bottom: 1px solid var(--sky-mid);
+  }
+  .video-embed-container {
+    position: relative; width: 100%; padding-top: 56.25%; /* 16:9 비율 */
+    background: #000;
+  }
+  .video-embed-container iframe {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: none;
+  }
+  .video-embed-link {
+    display: block; padding: 8px 14px; font-size: 12px; color: var(--text-light);
+    text-decoration: none; background: var(--sky-light);
+    border-top: 1px solid var(--sky-mid);
+    transition: background 0.15s;
+  }
+  .video-embed-link:hover { background: var(--sky-mid); color: var(--text); }
+
   .form-input, .form-textarea {
     width: 100%; padding: 13px 16px; border-radius: 12px;
     border: 1.5px solid var(--sky-mid); background: #D8EED8;
@@ -1042,9 +1070,20 @@ function openDetail(note, from) {
   const rawBody = note.body || '';
   let parsedBody = '';
   if (window.marked && window.DOMPurify) {
-    // ① 수식 블록($$...$$)과 인라인($...$)을 임시 플레이스홀더로 치환 (marked가 파싱하기 전)
+    // ① 동영상 URL을 임시 플레이스홀더로 치환 (marked 파싱 및 DOMPurify 이전)
+    const videoEmbeds = [];
+    let processed = rawBody.replace(
+      /(^|\s)(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11}|youtube\.com\/shorts\/[A-Za-z0-9_-]{11}|vimeo\.com\/\d+|tv\.naver\.com\/v\/\d+|tv\.kakao\.com\/channel\/\d+\/cliplink\/\d+|www\.dailymotion\.com\/video\/[a-zA-Z0-9]+)[^\s<>"]*)/g,
+      (_, prefix, url) => {
+        const idx = videoEmbeds.length;
+        videoEmbeds.push(url.trim());
+        return `${prefix}VIDEO_EMBED_${idx}_END`;
+      }
+    );
+
+    // ② 수식 블록($$...$$)과 인라인($...$)을 임시 플레이스홀더로 치환 (marked가 파싱하기 전)
     const mathBlocks = [];
-    let processed = rawBody
+    processed = processed
       // 블록 수식 $$...$$ (줄바꿈 포함)
       .replace(/\$\$([\s\S]+?)\$\$/g, (_, expr) => {
         const idx = mathBlocks.length;
@@ -1058,10 +1097,10 @@ function openDetail(note, from) {
         return `MATH_INLINE_${idx}_END`;
       });
 
-    // ② marked로 마크다운 파싱
+    // ③ marked로 마크다운 파싱
     let html = marked.parse(processed, { breaks: true });
 
-    // ③ 플레이스홀더를 KaTeX 렌더링 결과로 복원
+    // ④ 플레이스홀더를 KaTeX 렌더링 결과로 복원
     if (window.katex) {
       html = html.replace(/MATH_BLOCK_(\d+)_END/g, (_, i) => {
         try {
@@ -1075,7 +1114,7 @@ function openDetail(note, from) {
       });
     }
 
-    // ④ DOMPurify — KaTeX가 생성하는 태그/속성 허용 + 이미지 src/alt 허용
+    // ⑤ DOMPurify — KaTeX가 생성하는 태그/속성 허용 + 이미지 src/alt 허용
     parsedBody = DOMPurify.sanitize(html, {
       ADD_TAGS: ['math', 'mrow', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac',
                  'msubsup', 'mover', 'munder', 'moverunder', 'menclose',
@@ -1088,8 +1127,50 @@ function openDetail(note, from) {
                  'rx', 'ry', 'transform', 'points', 'encoding',
                  'src', 'alt', 'loading', 'decoding']  // 마크다운 이미지 렌더링을 위해 추가
     });
+
+    // ⑥ 동영상 플레이스홀더를 iframe embed로 복원 (DOMPurify 이후 안전하게 삽입)
+    parsedBody = parsedBody.replace(/VIDEO_EMBED_(\d+)_END/g, (_, i) => {
+      return buildVideoEmbed(videoEmbeds[parseInt(i)]);
+    });
   } else {
     parsedBody = linkify(rawBody);
+  }
+
+  // 동영상 URL → iframe embed HTML 생성
+  function buildVideoEmbed(url) {
+    let embedUrl = null;
+    let label = '';
+
+    // YouTube: watch?v=, youtu.be/, shorts/
+    const ytWatch = url.match(/youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=([A-Za-z0-9_-]{11})/);
+    const ytShort = url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
+    const ytShortsPage = url.match(/youtube\.com\/shorts\/([A-Za-z0-9_-]{11})/);
+    const vimeo    = url.match(/vimeo\.com\/(\d+)/);
+    const naverTv  = url.match(/tv\.naver\.com\/v\/(\d+)/);
+    const kakaoTv  = url.match(/tv\.kakao\.com\/channel\/\d+\/cliplink\/(\d+)/);
+    const daily    = url.match(/dailymotion\.com\/video\/([a-zA-Z0-9]+)/);
+
+    if (ytWatch)      { embedUrl = `https://www.youtube.com/embed/${ytWatch[1]}?autoplay=1`; label = 'YouTube'; }
+    else if (ytShort) { embedUrl = `https://www.youtube.com/embed/${ytShort[1]}?autoplay=1`; label = 'YouTube'; }
+    else if (ytShortsPage) { embedUrl = `https://www.youtube.com/embed/${ytShortsPage[1]}?autoplay=1`; label = 'YouTube Shorts'; }
+    else if (vimeo)   { embedUrl = `https://player.vimeo.com/video/${vimeo[1]}?autoplay=1`; label = 'Vimeo'; }
+    else if (naverTv) { embedUrl = `https://tv.naver.com/embed/${naverTv[1]}?autoPlay=true`; label = 'Naver TV'; }
+    else if (kakaoTv) { embedUrl = `https://tv.kakao.com/embed/player/cliplink/${kakaoTv[1]}?service=player_share&autoplay=1`; label = 'Kakao TV'; }
+    else if (daily)   { embedUrl = `https://www.dailymotion.com/embed/video/${daily[1]}?autoplay=1`; label = 'Dailymotion'; }
+
+    if (!embedUrl) {
+      // 지원되지 않는 동영상 URL은 일반 링크로 표시
+      const esc = url.replace(/"/g, '&quot;');
+      return `<a href="${esc}" target="_blank" rel="noopener noreferrer" style="color:var(--sky-deep);word-break:break-all;text-decoration:underline;">${esc}</a>`;
+    }
+
+    return `<div class="video-embed-wrap">
+  <div class="video-embed-label">${label}</div>
+  <div class="video-embed-container">
+    <iframe src="${embedUrl}" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>
+  </div>
+  <a class="video-embed-link" href="${url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener noreferrer">🔗 원본 링크로 열기</a>
+</div>`;
   }
 
   content.innerHTML = `
