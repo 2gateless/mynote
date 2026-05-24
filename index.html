@@ -324,7 +324,7 @@
     cursor: pointer;
   }
 
-  /* 동영상 임베드 플레이어 */
+  /* 동영상 임베드 플레이어 (YouTube 등 iframe 방식) */
   .video-embed-wrap {
     margin: 14px 0;
     border-radius: 14px; overflow: hidden;
@@ -337,12 +337,12 @@
     color: var(--sky-deep); background: var(--sky-light);
     letter-spacing: 0.04em; border-bottom: 1px solid var(--sky-mid);
   }
-  /* 모바일: 세로(portrait) 비율 — 폰 화면에 꽉 차게 */
+  /* 모바일: 세로(portrait) 비율 */
   .video-embed-container {
     position: relative;
     width: 100%;
     aspect-ratio: 9 / 16;
-    max-height: 80vh;   /* 화면 높이를 벗어나지 않도록 제한 */
+    max-height: 80vh;
     background: #000;
     overflow: hidden;
   }
@@ -366,6 +366,63 @@
     transition: background 0.15s;
   }
   .video-embed-link:hover { background: var(--sky-mid); color: var(--text); }
+
+  /* Google Drive 동영상 — 카드형 (탭하면 Drive 앱에서 재생) */
+  .video-drive-card {
+    margin: 14px 0;
+    border-radius: 14px; overflow: hidden;
+    border: 1.5px solid var(--sky-mid);
+    box-shadow: 0 4px 16px rgba(90,144,176,0.15);
+    cursor: pointer;
+    text-decoration: none;
+    display: block;
+    background: #000;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .video-drive-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(90,144,176,0.25); }
+  .video-drive-card:active { transform: scale(0.98); }
+  .video-drive-thumb {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 9 / 16;
+    max-height: 80vh;
+    background: #111;
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  @media (min-width: 640px) {
+    .video-drive-thumb { aspect-ratio: 16 / 9; max-height: none; }
+  }
+  .video-drive-thumb img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  /* 재생 버튼 오버레이 */
+  .video-drive-play {
+    position: absolute;
+    inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.25);
+  }
+  .video-drive-play-btn {
+    width: 72px; height: 72px; border-radius: 50%;
+    background: rgba(255,255,255,0.92);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+    transition: transform 0.15s, background 0.15s;
+  }
+  .video-drive-card:hover .video-drive-play-btn { background: white; transform: scale(1.08); }
+  .video-drive-play-btn svg { width: 32px; height: 32px; fill: var(--sky-deep); margin-left: 5px; }
+  .video-drive-meta {
+    padding: 10px 14px;
+    background: var(--sky-light);
+    display: flex; align-items: center; gap: 8px;
+    border-top: 1px solid var(--sky-mid);
+  }
+  .video-drive-meta-icon { font-size: 16px; }
+  .video-drive-meta-text { font-size: 12px; font-weight: 600; color: var(--sky-deep); flex: 1; }
+  .video-drive-meta-arrow { font-size: 13px; color: var(--text-light); }
 
   .form-input, .form-textarea {
     width: 100%; padding: 13px 16px; border-radius: 12px;
@@ -1174,8 +1231,27 @@ function openDetail(note, from) {
     else if (naverTv) { embedUrl = `https://tv.naver.com/embed/${naverTv[1]}?autoPlay=true`; label = 'Naver TV'; }
     else if (kakaoTv) { embedUrl = `https://tv.kakao.com/embed/player/cliplink/${kakaoTv[1]}?service=player_share&autoplay=1`; label = 'Kakao TV'; }
     else if (daily)   { embedUrl = `https://www.dailymotion.com/embed/video/${daily[1]}?autoplay=1`; label = 'Dailymotion'; }
-    // Google Drive는 autoplay 파라미터 미지원 — preview 모드로 임베드
-    else if (gDrive)  { embedUrl = `https://drive.google.com/file/d/${gDrive[1]}/preview`; label = 'Google Drive'; }
+    // Google Drive는 iframe 컨트롤 UI 문제로 카드 방식으로 처리
+    if (gDrive) {
+      const fileId = gDrive[1];
+      const thumbUrl = `https://drive.google.com/thumbnail?id=${fileId}&sz=w640`;
+      const openUrl = url.replace(/"/g, '&quot;');
+      return `<a class="video-drive-card" href="${openUrl}" target="_blank" rel="noopener noreferrer">
+  <div class="video-drive-thumb">
+    <img src="${thumbUrl}" alt="Google Drive 동영상" loading="lazy" onerror="this.style.display='none'">
+    <div class="video-drive-play">
+      <div class="video-drive-play-btn">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 5v14l11-7z"/></svg>
+      </div>
+    </div>
+  </div>
+  <div class="video-drive-meta">
+    <span class="video-drive-meta-icon">☁️</span>
+    <span class="video-drive-meta-text">Google Drive 동영상 — 탭하여 재생</span>
+    <span class="video-drive-meta-arrow">›</span>
+  </div>
+</a>`;
+    }
 
     if (!embedUrl) {
       // 지원되지 않는 동영상 URL은 일반 링크로 표시
