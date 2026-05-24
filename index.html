@@ -1073,7 +1073,7 @@ function openDetail(note, from) {
     // ① 동영상 URL을 임시 플레이스홀더로 치환 (marked 파싱 및 DOMPurify 이전)
     const videoEmbeds = [];
     let processed = rawBody.replace(
-      /(^|\s)(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11}|youtube\.com\/shorts\/[A-Za-z0-9_-]{11}|vimeo\.com\/\d+|tv\.naver\.com\/v\/\d+|tv\.kakao\.com\/channel\/\d+\/cliplink\/\d+|www\.dailymotion\.com\/video\/[a-zA-Z0-9]+)[^\s<>"]*)/g,
+      /(^|\s)(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11}|youtube\.com\/shorts\/[A-Za-z0-9_-]{11}|vimeo\.com\/\d+|tv\.naver\.com\/v\/\d+|tv\.kakao\.com\/channel\/\d+\/cliplink\/\d+|www\.dailymotion\.com\/video\/[a-zA-Z0-9]+|drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/(?:view|preview))[^\s<>"]*)/g,
       (_, prefix, url) => {
         const idx = videoEmbeds.length;
         videoEmbeds.push(url.trim());
@@ -1149,6 +1149,8 @@ function openDetail(note, from) {
     const naverTv  = url.match(/tv\.naver\.com\/v\/(\d+)/);
     const kakaoTv  = url.match(/tv\.kakao\.com\/channel\/\d+\/cliplink\/(\d+)/);
     const daily    = url.match(/dailymotion\.com\/video\/([a-zA-Z0-9]+)/);
+    // Google Drive: drive.google.com/file/d/{ID}/view 또는 /preview
+    const gDrive   = url.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)\/(?:view|preview)/);
 
     if (ytWatch)      { embedUrl = `https://www.youtube.com/embed/${ytWatch[1]}?autoplay=1`; label = 'YouTube'; }
     else if (ytShort) { embedUrl = `https://www.youtube.com/embed/${ytShort[1]}?autoplay=1`; label = 'YouTube'; }
@@ -1157,6 +1159,8 @@ function openDetail(note, from) {
     else if (naverTv) { embedUrl = `https://tv.naver.com/embed/${naverTv[1]}?autoPlay=true`; label = 'Naver TV'; }
     else if (kakaoTv) { embedUrl = `https://tv.kakao.com/embed/player/cliplink/${kakaoTv[1]}?service=player_share&autoplay=1`; label = 'Kakao TV'; }
     else if (daily)   { embedUrl = `https://www.dailymotion.com/embed/video/${daily[1]}?autoplay=1`; label = 'Dailymotion'; }
+    // Google Drive는 autoplay 파라미터 미지원 — preview 모드로 임베드
+    else if (gDrive)  { embedUrl = `https://drive.google.com/file/d/${gDrive[1]}/preview`; label = 'Google Drive'; }
 
     if (!embedUrl) {
       // 지원되지 않는 동영상 URL은 일반 링크로 표시
