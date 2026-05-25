@@ -607,9 +607,64 @@
     font-size: 10px; color: #B0C8D8; letter-spacing: 0.04em;
   }
 
+  /* ── 앱 내 메모 링크 ── */
+  .note-link {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: linear-gradient(135deg, #D4ECD4, #C8E4C8);
+    border: 1.5px solid #9ABFA0;
+    border-radius: 8px; padding: 2px 10px 2px 6px;
+    font-size: 0.9em; font-weight: 600; color: #3A6B3A;
+    cursor: pointer; text-decoration: none;
+    transition: all 0.18s; vertical-align: middle;
+    white-space: nowrap; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .note-link:hover {
+    background: linear-gradient(135deg, #C0DFC0, #B4D8B4);
+    border-color: #7AA880; color: #2A5A2A;
+    transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(60,120,60,0.18);
+  }
+  .note-link-icon { font-size: 0.9em; flex-shrink: 0; }
+  .note-link.broken {
+    background: #EDEDED; border-color: #C8C8C8;
+    color: #888; cursor: default;
+  }
+  .note-link.broken:hover { transform: none; box-shadow: none; }
+
+  /* 메모 링크 삽입 모달 */
+  .note-link-modal {
+    background: var(--white); border-radius: 24px 24px 0 0; padding: 24px 20px 36px;
+    width: 100%; max-width: 640px; max-height: 80vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
+    animation: slideUp 0.3s ease;
+  }
+  .note-link-search {
+    background: var(--sky-light); border-radius: 12px; padding: 10px 14px;
+    display: flex; align-items: center; gap: 10px;
+    border: 1.5px solid transparent; transition: border-color 0.2s;
+    margin-bottom: 12px;
+  }
+  .note-link-search:focus-within { border-color: var(--sky-dark); }
+  .note-link-search input {
+    flex: 1; border: none; outline: none; font-size: 14px;
+    color: var(--text); background: transparent; font-family: inherit;
+  }
+  .note-link-list { flex: 1; overflow-y: auto; }
+  .note-link-item {
+    padding: 12px 14px; border-radius: 10px; cursor: pointer;
+    display: flex; align-items: center; gap: 10px;
+    transition: background 0.15s; margin-bottom: 4px;
+  }
+  .note-link-item:hover { background: var(--sky-light); }
+  .note-link-item-cat { font-size: 13px; flex-shrink: 0; }
+  .note-link-item-title { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note-link-item-tag { font-size: 11px; color: var(--sky-dark); background: var(--sky-light); padding: 1px 7px; border-radius: 6px; flex-shrink: 0; }
+
   /* PC */
   @media (min-width: 640px) {
-    .modal, .del-modal, .share-modal {
+    .modal, .del-modal, .share-modal, .note-link-modal {
       border-radius: 24px; margin: auto; max-height: 85vh;
       animation: fadeIn 0.2s ease;
     }
@@ -754,9 +809,10 @@
     <div class="form-group">
       <label class="form-label">내용</label>
       <textarea class="form-textarea" id="note-body" placeholder="메모 내용을 입력하세요..."></textarea>
-      <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="voice-btn" id="voice-btn" style="flex:1">🎤 음성 입력</button>
-        <button class="voice-btn" id="inline-img-btn" style="flex:1;white-space:nowrap">🖼️ 이미지 삽입</button>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="voice-btn" id="voice-btn" style="flex:1;min-width:120px">🎤 음성 입력</button>
+        <button class="voice-btn" id="inline-img-btn" style="flex:1;min-width:120px;white-space:nowrap">🖼️ 이미지 삽입</button>
+        <button class="voice-btn" id="note-link-btn" style="flex:1;min-width:120px;white-space:nowrap">📝 메모 링크</button>
         <input type="file" id="inline-img-input" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif" style="display:none">
       </div>
     </div>
@@ -823,6 +879,20 @@
       </button>
     </div>
     <button class="btn-secondary" id="share-cancel" style="margin-top:20px;width:100%">취소</button>
+  </div>
+</div>
+
+<!-- 메모 링크 삽입 모달 -->
+<div class="modal-overlay" id="note-link-modal" style="display:none">
+  <div class="note-link-modal">
+    <div class="modal-handle"></div>
+    <h2 style="font-size:18px;font-weight:800;margin-bottom:14px">📝 메모 링크 삽입</h2>
+    <div class="note-link-search">
+      <span>🔍</span>
+      <input id="note-link-search-input" placeholder="메모 제목으로 검색" autocomplete="off">
+    </div>
+    <div class="note-link-list" id="note-link-list"></div>
+    <button class="btn-secondary" id="note-link-cancel" style="margin-top:12px;width:100%">취소</button>
   </div>
 </div>
 
@@ -900,6 +970,10 @@ let catUnsubscribes = {};
 let listUnsubscribe = null;
 let searchTimeout = null;
 
+// 앱 내 메모 링크 기능용 전역 캐시
+let allNotesCache = []; // { id, title, category, tag } 목록
+let notesUnsubscribe = null;
+
 // ── UTILS
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -944,13 +1018,17 @@ onAuthStateChanged(auth, user => {
       currentUser = user;
       renderUserBar();
       showRootScreen('app');
-      migrateCategories().then(() => loadAllCounts());
+      migrateCategories().then(() => {
+        loadAllCounts();
+        subscribeAllNotes(); // 앱 내 메모 링크용 전체 메모 구독
+      });
     } else {
       document.getElementById('denied-email').textContent = user.email;
       showRootScreen('denied-screen');
     }
   } else {
     currentUser = null;
+    if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
     showRootScreen('auth-screen');
   }
 });
@@ -981,6 +1059,58 @@ function renderUserBar() {
     av.textContent = (currentUser.displayName || 'U')[0].toUpperCase();
   }
 }
+
+// ── 전체 메모 구독 (앱 내 메모 링크 캐시용)
+function subscribeAllNotes() {
+  if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
+  const q = query(collection(db, 'notes'), where('uid', '==', currentUser.uid));
+  notesUnsubscribe = onSnapshot(q, snap => {
+    allNotesCache = snap.docs.map(d => ({
+      id: d.id,
+      title: d.data().title || '',
+      category: d.data().category || '',
+      tag: d.data().tag || null,
+    }));
+  });
+}
+
+// ── [[메모 제목]] 문법을 앱 내 링크로 변환
+function resolveNoteLinks(html) {
+  // [[제목]] 패턴을 찾아서 메모 링크 span으로 변환
+  return html.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
+    const found = allNotesCache.find(n => n.title === title.trim());
+    if (found) {
+      const cat = CATEGORIES[found.category];
+      const icon = cat ? cat.icon : '📝';
+      return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
+        + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
+    } else {
+      return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
+        + `<span class="note-link-icon">📝</span>${escHtml(title.trim())} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
+    }
+  });
+}
+
+// 앱 내 메모 링크 클릭 핸들러
+window.handleNoteLinkClick = function(el) {
+  const noteId = el.dataset.noteId;
+  if (!noteId) return;
+  // Firestore에서 해당 메모 조회 후 detail 화면으로 이동
+  import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js')
+    .then(({ getDoc, doc: fsDoc }) => getDoc(fsDoc(db, 'notes', noteId)))
+    .then(snap => {
+      if (snap.exists()) {
+        const note = { id: snap.id, ...snap.data() };
+        currentCat = note.category;
+        document.getElementById('list-title').textContent =
+          (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
+        openDetail(note, detailFrom || 'list');
+      } else {
+        showToast('해당 메모를 찾을 수 없어요');
+      }
+    })
+    .catch(() => showToast('메모를 불러오는 중 오류가 발생했어요'));
+};
 
 // ── 데이터 마이그레이션 (reference → ref_science, others → ref_others)
 async function migrateCategories() {
@@ -1142,9 +1272,16 @@ function openDetail(note, from) {
   const rawBody = note.body || '';
   let parsedBody = '';
   if (window.marked && window.DOMPurify) {
+    // ⓪ [[메모 제목]] 패턴을 임시 플레이스홀더로 치환 (marked 파싱 전)
+    const noteLinkRefs = [];
+    let rawBodyProcessed = rawBody.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
+      const idx = noteLinkRefs.length;
+      noteLinkRefs.push(title);
+      return `NOTELINK_${idx}_END`;
+    });
     // ① 동영상 URL을 임시 플레이스홀더로 치환 (marked 파싱 및 DOMPurify 이전)
     const videoEmbeds = [];
-    let processed = rawBody.replace(
+    let processed = rawBodyProcessed.replace(
       /(^|\s)(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11}|youtube\.com\/shorts\/[A-Za-z0-9_-]{11}|vimeo\.com\/\d+|tv\.naver\.com\/v\/\d+|tv\.kakao\.com\/channel\/\d+\/cliplink\/\d+|www\.dailymotion\.com\/video\/[a-zA-Z0-9]+|drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/(?:view|preview))[^\s<>"]*)/g,
       (_, prefix, url) => {
         const idx = videoEmbeds.length;
@@ -1203,6 +1340,21 @@ function openDetail(note, from) {
     // ⑥ 동영상 플레이스홀더를 iframe embed로 복원 (DOMPurify 이후 안전하게 삽입)
     parsedBody = parsedBody.replace(/VIDEO_EMBED_(\d+)_END/g, (_, i) => {
       return buildVideoEmbed(videoEmbeds[parseInt(i)]);
+    });
+
+    // ⑦ [[메모 제목]] 플레이스홀더를 앱 내 링크로 복원 (DOMPurify 이후 안전하게 삽입)
+    parsedBody = parsedBody.replace(/NOTELINK_(\d+)_END/g, (_, i) => {
+      const title = noteLinkRefs[parseInt(i)];
+      const found = allNotesCache.find(n => n.title === title.trim());
+      if (found) {
+        const cat = CATEGORIES[found.category];
+        const icon = cat ? cat.icon : '📝';
+        return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
+          + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
+      } else {
+        return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
+          + `<span class="note-link-icon">📝</span>${escHtml(title.trim())} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
+      }
     });
   } else {
     parsedBody = linkify(rawBody);
@@ -1365,6 +1517,69 @@ async function doSearch(keyword) {
 document.getElementById('btn-add-note').onclick = openAddModal;
 document.getElementById('btn-cancel').onclick = closeModal;
 document.getElementById('btn-save').onclick = saveNote;
+
+// ── 메모 링크 삽입 모달
+const noteLinkModal = document.getElementById('note-link-modal');
+const noteLinkSearchInput = document.getElementById('note-link-search-input');
+const noteLinkList = document.getElementById('note-link-list');
+
+document.getElementById('note-link-btn').onclick = () => openNoteLinkModal();
+document.getElementById('note-link-cancel').onclick = () => closeNoteLinkModal();
+noteLinkModal.addEventListener('click', e => { if (e.target.id === 'note-link-modal') closeNoteLinkModal(); });
+
+function openNoteLinkModal() {
+  noteLinkSearchInput.value = '';
+  renderNoteLinkList('');
+  noteLinkModal.style.display = 'flex';
+  setTimeout(() => noteLinkSearchInput.focus(), 80);
+}
+function closeNoteLinkModal() {
+  noteLinkModal.style.display = 'none';
+}
+
+function renderNoteLinkList(keyword) {
+  const kw = keyword.toLowerCase().trim();
+  const items = kw
+    ? allNotesCache.filter(n => n.title.toLowerCase().includes(kw))
+    : allNotesCache.slice();
+  // 현재 편집 중인 메모 자신은 제외
+  const filtered = editingNoteId ? items.filter(n => n.id !== editingNoteId) : items;
+  // 카테고리명으로 정렬
+  filtered.sort((a, b) => a.title.localeCompare(b.title, 'ko'));
+
+  if (filtered.length === 0) {
+    noteLinkList.innerHTML = `<div style="text-align:center;padding:28px;color:var(--text-light);font-size:13px">`
+      + (kw ? `🔍 "${escHtml(kw)}" 결과 없음` : '📝 메모가 없어요') + `</div>`;
+    return;
+  }
+  noteLinkList.innerHTML = '';
+  filtered.forEach(note => {
+    const cat = CATEGORIES[note.category];
+    const item = document.createElement('div');
+    item.className = 'note-link-item';
+    item.innerHTML = `<span class="note-link-item-cat">${cat ? cat.icon : '📝'}</span>`
+      + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
+      + (note.tag ? `<span class="note-link-item-tag">#${escHtml(note.tag)}</span>` : '');
+    item.onclick = () => insertNoteLink(note.title);
+    noteLinkList.appendChild(item);
+  });
+}
+
+function insertNoteLink(title) {
+  const ta = document.getElementById('note-body');
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const linkText = `[[${title}]]`;
+  ta.value = ta.value.slice(0, start) + linkText + ta.value.slice(end);
+  ta.selectionStart = ta.selectionEnd = start + linkText.length;
+  ta.focus();
+  closeNoteLinkModal();
+  showToast(`"${title}" 메모 링크를 삽입했어요 📝`);
+}
+
+noteLinkSearchInput.addEventListener('input', () => {
+  renderNoteLinkList(noteLinkSearchInput.value);
+});
 
 function renderTagOptions(catId, selectedTag) {
   const tg = document.getElementById('tag-group');
