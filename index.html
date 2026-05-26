@@ -997,7 +997,20 @@ function fmtDate(ts) {
   if (!ts?.toDate) return '';
   return ts.toDate().toLocaleDateString('ko-KR', {year:'numeric',month:'long',day:'numeric'});
 }
+function stopAllVideos() {
+  const container = document.getElementById('detail-content');
+  if (container) {
+    const iframes = container.querySelectorAll('iframe');
+    iframes.forEach(iframe => {
+      iframe.src = '';
+    });
+  }
+}
+
 function showAppScreen(name) {
+  if (name !== 'detail') {
+    stopAllVideos();
+  }
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById('screen-' + name).classList.add('active');
   window.scrollTo(0, 0);
