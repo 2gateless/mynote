@@ -1352,7 +1352,7 @@ function openDetail(note, from) {
 
     // ⑥ 동영상 플레이스홀더를 iframe embed로 복원 (DOMPurify 이후 안전하게 삽입)
     parsedBody = parsedBody.replace(/VIDEO_EMBED_(\d+)_END/g, (_, i) => {
-      return buildVideoEmbed(videoEmbeds[parseInt(i)]);
+      return buildVideoEmbed(videoEmbeds[parseInt(i)], parseInt(i));
     });
 
     // ⑦ [[메모 제목]] 플레이스홀더를 앱 내 링크로 복원 (DOMPurify 이후 안전하게 삽입)
@@ -1374,9 +1374,10 @@ function openDetail(note, from) {
   }
 
   // 동영상 URL → iframe embed HTML 생성
-  function buildVideoEmbed(url) {
+  function buildVideoEmbed(url, index = 0) {
     let embedUrl = null;
     let label = '';
+    const shouldAutoplay = index === 0;
 
     // YouTube: watch?v=, youtu.be/, shorts/
     const ytWatch = url.match(/youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=([A-Za-z0-9_-]{11})/);
@@ -1389,13 +1390,13 @@ function openDetail(note, from) {
     // Google Drive: drive.google.com/file/d/{ID}/view 또는 /preview
     const gDrive   = url.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)\/(?:view|preview)/);
 
-    if (ytWatch)      { embedUrl = `https://www.youtube.com/embed/${ytWatch[1]}?autoplay=1`; label = 'YouTube'; }
-    else if (ytShort) { embedUrl = `https://www.youtube.com/embed/${ytShort[1]}?autoplay=1`; label = 'YouTube'; }
-    else if (ytShortsPage) { embedUrl = `https://www.youtube.com/embed/${ytShortsPage[1]}?autoplay=1`; label = 'YouTube Shorts'; }
-    else if (vimeo)   { embedUrl = `https://player.vimeo.com/video/${vimeo[1]}?autoplay=1`; label = 'Vimeo'; }
-    else if (naverTv) { embedUrl = `https://tv.naver.com/embed/${naverTv[1]}?autoPlay=true`; label = 'Naver TV'; }
-    else if (kakaoTv) { embedUrl = `https://tv.kakao.com/embed/player/cliplink/${kakaoTv[1]}?service=player_share&autoplay=1`; label = 'Kakao TV'; }
-    else if (daily)   { embedUrl = `https://www.dailymotion.com/embed/video/${daily[1]}?autoplay=1`; label = 'Dailymotion'; }
+    if (ytWatch)      { embedUrl = `https://www.youtube.com/embed/${ytWatch[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'YouTube'; }
+    else if (ytShort) { embedUrl = `https://www.youtube.com/embed/${ytShort[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'YouTube'; }
+    else if (ytShortsPage) { embedUrl = `https://www.youtube.com/embed/${ytShortsPage[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'YouTube Shorts'; }
+    else if (vimeo)   { embedUrl = `https://player.vimeo.com/video/${vimeo[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'Vimeo'; }
+    else if (naverTv) { embedUrl = `https://tv.naver.com/embed/${naverTv[1]}` + (shouldAutoplay ? `?autoPlay=true` : ``); label = 'Naver TV'; }
+    else if (kakaoTv) { embedUrl = `https://tv.kakao.com/embed/player/cliplink/${kakaoTv[1]}?service=player_share` + (shouldAutoplay ? `&autoplay=1` : ``); label = 'Kakao TV'; }
+    else if (daily)   { embedUrl = `https://www.dailymotion.com/embed/video/${daily[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'Dailymotion'; }
     // Google Drive는 iframe 컨트롤 UI 문제로 카드 방식으로 처리
     if (gDrive) {
       const fileId = gDrive[1];
