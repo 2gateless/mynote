@@ -1844,7 +1844,16 @@ document.getElementById('del-confirm').onclick = async () => {
 
 // ── SHARE
 document.getElementById('btn-share-detail').onclick = () => {
-  document.getElementById('share-modal').style.display = 'flex';
+  const { title, body } = getShareText();
+  if (navigator.share) {
+    navigator.share({ title, text: body }).catch(err => {
+      if (err.name !== 'AbortError') {
+        document.getElementById('share-modal').style.display = 'flex';
+      }
+    });
+  } else {
+    document.getElementById('share-modal').style.display = 'flex';
+  }
 };
 document.getElementById('share-cancel').onclick = () => {
   document.getElementById('share-modal').style.display = 'none';
@@ -1862,16 +1871,10 @@ function getShareText() {
 document.getElementById('share-gmail').onclick = () => {
   const { title, body } = getShareText();
   document.getElementById('share-modal').style.display = 'none';
-  // 모바일: 네이티브 공유로 Gmail 선택 가능 / 데스크톱: mailto 링크
-  if (navigator.share) {
-    navigator.share({ title, text: body })
-      .catch(err => { if (err.name !== 'AbortError') location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`; });
-  } else {
-    location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
-  }
+  location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
 };
 
-// 카카오톡 공유 — Android: 카카오톡 URL 스킴 → 실패 시 navigator.share 폴백
+// 카카오톡 공유
 document.getElementById('share-kakao').onclick = () => {
   const { title, body } = getShareText();
   const text = `${title}\n\n${body}`;
@@ -1881,28 +1884,21 @@ document.getElementById('share-kakao').onclick = () => {
   const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
 
   if (isAndroid) {
-    // Android: 카카오톡 공유 인텐트 (설치된 경우 바로 열림)
     const intentUrl = `intent://send#Intent;action=android.intent.action.SEND;type=text/plain;S.android.intent.extra.TEXT=${encodeURIComponent(text)};package=com.kakao.talk;end`;
-    // 타이머로 폴백 처리 (앱 없을 경우)
     const timer = setTimeout(() => {
-      if (navigator.share) navigator.share({ title, text }).catch(console.error);
-      else showToast('카카오톡이 설치되어 있지 않아요');
+      showToast('카카오톡이 설치되어 있지 않아요');
     }, 1500);
     window.addEventListener('pagehide', () => clearTimeout(timer), { once: true });
     window.addEventListener('blur', () => clearTimeout(timer), { once: true });
     location.href = intentUrl;
   } else if (isIOS) {
-    // iOS: 카카오톡 URL 스킴
     const kakaoUrl = `kakaolink://send?text=${encodeURIComponent(text)}`;
     const timer = setTimeout(() => {
-      if (navigator.share) navigator.share({ title, text }).catch(console.error);
-      else showToast('카카오톡이 설치되어 있지 않아요');
+      showToast('카카오톡이 설치되어 있지 않아요');
     }, 1500);
     window.addEventListener('pagehide', () => clearTimeout(timer), { once: true });
     window.addEventListener('blur', () => clearTimeout(timer), { once: true });
     location.href = kakaoUrl;
-  } else if (navigator.share) {
-    navigator.share({ title, text }).catch(console.error);
   } else {
     showToast('카카오톡 공유는 모바일에서 지원됩니다.');
   }
@@ -1913,16 +1909,10 @@ document.getElementById('share-telegram').onclick = () => {
   const { title, body } = getShareText();
   const text = `${title}\n\n${body}`;
   document.getElementById('share-modal').style.display = 'none';
-  if (navigator.share) {
-    // 모바일: 네이티브 공유 다이얼로그에서 Telegram 선택
-    navigator.share({ title, text })
-      .catch(err => { if (err.name !== 'AbortError') window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank'); });
-  } else {
-    window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
-  }
+  window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
 };
 
-// 다른 앱으로 공유 (네이티브 공유 시트)
+// 다른 앱으로 공유 (네이티브 공유 시트 강제 호출)
 document.getElementById('share-native').onclick = () => {
   const { title, body } = getShareText();
   document.getElementById('share-modal').style.display = 'none';
