@@ -1506,10 +1506,15 @@ async function doSearch(keyword) {
   try {
     const q = query(collection(db, 'notes'), where('uid', '==', currentUser.uid));
     const snap = await getDocs(q);
-    const kw = keyword.toLowerCase();
+    const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
     const results = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
-      .filter(n => (n.title || '').toLowerCase().includes(kw) || (n.body || '').toLowerCase().includes(kw));
+      .filter(n => {
+        const title = (n.title || '').toLowerCase();
+        const body = (n.body || '').toLowerCase();
+        // 모든 검색 키워드가 제목 또는 본문에 포함되어 있는지 검사 (AND 조건)
+        return keywords.every(kw => title.includes(kw) || body.includes(kw));
+      });
     if (results.length === 0) {
       searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
       return;
