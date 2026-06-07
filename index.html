@@ -1540,9 +1540,7 @@ async function doSearch(keyword) {
         ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${escHtml(note.body || '')}</div>`;
       
-      const goToDetail = (e) => {
-        if (e.target.closest('.search-result-cat')) return;
-        e.preventDefault();
+      const goToDetail = () => {
         clearTimeout(searchTimeout);
         searchInput.blur();
         currentCat = note.category;
@@ -1550,9 +1548,49 @@ async function doSearch(keyword) {
         openDetail(note, 'search');
       };
       
-      // 모바일 가상 키보드가 닫힐 때 뷰포트 변화로 클릭이 씹히는 현상을 해결하기 위해 터치/마우스 다운 시점에 즉시 동작하도록 이벤트 바인딩
-      item.addEventListener('mousedown', goToDetail);
-      item.addEventListener('touchstart', goToDetail, { passive: false });
+      // 모바일에서 스크롤 드래그와 단순 탭을 구분하기 위한 좌표 변수
+      let startX = 0, startY = 0;
+      let isMoving = false;
+
+      const handleTouchStart = (e) => {
+        const touch = e.touches[0];
+        startX = touch.clientX;
+        startY = touch.clientY;
+        isMoving = false;
+      };
+
+      const handleTouchMove = (e) => {
+        if (isMoving) return;
+        const touch = e.touches[0];
+        const diffX = Math.abs(touch.clientX - startX);
+        const diffY = Math.abs(touch.clientY - startY);
+        // 터치 시작 후 손가락이 8px 이상 움직이면 스크롤 중인 것으로 판단
+        if (diffX > 8 || diffY > 8) {
+          isMoving = true;
+        }
+      };
+
+      const handleTouchEnd = (e) => {
+        if (e.target.closest('.search-result-cat')) return; // 태그 클릭은 개별 처리
+        
+        // 스크롤 드래그인 경우 상세 화면으로 가지 않음
+        if (isMoving) return;
+        
+        // 단순 탭(클릭)인 경우 즉시 반응하여 키보드 닫힘에 따른 씹힘과 딜레이 방지
+        e.preventDefault();
+        goToDetail();
+      };
+      
+      const handleMouseDown = (e) => {
+        if (e.button !== 0) return; // 좌클릭만 허용
+        if (e.target.closest('.search-result-cat')) return;
+        goToDetail();
+      };
+      
+      item.addEventListener('touchstart', handleTouchStart, { passive: true });
+      item.addEventListener('touchmove', handleTouchMove, { passive: true });
+      item.addEventListener('touchend', handleTouchEnd, { passive: false });
+      item.addEventListener('mousedown', handleMouseDown);
       
       searchResults.appendChild(item);
     });
