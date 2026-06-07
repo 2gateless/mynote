@@ -2174,7 +2174,12 @@ window.addEventListener('popstate', e => {
   if (screen === 'modal') { closeModal(); history.pushState(null, '', location.href); return; }
   if (screen === 'del-modal') { document.getElementById('del-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
   if (screen === 'share-modal') { document.getElementById('share-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
-  if (screen === 'detail') { showAppScreen('list'); history.pushState(null, '', location.href); return; }
+  if (screen === 'detail') {
+    if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+    showAppScreen('home');
+    history.pushState(null, '', location.href);
+    return;
+  }
   if (screen === 'list') {
     if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
     showAppScreen('home'); history.pushState(null, '', location.href); return;
