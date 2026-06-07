@@ -1539,11 +1539,21 @@ async function doSearch(keyword) {
         <span class="search-result-cat">${cat?.icon} ${cat?.name}</span>
         ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${escHtml(note.body || '')}</div>`;
-      item.onclick = () => {
+      
+      const goToDetail = (e) => {
+        if (e.target.closest('.search-result-cat')) return;
+        e.preventDefault();
+        clearTimeout(searchTimeout);
+        searchInput.blur();
         currentCat = note.category;
         document.getElementById('list-title').textContent = (cat?.icon || '') + ' ' + (cat?.name || '');
         openDetail(note, 'search');
       };
+      
+      // 모바일 가상 키보드가 닫힐 때 뷰포트 변화로 클릭이 씹히는 현상을 해결하기 위해 터치/마우스 다운 시점에 즉시 동작하도록 이벤트 바인딩
+      item.addEventListener('mousedown', goToDetail);
+      item.addEventListener('touchstart', goToDetail, { passive: false });
+      
       searchResults.appendChild(item);
     });
   } catch(e) {
