@@ -2176,12 +2176,24 @@ window.addEventListener('popstate', e => {
   if (screen === 'share-modal') { document.getElementById('share-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
   if (screen === 'detail') {
     if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+    // 검색 관련 상태 초기화 (깨끗한 홈화면 복원)
+    searchInput.value = '';
+    searchClear.style.display = 'none';
+    searchResults.style.display = 'none';
+    document.getElementById('cat-grid').style.display = '';
+    
     showAppScreen('home');
     history.pushState(null, '', location.href);
     return;
   }
   if (screen === 'list') {
     if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+    // 검색 관련 상태 초기화
+    searchInput.value = '';
+    searchClear.style.display = 'none';
+    searchResults.style.display = 'none';
+    document.getElementById('cat-grid').style.display = '';
+    
     showAppScreen('home'); history.pushState(null, '', location.href); return;
   }
   // 홈화면에서 뒤로가기 → 앱 종료 (기본 동작)
