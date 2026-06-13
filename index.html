@@ -679,8 +679,7 @@
 </style>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.3/purify.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+
 </head>
 <body>
 
@@ -919,7 +918,8 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/fireba
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
-  query, where, orderBy, onSnapshot, getDocs, Timestamp }
+  query, where, orderBy, onSnapshot, getDocs, Timestamp,
+  writeBatch, increment, getDoc, setDoc, runTransaction }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 import { getStorage, ref, uploadString, getDownloadURL }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
@@ -1038,6 +1038,8 @@ onAuthStateChanged(auth, user => {
       renderUserBar();
       showRootScreen('app');
       migrateCategories().then(() => {
+        return migrateNotesToMeta();
+      }).then(() => {
         loadAllCounts();
         subscribeAllNotes(); // 앱 내 메모 링크용 전체 메모 구독
       });
@@ -1082,14 +1084,12 @@ function renderUserBar() {
 // ── 전체 메모 구독 (앱 내 메모 링크 캐시용)
 function subscribeAllNotes() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
-  const q = query(collection(db, 'notes'), where('uid', '==', currentUser.uid));
-  notesUnsubscribe = onSnapshot(q, snap => {
-    allNotesCache = snap.docs.map(d => ({
-      id: d.id,
-      title: d.data().title || '',
-      category: d.data().category || '',
-      tag: d.data().tag || null,
-    }));
+  notesUnsubscribe = onSnapshot(doc(db, 'note_index', currentUser.uid), snap => {
+    if (snap.exists()) {
+      allNotesCache = snap.data().notes || [];
+    } else {
+      allNotesCache = [];
+    }
   });
 }
 
@@ -1179,15 +1179,83 @@ async function migrateCategories() {
   } catch(e) { console.error('마이그레이션 오류:', e); }
 }
 
+async function migrateNotesToMeta() {
+  try {
+    const metaRef = doc(db, 'user_meta', currentUser.uid);
+    const metaSnap = await getDoc(metaRef);
+    if (metaSnap.exists()) return;
+    console.log('초기 메타데이터 마이그레이션 시작...');
+    const q = query(collection(db, 'notes'), where('uid', '==', currentUser.uid));
+    const snap = await getDocs(q);
+    const categoryCount = {};
+    Object.keys(CATEGORIES).forEach(k => categoryCount[k] = 0);
+    const notesIndex = [];
+    snap.docs.forEach(d => {
+      const data = d.data();
+      if (data.category && categoryCount[data.category] !== undefined) categoryCount[data.category]++;
+      notesIndex.push({
+        id: d.id,
+        title: data.title || '',
+        category: data.category || '',
+        tag: data.tag || '',
+        snippet: (data.body || '').substring(0, 200)
+      });
+    });
+    const batch = writeBatch(db);
+    batch.set(metaRef, { categoryCount });
+    batch.set(doc(db, 'note_index', currentUser.uid), { notes: notesIndex });
+    await batch.commit();
+    console.log('마이그레이션 완료!');
+  } catch(e) { console.error('메타 마이그레이션 오류:', e); }
+}
+
+async function syncNoteMeta(action, noteId, newData, oldData) {
+  await runTransaction(db, async (t) => {
+    const metaRef = doc(db, 'user_meta', currentUser.uid);
+    const indexRef = doc(db, 'note_index', currentUser.uid);
+    const metaSnap = await t.get(metaRef);
+    const indexSnap = await t.get(indexRef);
+    let categoryCount = metaSnap.exists() ? metaSnap.data().categoryCount || {} : {};
+    let notesIndex = indexSnap.exists() ? indexSnap.data().notes || [] : [];
+    if (action === 'add') {
+      const cat = newData.category;
+      if (cat) categoryCount[cat] = (categoryCount[cat] || 0) + 1;
+      notesIndex.push({
+        id: noteId,
+        title: newData.title || '',
+        category: cat || '',
+        tag: newData.tag || '',
+        snippet: (newData.body || '').substring(0, 200)
+      });
+    } else if (action === 'update') {
+      const idx = notesIndex.findIndex(n => n.id === noteId);
+      if (idx !== -1) {
+        notesIndex[idx] = {
+          ...notesIndex[idx],
+          title: newData.title !== undefined ? newData.title : notesIndex[idx].title,
+          category: newData.category !== undefined ? newData.category : notesIndex[idx].category,
+          tag: newData.tag !== undefined ? newData.tag : notesIndex[idx].tag,
+          snippet: newData.body !== undefined ? newData.body.substring(0, 200) : notesIndex[idx].snippet
+        };
+      }
+    } else if (action === 'delete') {
+      const cat = oldData.category;
+      if (cat && categoryCount[cat]) categoryCount[cat] = Math.max(0, categoryCount[cat] - 1);
+      notesIndex = notesIndex.filter(n => n.id !== noteId);
+    }
+    t.set(metaRef, { categoryCount }, { merge: true });
+    t.set(indexRef, { notes: notesIndex }, { merge: true });
+  });
+}
+
 // ── COUNTS
 function loadAllCounts() {
-  Object.keys(CATEGORIES).forEach(catId => {
-    const q = query(collection(db, 'notes'),
-      where('uid', '==', currentUser.uid),
-      where('category', '==', catId));
-    if (catUnsubscribes[catId]) catUnsubscribes[catId]();
-    catUnsubscribes[catId] = onSnapshot(q, snap => {
-      const n = snap.size;
+  // Listen to the single user_meta doc
+  if (catUnsubscribes['meta']) catUnsubscribes['meta']();
+  catUnsubscribes['meta'] = onSnapshot(doc(db, 'user_meta', currentUser.uid), snap => {
+    const categoryCount = snap.exists() ? (snap.data().categoryCount || {}) : {};
+    Object.keys(CATEGORIES).forEach(catId => {
+      const n = categoryCount[catId] || 0;
       const cnt = document.getElementById('cnt-' + catId);
       const badge = document.getElementById('badge-' + catId);
       if (cnt) cnt.textContent = `메모 ${n}개`;
@@ -1298,7 +1366,26 @@ document.getElementById('list-back').onclick = () => {
 // ── DETAIL
 let detailFrom = 'list'; // 'list' or 'search'
 
-function openDetail(note, from) {
+let katexLoaded = false;
+let katexPromise = null;
+function loadKatex() {
+  if (katexLoaded) return Promise.resolve();
+  if (katexPromise) return katexPromise;
+  katexPromise = new Promise((resolve, reject) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css';
+    document.head.appendChild(link);
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js';
+    script.onload = () => { katexLoaded = true; resolve(); };
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  return katexPromise;
+}
+
+async function openDetail(note, from) {
   currentNote = note;
   detailFrom = from || 'list';
   document.getElementById('detail-header-title').textContent = note.title || '제목 없음';
@@ -1355,6 +1442,9 @@ function openDetail(note, from) {
     let html = marked.parse(processed, { breaks: true });
 
     // ④ 플레이스홀더를 KaTeX 렌더링 결과로 복원
+    if (mathBlocks.length > 0) {
+      try { await loadKatex(); } catch(e) { console.error('KaTeX load error', e); }
+    }
     if (window.katex) {
       html = html.replace(/MATH_BLOCK_(\d+)_END/g, (_, i) => {
         try {
@@ -1517,17 +1607,13 @@ async function doSearch(keyword) {
   searchResults.style.display = 'block';
   searchResults.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:8px 4px">검색 중...</div>`;
   try {
-    const q = query(collection(db, 'notes'), where('uid', '==', currentUser.uid));
-    const snap = await getDocs(q);
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
-    const results = snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .filter(n => {
+    const results = allNotesCache.filter(n => {
         const title = (n.title || '').toLowerCase();
-        const body = (n.body || '').toLowerCase();
-        // 모든 검색 키워드가 제목 또는 본문에 포함되어 있는지 검사 (AND 조건)
+        const body = (n.snippet || '').toLowerCase();
+        // Option B: Search in title and snippet (200 chars)
         return keywords.every(kw => title.includes(kw) || body.includes(kw));
-      });
+    });
     if (results.length === 0) {
       searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
       return;
@@ -1551,14 +1637,19 @@ async function doSearch(keyword) {
         <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
         <span class="search-result-cat">${cat?.icon} ${cat?.name}</span>
         ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
-        <div class="search-result-body">${escHtml(note.body || '')}</div>`;
+        <div class="search-result-body">${escHtml(note.snippet || '')}</div>`;
       
-      const goToDetail = () => {
+      const goToDetail = async () => {
         clearTimeout(searchTimeout);
         searchInput.blur();
         currentCat = note.category;
         document.getElementById('list-title').textContent = (cat?.icon || '') + ' ' + (cat?.name || '');
-        openDetail(note, 'search');
+        const fullDoc = await getDoc(doc(db, 'notes', note.id));
+        if (fullDoc.exists()) {
+          openDetail({ id: fullDoc.id, ...fullDoc.data() }, 'search');
+        } else {
+          showToast('삭제된 메모입니다.');
+        }
       };
       
       // 모바일에서 스크롤 드래그와 단순 탭을 구분하기 위한 좌표 변수
@@ -1887,22 +1978,26 @@ async function saveNote() {
       ? (prevPinned && currentNote?.pinnedAt ? currentNote.pinnedAt : Timestamp.now())
       : null;
     if (editingNoteId) {
+      const oldNote = { ...currentNote };
       await updateDoc(doc(db, 'notes', editingNoteId), {
         title, body, tag, images: allImages,
         pinned, pinnedAt,
         updatedAt: Timestamp.now()
       });
+      await syncNoteMeta('update', editingNoteId, { title, body, tag, category: currentNote.category }, oldNote);
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       // 상세화면 갱신
       currentNote = { ...currentNote, title, body, tag, images: allImages, pinned, pinnedAt };
       openDetail(currentNote);
     } else {
-      await addDoc(collection(db, 'notes'), {
+      const noteRef = doc(collection(db, 'notes'));
+      await setDoc(noteRef, {
         uid: currentUser.uid, category: currentCat, tag,
         title, body, images: allImages,
         pinned, pinnedAt,
         createdAt: Timestamp.now()
       });
+      await syncNoteMeta('add', noteRef.id, { title, body, tag, category: currentCat }, null);
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
     closeModal();
@@ -1920,6 +2015,7 @@ document.getElementById('del-confirm').onclick = async () => {
   if (!deleteTargetId) return;
   try {
     await deleteDoc(doc(db, 'notes', deleteTargetId));
+    await syncNoteMeta('delete', deleteTargetId, null, currentNote);
     showToast('메모가 삭제되었어요 🗑️');
     document.getElementById('del-modal').style.display = 'none';
     deleteTargetId = null;
