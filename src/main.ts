@@ -1,3 +1,4 @@
+import { appState } from './state';
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, getDocs, Timestamp, writeBatch, increment, getDoc, setDoc, runTransaction } from 'firebase/firestore';
@@ -194,7 +195,7 @@ function resolveNoteLinks(html) {
     if (found) {
       const cat = CATEGORIES[found.category];
       const icon = cat ? cat.icon : '📝';
-      return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
+      return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="appState.handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
         + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
     } else {
       return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
@@ -204,7 +205,7 @@ function resolveNoteLinks(html) {
 }
 
 // 앱 내 메모 링크 클릭 핸들러
-(window as any).handleNoteLinkClick = function(el: any) {
+appState.handleNoteLinkClick = function(el: any) {
   const noteId = el.dataset.noteId;
   if (!noteId) return;
   // Firestore에서 해당 메모 조회 후 detail 화면으로 이동
@@ -368,7 +369,7 @@ document.getElementById('cat-grid').addEventListener('click', e => {
 });
 
 // ── LIST
-(window as any).openList = openList; // HTML 인라인 이벤트에서 접근할 수 있도록 전역 객체에 할당
+appState.openList = openList; // HTML 인라인 이벤트에서 접근할 수 있도록 전역 객체에 할당
 function openList(catId: string, tag: string | null = null) {
   currentCat = catId;
   currentTag = tag;
@@ -390,9 +391,9 @@ function renderListTagFilter(catId, activeTag) {
     return;
   }
   filterBar.style.display = 'flex';
-  let html = `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" onclick="openList('${catId}', null)">전체</div>`;
+  let html = `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" onclick="appState.openList('${catId}', null)">전체</div>`;
   tags.forEach(t => {
-    html += `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" onclick="openList('${catId}', '${t}')">#${t}</div>`;
+    html += `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" onclick="appState.openList('${catId}', '${t}')">#${t}</div>`;
   });
   filterBar.innerHTML = html;
 }
@@ -479,7 +480,7 @@ async function openDetail(note, from) {
   const content = document.getElementById('detail-content');
   const imgs = note.images || [];
   const imgHtml = imgs.length > 0
-    ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${i.url}" alt="이미지" onclick="openImageViewer('${i.url}')">`).join('')}</div>`
+    ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${i.url}" alt="이미지" onclick="appState.openImageViewer('${i.url}')">`).join('')}</div>`
     : '';
 
   const rawBody = note.body || '';
@@ -565,7 +566,7 @@ async function openDetail(note, from) {
       if (found) {
         const cat = CATEGORIES[found.category];
         const icon = cat ? cat.icon : '📝';
-        return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
+        return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="appState.handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
           + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
       } else {
         return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
@@ -1253,7 +1254,7 @@ async function downloadImage(url) {
   }
 }
 
-window.openImageViewer = function(url) {
+appState.openImageViewer = function(url) {
   const viewer = document.getElementById('img-viewer');
   document.getElementById('img-viewer-img').src = url;
   document.getElementById('img-viewer-download').dataset.url = url;
