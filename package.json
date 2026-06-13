@@ -1,0 +1,36 @@
+{
+  "name": "mynote",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2gateless/mynote.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/2gateless/mynote/issues"
+  },
+  "homepage": "https://github.com/2gateless/mynote#readme",
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/katex": "^0.16.8",
+    "@types/marked": "^5.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.10",
+    "firebase": "^12.14.0",
+    "katex": "^0.17.0",
+    "marked": "^18.0.5"
+  }
+}

@@ -1,0 +1,4 @@
+node_modules/
+dist/
+backups/serviceAccountKey.json
+backups/backup_*.json
