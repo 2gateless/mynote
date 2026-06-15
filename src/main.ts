@@ -1,154 +1,87 @@
 import { appState } from './state';
-import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, getDocs, Timestamp, writeBatch, increment, getDoc, setDoc, runTransaction } from 'firebase/firestore';
-import { getStorage, ref, uploadString, getDownloadURL } from 'firebase/storage';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
+import { 
+  initAuthListener, 
+  loginWithGoogle, 
+  logout, 
+  ALLOWED_EMAILS 
+} from './services/auth';
+import { 
+  CATEGORIES, 
+  SUB_TAGS, 
+  migrateCategories, 
+  migrateNotesToMeta, 
+  syncNoteMeta, 
+  subscribeUserMeta, 
+  subscribeAllNotes, 
+  subscribeNotesList, 
+  getSingleNote, 
+  deleteSingleNote, 
+  createNote, 
+  updateSingleNote 
+} from './services/database';
+import { 
+  escHtml, 
+  fmtDate, 
+  parseMarkdownBody 
+} from './utils/formatter';
+import { 
+  getShareText, 
+  shareViaEmail, 
+  shareViaKakao, 
+  shareViaTelegram, 
+  shareViaNative 
+} from './utils/share';
+import { 
+  compressImage, 
+  uploadImageToStorage 
+} from './utils/image';
+import { 
+  showAppScreen, 
+  showRootScreen, 
+  initPwaNavigation, 
+  currentScreen 
+} from './pwa';
 
-interface Note {
-  id: string;
-  title?: string;
-  category: string;
-  tag?: string;
-  body?: string;
-  images?: any[];
-  pinned?: boolean;
-  pinnedAt?: Timestamp;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
-}
-const firebaseConfig = {
-  apiKey: "AIzaSyAh3LSEaukyJewUHYCd5EH4-IaDefv2Iio",
-  authDomain: "mynote-53a33.firebaseapp.com",
-  projectId: "mynote-53a33",
-  storageBucket: "mynote-53a33.firebasestorage.app",
-  messagingSenderId: "380405953405",
-  appId: "1:380405953405:web:fd8b0f47c043ba2b9d5214"
-};
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const storage = getStorage(app);
-
-const ALLOWED_EMAILS = ['2gateless@gmail.com'];
-
-const CATEGORIES = {
-  memory:         { name: '기억',       icon: '💭' },
-  ref_science:    { name: '과학',       icon: '🔬' },
-  ref_art:        { name: '예술/종교',       icon: '🎨' },
-  nature:         { name: '식물/새/곤충',  icon: '🌿' },
-  it_history:     { name: 'IT/역사/문화', icon: '💻' },
-  ref_others:     { name: '좋은글/건강/기타',       icon: '📋' },
-  finance_realty: { name: '금융/부동산', icon: '💰' },
-  office:         { name: '사무실',     icon: '💼' },
-  family:         { name: '가족/private', icon: '👨‍👩‍👧‍👦' },
-};
-
-const SUB_TAGS = {
-  ref_science: ['물리', '수학', '화학', '생명', '지구/지질', '기타'],
-  ref_art: ['문학', '미술', '음악', '종교', '기타'],
-  nature: ['나무', '풀/꽃', '양치/선태', '지의류', '새', '곤충', '기타'],
-  it_history: ['IT', '역사/문화'],
-  finance_realty: ['금융', '부동산'],
-  ref_others: ['좋은글', '건강', '레시피', '여행', '영화', '기타'],
-  family: ['가족', 'private']
-};
-
-let currentUser = null;
-let currentCat = null;
-let currentTag = null;
-let currentNote = null;
-let editingNoteId = null;
-let deleteTargetId = null;
-let pendingImages = [];
-let existingImages = [];
-let recognition = null;
+let recognition: any = null;
 let isRecording = false;
-let catUnsubscribes = {};
-let listUnsubscribe = null;
-let searchTimeout = null;
+let catUnsubscribes: Record<string, () => void> = {};
+let listUnsubscribe: (() => void) | null = null;
+let searchTimeout: any = null;
+let notesUnsubscribe: (() => void) | null = null;
+let detailFrom = 'list'; // 'list' or 'search'
 
-// 앱 내 메모 링크 기능용 전역 캐시
-let allNotesCache = []; // { id, title, category, tag } 목록
-let notesUnsubscribe = null;
-
-// ── UTILS
-function showToast(msg) {
+// Toast 메시지 유틸리티
+function showToast(msg: string) {
   const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2500);
-}
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-function linkify(text) {
-  const urlRegex = /(https?:\/\/[^\s<>"]+)/g;
-  return String(text).split(urlRegex).map((part, i) => {
-    if (i % 2 === 1) {
-      const escaped = escHtml(part);
-      return `<a href="${escaped}" target="_blank" rel="noopener noreferrer" style="color:var(--sky-deep);word-break:break-all;text-decoration:underline;">${escaped}</a>`;
-    }
-    return escHtml(part);
-  }).join('');
-}
-function fmtDate(ts) {
-  if (!ts?.toDate) return '';
-  return ts.toDate().toLocaleDateString('ko-KR', {year:'numeric',month:'long',day:'numeric'});
-}
-function stopAllVideos() {
-  const container = document.getElementById('detail-content');
-  if (container) {
-    const iframes = container.querySelectorAll('iframe');
-    iframes.forEach(iframe => {
-      iframe.src = '';
-    });
+  if (t) {
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2500);
   }
 }
 
-function showAppScreen(name) {
-  if (name !== 'detail') {
-    stopAllVideos();
-  }
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById('screen-' + name).classList.add('active');
-  window.scrollTo(0, 0);
-}
-function showRootScreen(name) {
-  ['loading-screen','auth-screen','denied-screen','app'].forEach(id => {
-    document.getElementById(id).style.display = 'none';
-  });
-  const el = document.getElementById(name);
-  el.style.display = name === 'app' ? 'block' : 'flex';
-  if (name !== 'app') el.style.flexDirection = 'column';
-}
-
-// ── AUTH
-onAuthStateChanged(auth, user => {
-  if (user) {
-    if (ALLOWED_EMAILS.includes(user.email)) {
-      currentUser = user;
-      renderUserBar();
-      showRootScreen('app');
-      migrateCategories().then(() => {
-        return migrateNotesToMeta();
-      }).then(() => {
-        loadAllCounts();
-        subscribeAllNotes(); // 앱 내 메모 링크용 전체 메모 구독
-      });
-    } else {
-      document.getElementById('denied-email').textContent = user.email;
-      showRootScreen('denied-screen');
-    }
-  } else {
-    currentUser = null;
+// ── AUTH & 초기화
+initAuthListener(
+  async (user) => {
+    renderUserBar(user);
+    showRootScreen('app');
+    await migrateCategories();
+    await migrateNotesToMeta();
+    loadAllCounts();
+    subscribeAllNotesCache();
+  },
+  (email) => {
+    const el = document.getElementById('denied-email');
+    if (el) el.textContent = email || '';
+    showRootScreen('denied-screen');
+  },
+  () => {
     if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
     showRootScreen('auth-screen');
   }
-});
+);
 
-// 로딩 타임아웃 — 5초 후에도 auth 상태 미확인 시 로그인 화면으로
+// 로딩 타임아웃
 setTimeout(() => {
   const ls = document.getElementById('loading-screen');
   if (ls && ls.style.display !== 'none') {
@@ -156,66 +89,60 @@ setTimeout(() => {
   }
 }, 5000);
 
-document.getElementById('btn-google-login').onclick = async () => {
-  try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-  catch(e) { showToast('로그인 실패: ' + e.message); }
-};
-document.getElementById('btn-logout').onclick = () => signOut(auth);
-document.getElementById('btn-denied-signout').onclick = () => signOut(auth);
+const btnLogin = document.getElementById('btn-google-login');
+if (btnLogin) {
+  btnLogin.onclick = async () => {
+    try { await loginWithGoogle(); }
+    catch(e: any) { showToast('로그인 실패: ' + e.message); }
+  };
+}
 
-function renderUserBar() {
+const btnLogout = document.getElementById('btn-logout');
+if (btnLogout) {
+  btnLogout.onclick = () => logout();
+}
+
+const btnDeniedSignout = document.getElementById('btn-denied-signout');
+if (btnDeniedSignout) {
+  btnDeniedSignout.onclick = () => logout();
+}
+
+function renderUserBar(user: any) {
   const av = document.getElementById('user-bar-avatar');
-  document.getElementById('user-bar-name').textContent = currentUser.displayName || currentUser.email;
-  if (currentUser.photoURL) {
-    av.className = 'user-bar-avatar';
-    av.innerHTML = `<img src="${currentUser.photoURL}" alt="">`;
-  } else {
-    av.className = 'user-bar-avatar-default';
-    av.textContent = (currentUser.displayName || 'U')[0].toUpperCase();
+  const nameEl = document.getElementById('user-bar-name');
+  if (nameEl) nameEl.textContent = user.displayName || user.email;
+  if (av) {
+    if (user.photoURL) {
+      av.className = 'user-bar-avatar';
+      av.innerHTML = `<img src="${user.photoURL}" alt="">`;
+    } else {
+      av.className = 'user-bar-avatar-default';
+      av.textContent = (user.displayName || 'U')[0].toUpperCase();
+    }
   }
 }
 
-// ── 전체 메모 구독 (앱 내 메모 링크 캐시용)
-function subscribeAllNotes() {
+// 전체 메모 구독 (메모 링크 및 캐시용)
+function subscribeAllNotesCache() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
-  notesUnsubscribe = onSnapshot(doc(db, 'note_index', currentUser.uid), snap => {
-    if (snap.exists()) {
-      allNotesCache = snap.data().notes || [];
-    } else {
-      allNotesCache = [];
-    }
+  notesUnsubscribe = subscribeAllNotes((notes) => {
+    appState.allNotesCache = notes;
   });
 }
 
-// ── [[메모 제목]] 문법을 앱 내 링크로 변환
-function resolveNoteLinks(html) {
-  // [[제목]] 패턴을 찾아서 메모 링크 span으로 변환
-  return html.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
-    const found = allNotesCache.find(n => n.title === title.trim());
-    if (found) {
-      const cat = CATEGORIES[found.category];
-      const icon = cat ? cat.icon : '📝';
-      return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="appState.handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
-        + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
-    } else {
-      return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
-        + `<span class="note-link-icon">📝</span>${escHtml(title.trim())} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
-    }
-  });
-}
-
-// 앱 내 메모 링크 클릭 핸들러
+// 메모 링크 클릭 핸들러
 appState.handleNoteLinkClick = function(el: any) {
   const noteId = el.dataset.noteId;
   if (!noteId) return;
-  // Firestore에서 해당 메모 조회 후 detail 화면으로 이동
-  getDoc(doc(db, 'notes', noteId))
-    .then(snap => {
-      if (snap.exists()) {
-        const note = { id: snap.id, ...snap.data() };
-        currentCat = note.category;
-        document.getElementById('list-title').textContent =
-          (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
+  getSingleNote(noteId)
+    .then(note => {
+      if (note) {
+        appState.currentCat = note.category;
+        const listTitle = document.getElementById('list-title');
+        if (listTitle) {
+          listTitle.textContent =
+            (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
+        }
         openDetail(note, detailFrom || 'list');
       } else {
         showToast('해당 메모를 찾을 수 없어요');
@@ -224,167 +151,52 @@ appState.handleNoteLinkClick = function(el: any) {
     .catch(() => showToast('메모를 불러오는 중 오류가 발생했어요'));
 };
 
-// ── 데이터 마이그레이션 (reference → ref_science, others → ref_others, ref_others의 IT, 역사/문화 → it_history)
-async function migrateCategories() {
-  try {
-    const migrations = [
-      { from: 'reference', to: 'ref_science' },
-      { from: 'others',    to: 'ref_others'  },
-      { from: 'finance',   to: 'finance_realty' },
-      { from: 'realty',    to: 'finance_realty' },
-    ];
-    for (const { from, to } of migrations) {
-      const q = query(collection(db, 'notes'),
-        where('uid', '==', currentUser.uid),
-        where('category', '==', from));
-      const snap = await getDocs(q);
-      for (const d of snap.docs) {
-        await updateDoc(doc(db, 'notes', d.id), { category: to });
-      }
-      if (snap.size > 0) console.log(`마이그레이션: ${from} → ${to} (${snap.size}건)`);
-    }
-
-    // ref_others 카테고리 중 'IT' 혹은 '역사/문화' 태그가 붙은 것들을 'it_history' 카테고리로 변경
-    const qMigrateTags = query(collection(db, 'notes'),
-      where('uid', '==', currentUser.uid),
-      where('category', '==', 'ref_others'),
-      where('tag', 'in', ['IT', '역사/문화']));
-    const snapTags = await getDocs(qMigrateTags);
-    for (const d of snapTags.docs) {
-      await updateDoc(doc(db, 'notes', d.id), { category: 'it_history' });
-    }
-    if (snapTags.size > 0) {
-      console.log(`태그 마이그레이션: ref_others(IT, 역사/문화) → it_history (${snapTags.size}건)`);
-    }
-
-    // nature 카테고리 중 '꽃' 태그가 붙은 것들을 '풀/꽃' 태그로 변경
-    const qMigrateNature = query(collection(db, 'notes'),
-      where('uid', '==', currentUser.uid),
-      where('category', '==', 'nature'),
-      where('tag', '==', '꽃'));
-    const snapNature = await getDocs(qMigrateNature);
-    for (const d of snapNature.docs) {
-      await updateDoc(doc(db, 'notes', d.id), { tag: '풀/꽃' });
-    }
-    if (snapNature.size > 0) {
-      console.log(`태그 마이그레이션: nature(꽃) → 풀/꽃 (${snapNature.size}건)`);
-    }
-  } catch(e) { console.error('마이그레이션 오류:', e); }
-}
-
-async function migrateNotesToMeta() {
-  try {
-    const metaRef = doc(db, 'user_meta', currentUser.uid);
-    const metaSnap = await getDoc(metaRef);
-    if (metaSnap.exists()) return;
-    console.log('초기 메타데이터 마이그레이션 시작...');
-    const q = query(collection(db, 'notes'), where('uid', '==', currentUser.uid));
-    const snap = await getDocs(q);
-    const categoryCount = {};
-    Object.keys(CATEGORIES).forEach(k => categoryCount[k] = 0);
-    const notesIndex = [];
-    snap.docs.forEach(d => {
-      const data = d.data();
-      if (data.category && categoryCount[data.category] !== undefined) categoryCount[data.category]++;
-      notesIndex.push({
-        id: d.id,
-        title: data.title || '',
-        category: data.category || '',
-        tag: data.tag || '',
-        snippet: (data.body || '').substring(0, 200)
-      });
-    });
-    const batch = writeBatch(db);
-    batch.set(metaRef, { categoryCount });
-    batch.set(doc(db, 'note_index', currentUser.uid), { notes: notesIndex });
-    await batch.commit();
-    console.log('마이그레이션 완료!');
-  } catch(e) { console.error('메타 마이그레이션 오류:', e); }
-}
-
-async function syncNoteMeta(action, noteId, newData, oldData) {
-  await runTransaction(db, async (t) => {
-    const metaRef = doc(db, 'user_meta', currentUser.uid);
-    const indexRef = doc(db, 'note_index', currentUser.uid);
-    const metaSnap = await t.get(metaRef);
-    const indexSnap = await t.get(indexRef);
-    let categoryCount = metaSnap.exists() ? metaSnap.data().categoryCount || {} : {};
-    let notesIndex = indexSnap.exists() ? indexSnap.data().notes || [] : [];
-    if (action === 'add') {
-      const cat = newData.category;
-      if (cat) categoryCount[cat] = (categoryCount[cat] || 0) + 1;
-      notesIndex.push({
-        id: noteId,
-        title: newData.title || '',
-        category: cat || '',
-        tag: newData.tag || '',
-        snippet: (newData.body || '').substring(0, 200)
-      });
-    } else if (action === 'update') {
-      const idx = notesIndex.findIndex(n => n.id === noteId);
-      if (idx !== -1) {
-        notesIndex[idx] = {
-          ...notesIndex[idx],
-          title: newData.title !== undefined ? newData.title : notesIndex[idx].title,
-          category: newData.category !== undefined ? newData.category : notesIndex[idx].category,
-          tag: newData.tag !== undefined ? newData.tag : notesIndex[idx].tag,
-          snippet: newData.body !== undefined ? newData.body.substring(0, 200) : notesIndex[idx].snippet
-        };
-      }
-    } else if (action === 'delete') {
-      const cat = oldData.category;
-      if (cat && categoryCount[cat]) categoryCount[cat] = Math.max(0, categoryCount[cat] - 1);
-      notesIndex = notesIndex.filter(n => n.id !== noteId);
-    }
-    t.set(metaRef, { categoryCount }, { merge: true });
-    t.set(indexRef, { notes: notesIndex }, { merge: true });
-  });
-}
-
 // ── COUNTS
 function loadAllCounts() {
-  // Listen to the single user_meta doc
   if (catUnsubscribes['meta']) catUnsubscribes['meta']();
-  catUnsubscribes['meta'] = onSnapshot(doc(db, 'user_meta', currentUser.uid), snap => {
-    const categoryCount = snap.exists() ? (snap.data().categoryCount || {}) : {};
+  catUnsubscribes['meta'] = subscribeUserMeta((categoryCount) => {
     Object.keys(CATEGORIES).forEach(catId => {
       const n = categoryCount[catId] || 0;
       const cnt = document.getElementById('cnt-' + catId);
       const badge = document.getElementById('badge-' + catId);
       if (cnt) cnt.textContent = `메모 ${n}개`;
       if (badge) {
-        badge.textContent = n;
+        badge.textContent = String(n);
         badge.style.display = n > 0 ? 'inline-block' : 'none';
       }
     });
   });
 }
 
-// ── CATEGORY CARDS
-document.getElementById('cat-grid').addEventListener('click', e => {
-  const card = e.target.closest('.cat-card');
-  if (!card) return;
-  const catId = card.dataset.cat;
-  openList(catId);
-});
+// ── CATEGORY CARDS CLICK
+const catGrid = document.getElementById('cat-grid');
+if (catGrid) {
+  catGrid.addEventListener('click', e => {
+    const card = (e.target as HTMLElement).closest('.cat-card') as HTMLElement;
+    if (!card) return;
+    const catId = card.dataset.cat;
+    if (catId) openList(catId);
+  });
+}
 
 // ── LIST
-appState.openList = openList; // HTML 인라인 이벤트에서 접근할 수 있도록 전역 객체에 할당
+appState.openList = openList;
 function openList(catId: string, tag: string | null = null) {
-  currentCat = catId;
-  currentTag = tag;
+  appState.currentCat = catId;
+  appState.currentTag = tag;
   const cat = CATEGORIES[catId];
   let titleText = cat.icon + ' ' + cat.name;
-  document.getElementById('list-title').textContent = titleText;
+  const listTitle = document.getElementById('list-title');
+  if (listTitle) listTitle.textContent = titleText;
   
   renderListTagFilter(catId, tag);
-  
   showAppScreen('list');
   loadList(catId);
 }
 
-function renderListTagFilter(catId, activeTag) {
+function renderListTagFilter(catId: string, activeTag: string | null) {
   const filterBar = document.getElementById('list-tag-filter');
+  if (!filterBar) return;
   const tags = SUB_TAGS[catId];
   if (!tags || tags.length === 0) {
     filterBar.style.display = 'none';
@@ -398,35 +210,33 @@ function renderListTagFilter(catId, activeTag) {
   filterBar.innerHTML = html;
 }
 
-function loadList(catId) {
+function loadList(catId: string) {
   if (listUnsubscribe) listUnsubscribe();
   const content = document.getElementById('list-content');
-  content.innerHTML = `<div style="color:var(--text-light);font-size:14px;padding:8px">불러오는 중...</div>`;
-  const q = query(collection(db, 'notes'),
-    where('uid', '==', currentUser.uid),
-    where('category', '==', catId),
-    orderBy('createdAt', 'desc'));
-  listUnsubscribe = onSnapshot(q, snap => {
-    let notes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    if (currentTag) {
-      notes = notes.filter(n => n.tag === currentTag);
+  if (content) {
+    content.innerHTML = `<div style="color:var(--text-light);font-size:14px;padding:8px">불러오는 중...</div>`;
+  }
+  listUnsubscribe = subscribeNotesList(catId, (notes) => {
+    if (appState.currentTag) {
+      notes = notes.filter(n => n.tag === appState.currentTag);
     }
     renderList(notes);
-  }, err => {
-    content.innerHTML = `<div style="color:var(--danger);font-size:13px">${err.message}</div>`;
+  }, (err) => {
+    if (content) content.innerHTML = `<div style="color:var(--danger);font-size:13px">${err.message}</div>`;
   });
 }
 
-function renderList(notes) {
+function renderList(notes: any[]) {
   const content = document.getElementById('list-content');
+  if (!content) return;
   if (notes.length === 0) {
     content.innerHTML = `<div class="empty-list">
-      <div class="ei">${CATEGORIES[currentCat].icon}</div>
+      <div class="ei">${CATEGORIES[appState.currentCat].icon}</div>
       <p>아직 메모가 없어요.<br>첫 번째 메모를 추가해보세요!</p>
     </div>`;
     return;
   }
-  // 핀 고정된 메모를 최상단에, 핀된 것끼리는 pinnedAt 내림차순(최신 핀이 위)
+  // 핀 고정된 메모를 최상단에
   const pinned = notes.filter(n => n.pinned).sort((a, b) => {
     const ta = a.pinnedAt?.toMillis ? a.pinnedAt.toMillis() : 0;
     const tb = b.pinnedAt?.toMillis ? b.pinnedAt.toMillis() : 0;
@@ -443,7 +253,7 @@ function renderList(notes) {
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
         <div class="note-list-title">${escHtml(note.title || '제목 없음')}</div>
-        <div class="note-list-date">${note.tag ? `<span onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
+        <div class="note-list-date">${note.tag ? `<span onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')" style="color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
       </div>
       ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : '<span class="note-list-arrow">›</span>'}`;
     item.onclick = () => openDetail(note);
@@ -451,197 +261,40 @@ function renderList(notes) {
   });
 }
 
-document.getElementById('list-back').onclick = () => {
-  if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
-  showAppScreen('home');
-};
-
-// ── DETAIL
-let detailFrom = 'list'; // 'list' or 'search'
-
-let katexModule: any = null;
-async function loadKatex() {
-  if (katexModule) return;
-  await import('katex/dist/katex.min.css');
-  const mod = await import('katex');
-  katexModule = mod.default || mod;
+const listBack = document.getElementById('list-back');
+if (listBack) {
+  listBack.onclick = () => {
+    if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+    showAppScreen('home');
+  };
 }
 
-async function openDetail(note, from) {
-  currentNote = note;
+// ── DETAIL
+async function openDetail(note: any, from?: string) {
+  appState.currentNote = note;
   detailFrom = from || 'list';
-  document.getElementById('detail-header-title').textContent = note.title || '제목 없음';
+  const detailHeaderTitle = document.getElementById('detail-header-title');
+  if (detailHeaderTitle) detailHeaderTitle.textContent = note.title || '제목 없음';
 
-  // 뒤로가기 버튼 텍스트 변경
   const backBtn = document.getElementById('detail-back');
-  backBtn.textContent = detailFrom === 'search' ? '🏠' : '←';
-  backBtn.title = detailFrom === 'search' ? '홈으로' : '목록으로';
+  if (backBtn) {
+    backBtn.textContent = detailFrom === 'search' ? '🏠' : '←';
+    backBtn.title = detailFrom === 'search' ? '홈으로' : '목록으로';
+  }
 
   const content = document.getElementById('detail-content');
+  if (!content) return;
   const imgs = note.images || [];
   const imgHtml = imgs.length > 0
-    ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${i.url}" alt="이미지" onclick="appState.openImageViewer('${i.url}')">`).join('')}</div>`
+    ? `<div class="detail-images">${imgs.map((i: any) => `<img class="detail-img" src="${i.url}" alt="이미지" onclick="appState.openImageViewer('${i.url}')">`).join('')}</div>`
     : '';
 
-  const rawBody = note.body || '';
-  let parsedBody = '';
-  if (marked && DOMPurify) {
-    // ⓪ [[메모 제목]] 패턴을 임시 플레이스홀더로 치환 (marked 파싱 전)
-    const noteLinkRefs = [];
-    let rawBodyProcessed = rawBody.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
-      const idx = noteLinkRefs.length;
-      noteLinkRefs.push(title);
-      return `NOTELINK_${idx}_END`;
-    });
-    // ① 동영상 URL을 임시 플레이스홀더로 치환 (marked 파싱 및 DOMPurify 이전)
-    const videoEmbeds = [];
-    let processed = rawBodyProcessed.replace(
-      /(^|\s)(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11}|youtube\.com\/shorts\/[A-Za-z0-9_-]{11}|vimeo\.com\/\d+|tv\.naver\.com\/v\/\d+|tv\.kakao\.com\/channel\/\d+\/cliplink\/\d+|www\.dailymotion\.com\/video\/[a-zA-Z0-9]+|drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/(?:view|preview))[^\s<>"]*)/g,
-      (_, prefix, url) => {
-        const idx = videoEmbeds.length;
-        videoEmbeds.push(url.trim());
-        return `${prefix}VIDEO_EMBED_${idx}_END`;
-      }
-    );
-
-    // ② 수식 블록($$...$$)과 인라인($...$)을 임시 플레이스홀더로 치환 (marked가 파싱하기 전)
-    const mathBlocks = [];
-    processed = processed
-      // 블록 수식 $$...$$ (줄바꿈 포함)
-      .replace(/\$\$([\s\S]+?)\$\$/g, (_, expr) => {
-        const idx = mathBlocks.length;
-        mathBlocks.push({ type: 'block', expr: expr.trim() });
-        return `MATH_BLOCK_${idx}_END`;
-      })
-      // 인라인 수식 $...$
-      .replace(/\$([^$\n]+?)\$/g, (_, expr) => {
-        const idx = mathBlocks.length;
-        mathBlocks.push({ type: 'inline', expr: expr.trim() });
-        return `MATH_INLINE_${idx}_END`;
-      });
-
-    // ③ marked로 마크다운 파싱
-    let html = marked.parse(processed, { breaks: true });
-
-    // ④ 플레이스홀더를 KaTeX 렌더링 결과로 복원
-    if (mathBlocks.length > 0) {
-      try { await loadKatex(); } catch(e) { console.error('KaTeX load error', e); }
-    }
-    if (katexModule) {
-      html = html.replace(/MATH_BLOCK_(\d+)_END/g, (_, i) => {
-        try {
-          return katexModule.renderToString(mathBlocks[i].expr, { displayMode: true, throwOnError: false });
-        } catch(e) { return `<code>$$${mathBlocks[i].expr}$$</code>`; }
-      });
-      html = html.replace(/MATH_INLINE_(\d+)_END/g, (_, i) => {
-        try {
-          return katexModule.renderToString(mathBlocks[i].expr, { displayMode: false, throwOnError: false });
-        } catch(e) { return `<code>$${mathBlocks[i].expr}$</code>`; }
-      });
-    }
-
-    // ⑤ DOMPurify — KaTeX가 생성하는 태그/속성 허용 + 이미지 src/alt 허용
-    parsedBody = DOMPurify.sanitize(html, {
-      ADD_TAGS: ['math', 'mrow', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac',
-                 'msubsup', 'mover', 'munder', 'moverunder', 'menclose',
-                 'msqrt', 'mroot', 'mtable', 'mtr', 'mtd', 'mtext',
-                 'mspace', 'mphantom', 'semantics', 'annotation'],
-      ADD_ATTR: ['xmlns', 'display', 'class', 'style', 'aria-hidden',
-                 'focusable', 'role', 'viewBox', 'width', 'height',
-                 'preserveAspectRatio', 'fill', 'stroke', 'stroke-width',
-                 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r',
-                 'rx', 'ry', 'transform', 'points', 'encoding',
-                 'src', 'alt', 'loading', 'decoding']  // 마크다운 이미지 렌더링을 위해 추가
-    });
-
-    // ⑥ 동영상 플레이스홀더를 iframe embed로 복원 (DOMPurify 이후 안전하게 삽입)
-    parsedBody = parsedBody.replace(/VIDEO_EMBED_(\d+)_END/g, (_, i) => {
-      return buildVideoEmbed(videoEmbeds[parseInt(i)], parseInt(i));
-    });
-
-    // ⑦ [[메모 제목]] 플레이스홀더를 앱 내 링크로 복원 (DOMPurify 이후 안전하게 삽입)
-    parsedBody = parsedBody.replace(/NOTELINK_(\d+)_END/g, (_, i) => {
-      const title = noteLinkRefs[parseInt(i)];
-      const found = allNotesCache.find(n => n.title === title.trim());
-      if (found) {
-        const cat = CATEGORIES[found.category];
-        const icon = cat ? cat.icon : '📝';
-        return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="appState.handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
-          + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
-      } else {
-        return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
-          + `<span class="note-link-icon">📝</span>${escHtml(title.trim())} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
-      }
-    });
-  } else {
-    parsedBody = linkify(rawBody);
-  }
-
-  // 동영상 URL → iframe embed HTML 생성
-  function buildVideoEmbed(url, index = 0) {
-    let embedUrl = null;
-    let label = '';
-    const shouldAutoplay = index === 0;
-
-    // YouTube: watch?v=, youtu.be/, shorts/
-    const ytWatch = url.match(/youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=([A-Za-z0-9_-]{11})/);
-    const ytShort = url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
-    const ytShortsPage = url.match(/youtube\.com\/shorts\/([A-Za-z0-9_-]{11})/);
-    const vimeo    = url.match(/vimeo\.com\/(\d+)/);
-    const naverTv  = url.match(/tv\.naver\.com\/v\/(\d+)/);
-    const kakaoTv  = url.match(/tv\.kakao\.com\/channel\/\d+\/cliplink\/(\d+)/);
-    const daily    = url.match(/dailymotion\.com\/video\/([a-zA-Z0-9]+)/);
-    // Google Drive: drive.google.com/file/d/{ID}/view 또는 /preview
-    const gDrive   = url.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)\/(?:view|preview)/);
-
-    if (ytWatch)      { embedUrl = `https://www.youtube.com/embed/${ytWatch[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'YouTube'; }
-    else if (ytShort) { embedUrl = `https://www.youtube.com/embed/${ytShort[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'YouTube'; }
-    else if (ytShortsPage) { embedUrl = `https://www.youtube.com/embed/${ytShortsPage[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'YouTube Shorts'; }
-    else if (vimeo)   { embedUrl = `https://player.vimeo.com/video/${vimeo[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'Vimeo'; }
-    else if (naverTv) { embedUrl = `https://tv.naver.com/embed/${naverTv[1]}` + (shouldAutoplay ? `?autoPlay=true` : ``); label = 'Naver TV'; }
-    else if (kakaoTv) { embedUrl = `https://tv.kakao.com/embed/player/cliplink/${kakaoTv[1]}?service=player_share` + (shouldAutoplay ? `&autoplay=1` : ``); label = 'Kakao TV'; }
-    else if (daily)   { embedUrl = `https://www.dailymotion.com/embed/video/${daily[1]}` + (shouldAutoplay ? `?autoplay=1` : ``); label = 'Dailymotion'; }
-    // Google Drive는 iframe 컨트롤 UI 문제로 카드 방식으로 처리
-    if (gDrive) {
-      const fileId = gDrive[1];
-      const thumbUrl = `https://drive.google.com/thumbnail?id=${fileId}&sz=w640`;
-      const openUrl = url.replace(/"/g, '&quot;');
-      return `<a class="video-drive-card" href="${openUrl}" target="_blank" rel="noopener noreferrer">
-  <div class="video-drive-thumb">
-    <img src="${thumbUrl}" alt="Google Drive 동영상" loading="lazy" onerror="this.style.display='none'">
-    <div class="video-drive-play">
-      <div class="video-drive-play-btn">
-        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 5v14l11-7z"/></svg>
-      </div>
-    </div>
-  </div>
-  <div class="video-drive-meta">
-    <span class="video-drive-meta-icon">☁️</span>
-    <span class="video-drive-meta-text">Google Drive 동영상 — 탭하여 재생</span>
-    <span class="video-drive-meta-arrow">›</span>
-  </div>
-</a>`;
-    }
-
-    if (!embedUrl) {
-      // 지원되지 않는 동영상 URL은 일반 링크로 표시
-      const esc = url.replace(/"/g, '&quot;');
-      return `<a href="${esc}" target="_blank" rel="noopener noreferrer" style="color:var(--sky-deep);word-break:break-all;text-decoration:underline;">${esc}</a>`;
-    }
-
-    return `<div class="video-embed-wrap">
-  <div class="video-embed-label">${label}</div>
-  <div class="video-embed-container">
-    <iframe src="${embedUrl}" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>
-  </div>
-  <a class="video-embed-link" href="${url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener noreferrer">🔗 원본 링크로 열기</a>
-</div>`;
-  }
+  const parsedBody = await parseMarkdownBody(note.body || '');
 
   content.innerHTML = `
     <div class="detail-meta">
       <span class="detail-cat-badge">${CATEGORIES[note.category]?.icon} ${CATEGORIES[note.category]?.name}</span>
-      ${note.tag ? `<span class="detail-tag-badge" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
+      ${note.tag ? `<span class="detail-tag-badge" onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
     <div class="detail-body">${parsedBody}</div>
@@ -649,51 +302,72 @@ async function openDetail(note, from) {
   showAppScreen('detail');
 }
 
-document.getElementById('detail-back').onclick = () => {
-  if (detailFrom === 'search') {
-    // 검색 결과로 진입했으면 홈으로
+const detailBack = document.getElementById('detail-back');
+if (detailBack) {
+  detailBack.onclick = () => {
+    if (detailFrom === 'search') {
+      searchInput.value = '';
+      searchClear.style.display = 'none';
+      searchResults.style.display = 'none';
+      const grid = document.getElementById('cat-grid');
+      if (grid) grid.style.display = '';
+      showAppScreen('home');
+    } else {
+      showAppScreen('list');
+    }
+  };
+}
+
+const btnEditDetail = document.getElementById('btn-edit-detail');
+if (btnEditDetail) {
+  btnEditDetail.onclick = () => openEditModal(appState.currentNote);
+}
+
+const btnDelDetail = document.getElementById('btn-del-detail');
+if (btnDelDetail) {
+  btnDelDetail.onclick = () => openDelModal(appState.currentNote.id);
+}
+
+// ── SEARCH
+const searchInput = document.getElementById('search-input') as HTMLInputElement;
+const searchClear = document.getElementById('search-clear') as HTMLElement;
+const searchResults = document.getElementById('search-results') as HTMLElement;
+
+if (searchInput) {
+  searchInput.addEventListener('input', () => {
+    const v = searchInput.value.trim();
+    searchClear.style.display = v ? 'block' : 'none';
+    clearTimeout(searchTimeout);
+    if (!v) { 
+      searchResults.style.display = 'none'; 
+      const grid = document.getElementById('cat-grid');
+      if (grid) grid.style.display = ''; 
+      return; 
+    }
+    searchTimeout = setTimeout(() => doSearch(v), 350);
+  });
+}
+
+if (searchClear) {
+  searchClear.onclick = () => {
     searchInput.value = '';
     searchClear.style.display = 'none';
     searchResults.style.display = 'none';
-    document.getElementById('cat-grid').style.display = '';
-    showAppScreen('home');
-  } else {
-    showAppScreen('list');
-  }
-};
-document.getElementById('btn-edit-detail').onclick = () => openEditModal(currentNote);
-document.getElementById('btn-del-detail').onclick = () => openDelModal(currentNote.id);
+    const grid = document.getElementById('cat-grid');
+    if (grid) grid.style.display = '';
+  };
+}
 
-// ── SEARCH
-const searchInput = document.getElementById('search-input');
-const searchClear = document.getElementById('search-clear');
-const searchResults = document.getElementById('search-results');
-
-searchInput.addEventListener('input', () => {
-  const v = searchInput.value.trim();
-  searchClear.style.display = v ? 'block' : 'none';
-  clearTimeout(searchTimeout);
-  if (!v) { searchResults.style.display = 'none'; document.getElementById('cat-grid').style.display = ''; return; }
-  searchTimeout = setTimeout(() => doSearch(v), 350);
-});
-
-searchClear.onclick = () => {
-  searchInput.value = '';
-  searchClear.style.display = 'none';
-  searchResults.style.display = 'none';
-  document.getElementById('cat-grid').style.display = '';
-};
-
-async function doSearch(keyword) {
-  document.getElementById('cat-grid').style.display = 'none';
+async function doSearch(keyword: string) {
+  const grid = document.getElementById('cat-grid');
+  if (grid) grid.style.display = 'none';
   searchResults.style.display = 'block';
   searchResults.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:8px 4px">검색 중...</div>`;
   try {
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
-    const results = allNotesCache.filter(n => {
+    const results = appState.allNotesCache.filter((n: any) => {
         const title = (n.title || '').toLowerCase();
         const body = (n.snippet || '').toLowerCase();
-        // Option B: Search in title and snippet (200 chars)
         return keywords.every(kw => title.includes(kw) || body.includes(kw));
     });
     if (results.length === 0) {
@@ -704,71 +378,71 @@ async function doSearch(keyword) {
       <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
       <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--sky-mid);background:transparent;color:var(--text-light);cursor:pointer">🏠 홈으로</button>
     </div>`;
-    document.getElementById('search-home-btn').onclick = () => {
-      searchInput.value = '';
-      searchClear.style.display = 'none';
-      searchResults.style.display = 'none';
-      document.getElementById('cat-grid').style.display = '';
-      showAppScreen('home');
-    };
-    results.forEach(note => {
+    
+    const homeBtn = document.getElementById('search-home-btn');
+    if (homeBtn) {
+      homeBtn.onclick = () => {
+        searchInput.value = '';
+        searchClear.style.display = 'none';
+        searchResults.style.display = 'none';
+        if (grid) grid.style.display = '';
+        showAppScreen('home');
+      };
+    }
+    
+    results.forEach((note: any) => {
       const item = document.createElement('div');
       item.className = 'search-result-item';
       const cat = CATEGORIES[note.category];
       item.innerHTML = `
         <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
         <span class="search-result-cat">${cat?.icon} ${cat?.name}</span>
-        ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
+        ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${escHtml(note.snippet || '')}</div>`;
       
       const goToDetail = async () => {
         clearTimeout(searchTimeout);
         searchInput.blur();
-        currentCat = note.category;
-        document.getElementById('list-title').textContent = (cat?.icon || '') + ' ' + (cat?.name || '');
-        const fullDoc = await getDoc(doc(db, 'notes', note.id));
-        if (fullDoc.exists()) {
-          openDetail({ id: fullDoc.id, ...fullDoc.data() }, 'search');
+        appState.currentCat = note.category;
+        const listTitle = document.getElementById('list-title');
+        if (listTitle) listTitle.textContent = (cat?.icon || '') + ' ' + (cat?.name || '');
+        const fullNote = await getSingleNote(note.id);
+        if (fullNote) {
+          openDetail(fullNote, 'search');
         } else {
           showToast('삭제된 메모입니다.');
         }
       };
       
-      // 모바일에서 스크롤 드래그와 단순 탭을 구분하기 위한 좌표 변수
       let startX = 0, startY = 0;
       let isMoving = false;
 
-      const handleTouchStart = (e) => {
+      const handleTouchStart = (e: any) => {
         const touch = e.touches[0];
         startX = touch.clientX;
         startY = touch.clientY;
         isMoving = false;
       };
 
-      const handleTouchMove = (e) => {
+      const handleTouchMove = (e: any) => {
         if (isMoving) return;
         const touch = e.touches[0];
         const diffX = Math.abs(touch.clientX - startX);
         const diffY = Math.abs(touch.clientY - startY);
-        // 터치 시작 후 손가락이 8px 이상 움직이면 스크롤 중인 것으로 판단
         if (diffX > 8 || diffY > 8) {
           isMoving = true;
         }
       };
 
-      const handleTouchEnd = (e) => {
-        if (e.target.closest('.search-result-cat')) return; // 태그 클릭은 개별 처리
-        
-        // 스크롤 드래그인 경우 상세 화면으로 가지 않음
+      const handleTouchEnd = (e: any) => {
+        if (e.target.closest('.search-result-cat')) return;
         if (isMoving) return;
-        
-        // 단순 탭(클릭)인 경우 즉시 반응하여 키보드 닫힘에 따른 씹힘과 딜레이 방지
         e.preventDefault();
         goToDetail();
       };
       
-      const handleMouseDown = (e) => {
-        if (e.button !== 0) return; // 좌클릭만 허용
+      const handleMouseDown = (e: any) => {
+        if (e.button !== 0) return;
         if (e.target.closest('.search-result-cat')) return;
         goToDetail();
       };
@@ -780,24 +454,41 @@ async function doSearch(keyword) {
       
       searchResults.appendChild(item);
     });
-  } catch(e) {
+  } catch(e: any) {
     searchResults.innerHTML = `<div style="color:var(--danger);font-size:13px">${e.message}</div>`;
   }
 }
 
-// ── MODAL
-document.getElementById('btn-add-note').onclick = openAddModal;
-document.getElementById('btn-cancel').onclick = closeModal;
-document.getElementById('btn-save').onclick = saveNote;
+// ── MODAL ACTIONS
+const btnAddNote = document.getElementById('btn-add-note');
+if (btnAddNote) btnAddNote.onclick = openAddModal;
+
+const btnCancel = document.getElementById('btn-cancel');
+if (btnCancel) btnCancel.onclick = closeModal;
+
+const btnSave = document.getElementById('btn-save');
+if (btnSave) btnSave.onclick = saveNote;
 
 // ── 메모 링크 삽입 모달
-const noteLinkModal = document.getElementById('note-link-modal');
-const noteLinkSearchInput = document.getElementById('note-link-search-input');
-const noteLinkList = document.getElementById('note-link-list');
+const noteLinkModal = document.getElementById('note-link-modal') as HTMLElement;
+const noteLinkSearchInput = document.getElementById('note-link-search-input') as HTMLInputElement;
+const noteLinkList = document.getElementById('note-link-list') as HTMLElement;
 
-document.getElementById('note-link-btn').onclick = () => openNoteLinkModal();
-document.getElementById('note-link-cancel').onclick = () => closeNoteLinkModal();
-noteLinkModal.addEventListener('click', e => { if (e.target.id === 'note-link-modal') closeNoteLinkModal(); });
+const noteLinkBtn = document.getElementById('note-link-btn');
+if (noteLinkBtn) {
+  noteLinkBtn.onclick = () => openNoteLinkModal();
+}
+
+const noteLinkCancel = document.getElementById('note-link-cancel');
+if (noteLinkCancel) {
+  noteLinkCancel.onclick = () => closeNoteLinkModal();
+}
+
+if (noteLinkModal) {
+  noteLinkModal.addEventListener('click', e => { 
+    if ((e.target as HTMLElement).id === 'note-link-modal') closeNoteLinkModal(); 
+  });
+}
 
 function openNoteLinkModal() {
   noteLinkSearchInput.value = '';
@@ -809,15 +500,14 @@ function closeNoteLinkModal() {
   noteLinkModal.style.display = 'none';
 }
 
-function renderNoteLinkList(keyword) {
+function renderNoteLinkList(keyword: string) {
   const kw = keyword.toLowerCase().trim();
   const items = kw
-    ? allNotesCache.filter(n => n.title.toLowerCase().includes(kw))
-    : allNotesCache.slice();
-  // 현재 편집 중인 메모 자신은 제외
-  const filtered = editingNoteId ? items.filter(n => n.id !== editingNoteId) : items;
-  // 카테고리명으로 정렬
-  filtered.sort((a, b) => a.title.localeCompare(b.title, 'ko'));
+    ? appState.allNotesCache.filter((n: any) => n.title.toLowerCase().includes(kw))
+    : appState.allNotesCache.slice();
+  
+  const filtered = appState.editingNoteId ? items.filter((n: any) => n.id !== appState.editingNoteId) : items;
+  filtered.sort((a: any, b: any) => a.title.localeCompare(b.title, 'ko'));
 
   if (filtered.length === 0) {
     noteLinkList.innerHTML = `<div style="text-align:center;padding:28px;color:var(--text-light);font-size:13px">`
@@ -825,7 +515,7 @@ function renderNoteLinkList(keyword) {
     return;
   }
   noteLinkList.innerHTML = '';
-  filtered.forEach(note => {
+  filtered.forEach((note: any) => {
     const cat = CATEGORIES[note.category];
     const item = document.createElement('div');
     item.className = 'note-link-item';
@@ -837,8 +527,8 @@ function renderNoteLinkList(keyword) {
   });
 }
 
-function insertNoteLink(title) {
-  const ta = document.getElementById('note-body');
+function insertNoteLink(title: string) {
+  const ta = document.getElementById('note-body') as HTMLTextAreaElement;
   const start = ta.selectionStart;
   const end = ta.selectionEnd;
   const linkText = `[[${title}]]`;
@@ -849,390 +539,433 @@ function insertNoteLink(title) {
   showToast(`"${title}" 메모 링크를 삽입했어요 📝`);
 }
 
-noteLinkSearchInput.addEventListener('input', () => {
-  renderNoteLinkList(noteLinkSearchInput.value);
-});
+if (noteLinkSearchInput) {
+  noteLinkSearchInput.addEventListener('input', () => {
+    renderNoteLinkList(noteLinkSearchInput.value);
+  });
+}
 
-function renderTagOptions(catId, selectedTag) {
+function renderTagOptions(catId: string, selectedTag: string | null) {
   const tg = document.getElementById('tag-group');
   const to = document.getElementById('tag-options');
-  if (SUB_TAGS[catId]) {
-    tg.style.display = 'block';
-    to.innerHTML = SUB_TAGS[catId].map((tag, i) => `
-      <label style="display:inline-flex">
-        <input type="radio" name="note-tag" value="${tag}" class="tag-radio" ${tag === selectedTag ? 'checked' : ''}>
-        <span class="tag-label">${tag}</span>
-      </label>
-    `).join('');
-  } else {
-    tg.style.display = 'none';
-    to.innerHTML = '';
+  if (tg && to) {
+    if (SUB_TAGS[catId]) {
+      tg.style.display = 'block';
+      to.innerHTML = SUB_TAGS[catId].map((tag) => `
+        <label style="display:inline-flex">
+          <input type="radio" name="note-tag" value="${tag}" class="tag-radio" ${tag === selectedTag ? 'checked' : ''}>
+          <span class="tag-label">${tag}</span>
+        </label>
+      `).join('');
+    } else {
+      tg.style.display = 'none';
+      to.innerHTML = '';
+    }
   }
 }
 
-function setPinToggleUI(isPinned) {
-  const cb = document.getElementById('note-pinned');
+function setPinToggleUI(isPinned: boolean) {
+  const cb = document.getElementById('note-pinned') as HTMLInputElement;
   const wrap = document.getElementById('pin-toggle-wrap');
   const status = document.getElementById('pin-toggle-status');
-  cb.checked = isPinned;
-  if (isPinned) {
-    wrap.classList.add('active');
-    status.textContent = '📌 고정됨';
-  } else {
-    wrap.classList.remove('active');
-    status.textContent = '고정 안 됨';
+  if (cb) cb.checked = isPinned;
+  if (wrap && status) {
+    if (isPinned) {
+      wrap.classList.add('active');
+      status.textContent = '📌 고정됨';
+    } else {
+      wrap.classList.remove('active');
+      status.textContent = '고정 안 됨';
+    }
   }
 }
+
 function openAddModal() {
-  editingNoteId = null; pendingImages = []; existingImages = [];
-  document.getElementById('note-title').value = '';
-  document.getElementById('note-body').value = '';
-  document.getElementById('img-preview-list').innerHTML = '';
-  document.getElementById('modal-title').textContent = `새 메모 — ${CATEGORIES[currentCat]?.name}`;
-  renderTagOptions(currentCat, currentTag || null);
+  appState.editingNoteId = null; 
+  appState.pendingImages = []; 
+  appState.existingImages = [];
+  const title = document.getElementById('note-title') as HTMLInputElement;
+  const body = document.getElementById('note-body') as HTMLTextAreaElement;
+  const previewList = document.getElementById('img-preview-list');
+  const modalTitle = document.getElementById('modal-title');
+  if (title) title.value = '';
+  if (body) body.value = '';
+  if (previewList) previewList.innerHTML = '';
+  if (modalTitle) modalTitle.textContent = `새 메모 — ${CATEGORIES[appState.currentCat]?.name}`;
+  
+  renderTagOptions(appState.currentCat, appState.currentTag || null);
   setPinToggleUI(false);
-  document.getElementById('note-modal').style.display = 'flex';
+  const modal = document.getElementById('note-modal');
+  if (modal) modal.style.display = 'flex';
 }
-function openEditModal(note) {
-  editingNoteId = note.id; pendingImages = [];
-  existingImages = (note.images || []).map(i => ({...i}));
-  document.getElementById('note-title').value = note.title || '';
-  document.getElementById('note-body').value = note.body || '';
-  document.getElementById('modal-title').textContent = '메모 수정';
+
+function openEditModal(note: any) {
+  appState.editingNoteId = note.id; 
+  appState.pendingImages = [];
+  appState.existingImages = (note.images || []).map((i: any) => ({...i}));
+  
+  const title = document.getElementById('note-title') as HTMLInputElement;
+  const body = document.getElementById('note-body') as HTMLTextAreaElement;
+  const modalTitle = document.getElementById('modal-title');
+  if (title) title.value = note.title || '';
+  if (body) body.value = note.body || '';
+  if (modalTitle) modalTitle.textContent = '메모 수정';
+  
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
   renderImgPreviews();
-  document.getElementById('note-modal').style.display = 'flex';
+  const modal = document.getElementById('note-modal');
+  if (modal) modal.style.display = 'flex';
 }
+
 function closeModal() {
-  document.getElementById('note-modal').style.display = 'none';
+  const modal = document.getElementById('note-modal');
+  if (modal) modal.style.display = 'none';
   stopRecording();
 }
 
-document.getElementById('img-upload-area').onclick = () => document.getElementById('img-input').click();
-document.getElementById('img-input').onchange = e => {
-  Array.from(e.target.files).forEach(f => compressAndAdd(f));
-  e.target.value = '';
-};
+// ── IMAGE UPLOADS
+const imgUploadArea = document.getElementById('img-upload-area');
+if (imgUploadArea) {
+  imgUploadArea.onclick = () => {
+    const imgInput = document.getElementById('img-input');
+    if (imgInput) imgInput.click();
+  };
+}
 
-// ── 본문 안에 이미지 마크다운으로 삽입
-document.getElementById('inline-img-btn').onclick = () => document.getElementById('inline-img-input').click();
-document.getElementById('inline-img-input').onchange = async e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  const btn = document.getElementById('inline-img-btn');
-  btn.textContent = '⏳ 업로드 중...';
-  btn.classList.add('uploading');
-  btn.disabled = true;
-  try {
-    // 압축: 최대 800px, 품질 0.6 (폰 화면에 충분한 해상도, 용량 최소화)
-    const MAX = 800, QUALITY = 0.6;
-    const dataUrl = await new Promise((res, rej) => {
-      const reader = new FileReader();
-      reader.onload = ev => res(ev.target.result);
-      reader.onerror = rej;
-      reader.readAsDataURL(file);
-    });
-    const img = await new Promise((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = rej;
-      i.src = dataUrl;
-    });
-    let { width: w, height: h } = img;
-    if (w > MAX || h > MAX) {
-      const ratio = Math.min(MAX / w, MAX / h);
-      w = Math.round(w * ratio); h = Math.round(h * ratio);
+const imgInput = document.getElementById('img-input') as HTMLInputElement;
+if (imgInput) {
+  imgInput.onchange = e => {
+    const files = (e.target as HTMLInputElement).files;
+    if (files) {
+      Array.from(files).forEach(f => compressAndAdd(f));
     }
-    const canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
-    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-    const compressed = canvas.toDataURL('image/jpeg', QUALITY);
+    imgInput.value = '';
+  };
+}
 
-    // Firebase Storage 업로드
-    const path = `notes/${currentUser.uid}/inline_${Date.now()}.jpg`;
-    const sRef = ref(storage, path);
-    await uploadString(sRef, compressed.split(',')[1], 'base64');
-    const url = await getDownloadURL(sRef);
+// 본문 인라인 이미지 업로드
+const inlineImgBtn = document.getElementById('inline-img-btn') as HTMLButtonElement;
+const inlineImgInput = document.getElementById('inline-img-input') as HTMLInputElement;
 
-    // 커서 위치에 마크다운 이미지 문법 삽입
-    const ta = document.getElementById('note-body');
-    const start = ta.selectionStart;
-    const end = ta.selectionEnd;
-    const mdImg = `\n![이미지](${url})\n`;
-    ta.value = ta.value.slice(0, start) + mdImg + ta.value.slice(end);
-    ta.selectionStart = ta.selectionEnd = start + mdImg.length;
-    ta.focus();
-    showToast('이미지가 본문에 삽입되었어요 🖼️');
-  } catch(e) {
-    showToast('업로드 실패: ' + e.message);
-  } finally {
-    btn.textContent = '🖼️ 본문에 이미지';
-    btn.classList.remove('uploading');
-    btn.disabled = false;
-  }
-};
+if (inlineImgBtn) {
+  inlineImgBtn.onclick = () => {
+    if (inlineImgInput) inlineImgInput.click();
+  };
+}
 
-async function compressAndAdd(file) {
-  const MAX_W = 800, MAX_H = 800, QUALITY = 0.6;
-  try {
-    const dataUrl = await new Promise((res, rej) => {
-      const reader = new FileReader();
-      reader.onload = ev => res(ev.target.result);
-      reader.onerror = rej;
-      reader.readAsDataURL(file);
-    });
-    const img = await new Promise((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = rej;
-      i.src = dataUrl;
-    });
-    let { width: w, height: h } = img;
-    if (w > MAX_W || h > MAX_H) {
-      const ratio = Math.min(MAX_W / w, MAX_H / h);
-      w = Math.round(w * ratio);
-      h = Math.round(h * ratio);
+if (inlineImgInput) {
+  inlineImgInput.onchange = async e => {
+    const files = (e.target as HTMLInputElement).files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    inlineImgInput.value = '';
+    
+    inlineImgBtn.textContent = '⏳ 업로드 중...';
+    inlineImgBtn.classList.add('uploading');
+    inlineImgBtn.disabled = true;
+    try {
+      const compressed = await compressImage(file, 800, 800, 0.6);
+      const { url } = await uploadImageToStorage(compressed, `inline_${Date.now()}.jpg`);
+      
+      const ta = document.getElementById('note-body') as HTMLTextAreaElement;
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      const mdImg = `\n![이미지](${url})\n`;
+      ta.value = ta.value.slice(0, start) + mdImg + ta.value.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + mdImg.length;
+      ta.focus();
+      showToast('이미지가 본문에 삽입되었어요 🖼️');
+    } catch(e: any) {
+      showToast('업로드 실패: ' + e.message);
+    } finally {
+      inlineImgBtn.textContent = '🖼️ 본문에 이미지';
+      inlineImgBtn.classList.remove('uploading');
+      inlineImgBtn.disabled = false;
     }
-    const canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
-    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-    const compressed = canvas.toDataURL('image/jpeg', QUALITY);
+  };
+}
+
+async function compressAndAdd(file: File) {
+  try {
+    const compressed = await compressImage(file, 800, 800, 0.6);
     const origKB = Math.round(file.size / 1024);
     const compKB = Math.round(compressed.length * 0.75 / 1024);
     console.log(`압축: ${origKB}KB → ${compKB}KB`);
-    pendingImages.push({ dataUrl: compressed, name: file.name.replace(/\.[^.]+$/, '.jpg') });
+    appState.pendingImages.push({ dataUrl: compressed, name: file.name.replace(/\.[^.]+$/, '.jpg') });
     renderImgPreviews();
-  } catch(e) {
+  } catch(e: any) {
     showToast('이미지 처리 실패: ' + e.message);
   }
 }
 
 function renderImgPreviews() {
   const list = document.getElementById('img-preview-list');
+  if (!list) return;
   list.innerHTML = '';
-  existingImages.forEach((img, i) => {
+  appState.existingImages.forEach((img: any, i: number) => {
     const item = document.createElement('div');
     item.className = 'img-preview-item';
     item.innerHTML = `<img src="${img.url}"><button class="img-remove-btn">×</button>`;
-    item.querySelector('button').onclick = () => { existingImages.splice(i,1); renderImgPreviews(); };
+    const btn = item.querySelector('button');
+    if (btn) btn.onclick = () => { appState.existingImages.splice(i,1); renderImgPreviews(); };
     list.appendChild(item);
   });
-  pendingImages.forEach((img, i) => {
+  appState.pendingImages.forEach((img: any, i: number) => {
     const item = document.createElement('div');
     item.className = 'img-preview-item';
     item.innerHTML = `<img src="${img.dataUrl}"><button class="img-remove-btn">×</button>`;
-    item.querySelector('button').onclick = () => { pendingImages.splice(i,1); renderImgPreviews(); };
+    const btn = item.querySelector('button');
+    if (btn) btn.onclick = () => { appState.pendingImages.splice(i,1); renderImgPreviews(); };
     list.appendChild(item);
   });
 }
 
+// ── SAVE NOTE
 async function saveNote() {
-  const title = document.getElementById('note-title').value.trim();
-  const body = document.getElementById('note-body').value.trim();
-  const tagRadio = document.querySelector('input[name="note-tag"]:checked');
+  const titleEl = document.getElementById('note-title') as HTMLInputElement;
+  const bodyEl = document.getElementById('note-body') as HTMLTextAreaElement;
+  const tagRadio = document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement;
+  const pinnedEl = document.getElementById('note-pinned') as HTMLInputElement;
+  
+  const title = titleEl ? titleEl.value.trim() : '';
+  const body = bodyEl ? bodyEl.value.trim() : '';
   const tag = tagRadio ? tagRadio.value : null;
-  const pinned = document.getElementById('note-pinned').checked;
+  const pinned = pinnedEl ? pinnedEl.checked : false;
+  
   if (!title) { showToast('제목을 입력해주세요'); return; }
-  const btn = document.getElementById('btn-save');
-  btn.textContent = '저장 중...'; btn.disabled = true;
+  const btn = document.getElementById('btn-save') as HTMLButtonElement;
+  if (btn) {
+    btn.textContent = '저장 중...'; 
+    btn.disabled = true;
+  }
   try {
-    const uploadedImgs = [];
-    for (const img of pendingImages) {
+    const uploadedImgs: any[] = [];
+    for (const img of appState.pendingImages) {
       try {
-        const path = `notes/${currentUser.uid}/${Date.now()}_${img.name}`;
-        const sRef = ref(storage, path);
-        // base64 데이터에서 헤더 제거 후 업로드
-        const base64Data = img.dataUrl.split(',')[1];
-        await uploadString(sRef, base64Data, 'base64');
-        const url = await getDownloadURL(sRef);
+        const { url, path } = await uploadImageToStorage(img.dataUrl, img.name);
         uploadedImgs.push({ url, path });
       } catch(imgErr) {
         console.error('이미지 업로드 오류:', imgErr);
         showToast('이미지 업로드 실패 — 텍스트만 저장돼요');
       }
     }
-    const allImages = [...existingImages, ...uploadedImgs];
-    // 핀 고정 상태에 따라 pinnedAt 처리
-    const prevPinned = editingNoteId ? !!currentNote?.pinned : false;
-    const pinnedAt = pinned
-      ? (prevPinned && currentNote?.pinnedAt ? currentNote.pinnedAt : Timestamp.now())
-      : null;
-    if (editingNoteId) {
-      const oldNote = { ...currentNote };
-      await updateDoc(doc(db, 'notes', editingNoteId), {
+    const allImages = [...appState.existingImages, ...uploadedImgs];
+    const prevPinned = appState.editingNoteId ? !!appState.currentNote?.pinned : false;
+    // pinnedAt 타임스탬프 계산
+    let pinnedAt: any = null;
+    if (pinned) {
+      pinnedAt = prevPinned && appState.currentNote?.pinnedAt ? appState.currentNote.pinnedAt : new Date();
+    }
+    
+    if (appState.editingNoteId) {
+      const oldNote = { ...appState.currentNote };
+      const updateData = {
         title, body, tag, images: allImages,
-        pinned, pinnedAt,
-        updatedAt: Timestamp.now()
-      });
-      await syncNoteMeta('update', editingNoteId, { title, body, tag, category: currentNote.category }, oldNote);
+        pinned, pinnedAt
+      };
+      await updateSingleNote(appState.editingNoteId, updateData);
+      await syncNoteMeta('update', appState.editingNoteId, { title, body, tag, category: appState.currentNote.category }, oldNote);
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
-      // 상세화면 갱신
-      currentNote = { ...currentNote, title, body, tag, images: allImages, pinned, pinnedAt };
-      openDetail(currentNote);
+      
+      appState.currentNote = { ...appState.currentNote, ...updateData };
+      openDetail(appState.currentNote);
     } else {
-      const noteRef = doc(collection(db, 'notes'));
-      await setDoc(noteRef, {
-        uid: currentUser.uid, category: currentCat, tag,
-        title, body, images: allImages,
-        pinned, pinnedAt,
-        createdAt: Timestamp.now()
-      });
-      await syncNoteMeta('add', noteRef.id, { title, body, tag, category: currentCat }, null);
+      const noteData = {
+        category: appState.currentCat,
+        tag, title, body, images: allImages,
+        pinned, pinnedAt
+      };
+      const newId = await createNote(noteData);
+      await syncNoteMeta('add', newId, { title, body, tag, category: appState.currentCat }, null);
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
     closeModal();
-  } catch(e) { showToast('저장 실패: ' + e.message); }
-  finally { btn.textContent = '💾 저장'; btn.disabled = false; }
-}
-
-// ── DELETE
-function openDelModal(id) {
-  deleteTargetId = id;
-  document.getElementById('del-modal').style.display = 'flex';
-}
-document.getElementById('del-cancel').onclick = () => { document.getElementById('del-modal').style.display = 'none'; };
-document.getElementById('del-confirm').onclick = async () => {
-  if (!deleteTargetId) return;
-  try {
-    await deleteDoc(doc(db, 'notes', deleteTargetId));
-    await syncNoteMeta('delete', deleteTargetId, null, currentNote);
-    showToast('메모가 삭제되었어요 🗑️');
-    document.getElementById('del-modal').style.display = 'none';
-    deleteTargetId = null;
-    showAppScreen('list');
-  } catch(e) { showToast('삭제 실패: ' + e.message); }
-};
-
-// ── SHARE
-document.getElementById('btn-share-detail').onclick = () => {
-  const { title, body } = getShareText();
-  if (navigator.share) {
-    navigator.share({ title, text: body }).catch(err => {
-      if (err.name !== 'AbortError') {
-        document.getElementById('share-modal').style.display = 'flex';
-      }
-    });
-  } else {
-    document.getElementById('share-modal').style.display = 'flex';
-  }
-};
-document.getElementById('share-cancel').onclick = () => {
-  document.getElementById('share-modal').style.display = 'none';
-};
-
-function getShareText() {
-  if (!currentNote) return { title: '', body: '' };
-  return {
-    title: currentNote.title || '제목 없음',
-    body: currentNote.body || ''
-  };
-}
-
-// Gmail / 이메일 공유
-document.getElementById('share-gmail').onclick = () => {
-  const { title, body } = getShareText();
-  document.getElementById('share-modal').style.display = 'none';
-  location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
-};
-
-// 카카오톡 공유
-document.getElementById('share-kakao').onclick = () => {
-  const { title, body } = getShareText();
-  const text = `${title}\n\n${body}`;
-  document.getElementById('share-modal').style.display = 'none';
-
-  const isAndroid = /android/i.test(navigator.userAgent);
-  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
-
-  if (isAndroid) {
-    const intentUrl = `intent://send#Intent;action=android.intent.action.SEND;type=text/plain;S.android.intent.extra.TEXT=${encodeURIComponent(text)};package=com.kakao.talk;end`;
-    const timer = setTimeout(() => {
-      showToast('카카오톡이 설치되어 있지 않아요');
-    }, 1500);
-    window.addEventListener('pagehide', () => clearTimeout(timer), { once: true });
-    window.addEventListener('blur', () => clearTimeout(timer), { once: true });
-    location.href = intentUrl;
-  } else if (isIOS) {
-    const kakaoUrl = `kakaolink://send?text=${encodeURIComponent(text)}`;
-    const timer = setTimeout(() => {
-      showToast('카카오톡이 설치되어 있지 않아요');
-    }, 1500);
-    window.addEventListener('pagehide', () => clearTimeout(timer), { once: true });
-    window.addEventListener('blur', () => clearTimeout(timer), { once: true });
-    location.href = kakaoUrl;
-  } else {
-    showToast('카카오톡 공유는 모바일에서 지원됩니다.');
-  }
-};
-
-// Telegram 공유
-document.getElementById('share-telegram').onclick = () => {
-  const { title, body } = getShareText();
-  const text = `${title}\n\n${body}`;
-  document.getElementById('share-modal').style.display = 'none';
-  window.open(`https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
-};
-
-// 다른 앱으로 공유 (네이티브 공유 시트 강제 호출)
-document.getElementById('share-native').onclick = () => {
-  const { title, body } = getShareText();
-  document.getElementById('share-modal').style.display = 'none';
-  if (navigator.share) {
-    navigator.share({ title, text: body }).catch(console.error);
-  } else {
-    showToast('이 브라우저에서는 공유 기능을 지원하지 않아요');
-  }
-};
-
-// ── VOICE
-document.getElementById('voice-btn').onclick = () => {
-  if (isRecording) { stopRecording(); return; }
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { showToast('이 브라우저는 음성 입력을 지원하지 않아요'); return; }
-  recognition = new SR();
-  recognition.lang = 'ko-KR'; recognition.continuous = true; recognition.interimResults = true;
-  let final = '';
-  recognition.onresult = e => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) final += e.results[i][0].transcript;
-      else interim += e.results[i][0].transcript;
+  } catch(e: any) { 
+    showToast('저장 실패: ' + e.message); 
+  } finally { 
+    if (btn) {
+      btn.textContent = '💾 저장'; 
+      btn.disabled = false; 
     }
-    document.getElementById('note-body').value += final + interim;
-    final = '';
+  }
+}
+
+// ── DELETE NOTE
+function openDelModal(id: string) {
+  appState.deleteTargetId = id;
+  const modal = document.getElementById('del-modal');
+  if (modal) modal.style.display = 'flex';
+}
+
+const delCancel = document.getElementById('del-cancel');
+if (delCancel) {
+  delCancel.onclick = () => {
+    const modal = document.getElementById('del-modal');
+    if (modal) modal.style.display = 'none';
   };
-  recognition.onerror = () => { stopRecording(); showToast('음성 인식 오류'); };
-  recognition.onend = () => { if (isRecording) stopRecording(); };
-  recognition.start();
-  isRecording = true;
-  const vb = document.getElementById('voice-btn');
-  vb.textContent = '🔴 녹음 중... (클릭하여 종료)';
-  vb.classList.add('recording');
-};
+}
+
+const delConfirm = document.getElementById('del-confirm');
+if (delConfirm) {
+  delConfirm.onclick = async () => {
+    if (!appState.deleteTargetId) return;
+    try {
+      await deleteSingleNote(appState.deleteTargetId);
+      await syncNoteMeta('delete', appState.deleteTargetId, null, appState.currentNote);
+      showToast('메모가 삭제되었어요 🗑️');
+      const modal = document.getElementById('del-modal');
+      if (modal) modal.style.display = 'none';
+      appState.deleteTargetId = null;
+      showAppScreen('list');
+    } catch(e: any) { showToast('삭제 실패: ' + e.message); }
+  };
+}
+
+// ── SHARE ACTIONS
+const btnShareDetail = document.getElementById('btn-share-detail');
+if (btnShareDetail) {
+  btnShareDetail.onclick = () => {
+    const { title, body } = getShareText(appState.currentNote);
+    if (navigator.share) {
+      navigator.share({ title, text: body }).catch(err => {
+        if (err.name !== 'AbortError') {
+          const modal = document.getElementById('share-modal');
+          if (modal) modal.style.display = 'flex';
+        }
+      });
+    } else {
+      const modal = document.getElementById('share-modal');
+      if (modal) modal.style.display = 'flex';
+    }
+  };
+}
+
+const shareCancel = document.getElementById('share-cancel');
+if (shareCancel) {
+  shareCancel.onclick = () => {
+    const modal = document.getElementById('share-modal');
+    if (modal) modal.style.display = 'none';
+  };
+}
+
+const shareGmail = document.getElementById('share-gmail');
+if (shareGmail) {
+  shareGmail.onclick = () => {
+    const { title, body } = getShareText(appState.currentNote);
+    const modal = document.getElementById('share-modal');
+    if (modal) modal.style.display = 'none';
+    shareViaEmail(title, body);
+  };
+}
+
+const shareKakaoBtn = document.getElementById('share-kakao');
+if (shareKakaoBtn) {
+  shareKakaoBtn.onclick = () => {
+    const { title, body } = getShareText(appState.currentNote);
+    const modal = document.getElementById('share-modal');
+    if (modal) modal.style.display = 'none';
+    shareViaKakao(title, body, showToast);
+  };
+}
+
+const shareTelegramBtn = document.getElementById('share-telegram');
+if (shareTelegramBtn) {
+  shareTelegramBtn.onclick = () => {
+    const { title, body } = getShareText(appState.currentNote);
+    const modal = document.getElementById('share-modal');
+    if (modal) modal.style.display = 'none';
+    shareViaTelegram(title, body);
+  };
+}
+
+const shareNativeBtn = document.getElementById('share-native');
+if (shareNativeBtn) {
+  shareNativeBtn.onclick = () => {
+    const { title, body } = getShareText(appState.currentNote);
+    const modal = document.getElementById('share-modal');
+    if (modal) modal.style.display = 'none';
+    shareViaNative(title, body, showToast);
+  };
+}
+
+// ── VOICE SPEECH INPUT
+const voiceBtn = document.getElementById('voice-btn');
+if (voiceBtn) {
+  voiceBtn.onclick = () => {
+    if (isRecording) { stopRecording(); return; }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { showToast('이 브라우저는 음성 입력을 지원하지 않아요'); return; }
+    recognition = new SR();
+    recognition.lang = 'ko-KR'; 
+    recognition.continuous = true; 
+    recognition.interimResults = true;
+    let final = '';
+    recognition.onresult = (e: any) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) final += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      const bodyTa = document.getElementById('note-body') as HTMLTextAreaElement;
+      if (bodyTa) bodyTa.value += final + interim;
+      final = '';
+    };
+    recognition.onerror = () => { stopRecording(); showToast('음성 인식 오류'); };
+    recognition.onend = () => { if (isRecording) stopRecording(); };
+    recognition.start();
+    isRecording = true;
+    voiceBtn.textContent = '🔴 녹음 중... (클릭하여 종료)';
+    voiceBtn.classList.add('recording');
+  };
+}
+
 function stopRecording() {
   if (recognition) { try { recognition.stop(); } catch(e){} recognition = null; }
   isRecording = false;
   const vb = document.getElementById('voice-btn');
-  vb.textContent = '🎤 음성 입력';
-  vb.classList.remove('recording');
+  if (vb) {
+    vb.textContent = '🎤 음성 입력';
+    vb.classList.remove('recording');
+  }
 }
 
-// 핀 토글 인터랙션
-document.getElementById('pin-toggle-wrap').addEventListener('click', () => {
-  const cb = document.getElementById('note-pinned');
-  cb.checked = !cb.checked;
-  setPinToggleUI(cb.checked);
-});
+// Pin 토글 UI 바인딩
+const pinToggleWrap = document.getElementById('pin-toggle-wrap');
+if (pinToggleWrap) {
+  pinToggleWrap.addEventListener('click', () => {
+    const cb = document.getElementById('note-pinned') as HTMLInputElement;
+    if (cb) {
+      cb.checked = !cb.checked;
+      setPinToggleUI(cb.checked);
+    }
+  });
+}
 
-// overlay 클릭 닫기
-document.getElementById('note-modal').addEventListener('click', e => { if(e.target.id==='note-modal') closeModal(); });
-document.getElementById('del-modal').addEventListener('click', e => { if(e.target.id==='del-modal') document.getElementById('del-modal').style.display='none'; });
-document.getElementById('share-modal').addEventListener('click', e => { if(e.target.id==='share-modal') document.getElementById('share-modal').style.display='none'; });
+// 모달 바깥 배경 클릭 시 닫기
+const noteModal = document.getElementById('note-modal');
+if (noteModal) {
+  noteModal.addEventListener('click', e => { 
+    if ((e.target as HTMLElement).id === 'note-modal') closeModal(); 
+  });
+}
 
-// ── 이미지 다운로드
-async function downloadImage(url) {
+const delModal = document.getElementById('del-modal');
+if (delModal) {
+  delModal.addEventListener('click', e => { 
+    if ((e.target as HTMLElement).id === 'del-modal') delModal.style.display = 'none'; 
+  });
+}
+
+const shareModal = document.getElementById('share-modal');
+if (shareModal) {
+  shareModal.addEventListener('click', e => { 
+    if ((e.target as HTMLElement).id === 'share-modal') shareModal.style.display = 'none'; 
+  });
+}
+
+// ── IMAGE VIEWER
+async function downloadImage(url: string) {
   showToast('이미지 저장 중...');
   try {
     const response = await fetch(url);
@@ -1248,37 +981,50 @@ async function downloadImage(url) {
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     showToast('이미지가 저장되었어요 ✅');
   } catch(e) {
-    // fetch 실패 시 새 탭으로 열기 (폴백)
     window.open(url, '_blank');
     showToast('새 탭에서 이미지를 길게 눌러 저장하세요');
   }
 }
 
-appState.openImageViewer = function(url) {
+appState.openImageViewer = function(url: string) {
   const viewer = document.getElementById('img-viewer');
-  document.getElementById('img-viewer-img').src = url;
-  document.getElementById('img-viewer-download').dataset.url = url;
-  viewer.style.display = 'flex';
+  const viewerImg = document.getElementById('img-viewer-img') as HTMLImageElement;
+  const downloadBtn = document.getElementById('img-viewer-download') as HTMLElement;
+  if (viewerImg) viewerImg.src = url;
+  if (downloadBtn) downloadBtn.dataset.url = url;
+  if (viewer) viewer.style.display = 'flex';
 };
-document.getElementById('img-viewer-close').onclick = () => {
-  document.getElementById('img-viewer').style.display = 'none';
-};
-document.getElementById('img-viewer-download').onclick = () => {
-  const url = document.getElementById('img-viewer-download').dataset.url;
-  if (url) downloadImage(url);
-};
-document.getElementById('img-viewer').addEventListener('click', e => {
-  if(e.target.id === 'img-viewer') document.getElementById('img-viewer').style.display = 'none';
-});
 
-// ── 이미지 컨텍스트 메뉴 (우클릭 / 롱프레스)
-let ctxMenuUrl = null;
-let longPressTimer = null;
-const ctxMenu = document.getElementById('img-ctx-menu');
+const imgViewerClose = document.getElementById('img-viewer-close');
+if (imgViewerClose) {
+  imgViewerClose.onclick = () => {
+    const viewer = document.getElementById('img-viewer');
+    if (viewer) viewer.style.display = 'none';
+  };
+}
 
-function showImgCtxMenu(x, y, url) {
+const imgViewerDownload = document.getElementById('img-viewer-download');
+if (imgViewerDownload) {
+  imgViewerDownload.onclick = () => {
+    const url = imgViewerDownload.dataset.url;
+    if (url) downloadImage(url);
+  };
+}
+
+const imgViewer = document.getElementById('img-viewer');
+if (imgViewer) {
+  imgViewer.addEventListener('click', e => {
+    if ((e.target as HTMLElement).id === 'img-viewer') imgViewer.style.display = 'none';
+  });
+}
+
+// ── IMAGE CONTEXT MENU (ContextMenu & LongPress)
+let ctxMenuUrl: string | null = null;
+let longPressTimer: any = null;
+const ctxMenu = document.getElementById('img-ctx-menu') as HTMLElement;
+
+function showImgCtxMenu(x: number, y: number, url: string) {
   ctxMenuUrl = url;
-  // 화면 밖으로 나가지 않도록 위치 조정
   ctxMenu.style.display = 'block';
   const menuW = 200, menuH = 110;
   const vw = window.innerWidth, vh = window.innerHeight;
@@ -1290,88 +1036,104 @@ function hideImgCtxMenu() {
   ctxMenuUrl = null;
 }
 
-document.getElementById('img-ctx-view').onclick = () => {
-  if (ctxMenuUrl) openImageViewer(ctxMenuUrl);
-  hideImgCtxMenu();
-};
-document.getElementById('img-ctx-download').onclick = () => {
-  if (ctxMenuUrl) downloadImage(ctxMenuUrl);
-  hideImgCtxMenu();
-};
-
-// 바깥 클릭 시 메뉴 닫기
-document.addEventListener('click', e => {
-  if (!ctxMenu.contains(e.target)) hideImgCtxMenu();
-});
-document.addEventListener('contextmenu', e => {
-  if (!ctxMenu.contains(e.target)) hideImgCtxMenu();
-});
-
-// detail-content 이미지 이벤트 위임
-const detailContent = document.getElementById('detail-content');
-
-// PC: 우클릭 → 커스텀 컨텍스트 메뉴
-detailContent.addEventListener('contextmenu', e => {
-  const img = e.target.closest('img');
-  if (!img) return;
-  e.preventDefault();
-  showImgCtxMenu(e.clientX, e.clientY, img.src);
-});
-
-// 모바일: 롱프레스 → 커스텀 컨텍스트 메뉴
-detailContent.addEventListener('touchstart', e => {
-  const img = e.target.closest('img');
-  if (!img) return;
-  const touch = e.touches[0];
-  longPressTimer = setTimeout(() => {
-    showImgCtxMenu(touch.clientX, touch.clientY, img.src);
-  }, 600);
-}, { passive: true });
-detailContent.addEventListener('touchend', () => {
-  clearTimeout(longPressTimer);
-}, { passive: true });
-detailContent.addEventListener('touchmove', () => {
-  clearTimeout(longPressTimer);
-}, { passive: true });
-
-// 이미지 뷰어 내 롱프레스도 지원
-const viewerImg = document.getElementById('img-viewer-img');
-viewerImg.addEventListener('contextmenu', e => {
-  e.preventDefault();
-  const url = document.getElementById('img-viewer-download').dataset.url;
-  if (url) showImgCtxMenu(e.clientX, e.clientY, url);
-});
-viewerImg.addEventListener('touchstart', e => {
-  const touch = e.touches[0];
-  const url = document.getElementById('img-viewer-download').dataset.url;
-  longPressTimer = setTimeout(() => {
-    if (url) showImgCtxMenu(touch.clientX, touch.clientY, url);
-  }, 600);
-}, { passive: true });
-viewerImg.addEventListener('touchend', () => clearTimeout(longPressTimer), { passive: true });
-viewerImg.addEventListener('touchmove', () => clearTimeout(longPressTimer), { passive: true });
-
-// ── 뒤로가기 (Android/PWA)
-function currentScreen() {
-  if (document.getElementById('note-modal').style.display !== 'none') return 'modal';
-  if (document.getElementById('del-modal').style.display !== 'none') return 'del-modal';
-  if (document.getElementById('share-modal').style.display !== 'none') return 'share-modal';
-  const active = document.querySelector('.screen.active');
-  return active ? active.id.replace('screen-', '') : 'home';
+const ctxView = document.getElementById('img-ctx-view');
+if (ctxView) {
+  ctxView.onclick = () => {
+    if (ctxMenuUrl) appState.openImageViewer(ctxMenuUrl);
+    hideImgCtxMenu();
+  };
 }
 
-window.addEventListener('popstate', e => {
-  const screen = currentScreen();
-  if (screen === 'modal') { closeModal(); history.pushState(null, '', location.href); return; }
-  if (screen === 'del-modal') { document.getElementById('del-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
-  if (screen === 'share-modal') { document.getElementById('share-modal').style.display = 'none'; history.pushState(null, '', location.href); return; }
+const ctxDownload = document.getElementById('img-ctx-download');
+if (ctxDownload) {
+  ctxDownload.onclick = () => {
+    if (ctxMenuUrl) downloadImage(ctxMenuUrl);
+    hideImgCtxMenu();
+  };
+}
+
+document.addEventListener('click', e => {
+  if (ctxMenu && !ctxMenu.contains(e.target as Node)) hideImgCtxMenu();
+});
+document.addEventListener('contextmenu', e => {
+  if (ctxMenu && !ctxMenu.contains(e.target as Node)) hideImgCtxMenu();
+});
+
+// 이미지 컨텍스트 메뉴 터치/클릭 감지 (DetailContent 위임)
+const detailContent = document.getElementById('detail-content');
+if (detailContent) {
+  detailContent.addEventListener('contextmenu', e => {
+    const img = (e.target as HTMLElement).closest('img');
+    if (!img) return;
+    e.preventDefault();
+    showImgCtxMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY, img.src);
+  });
+  
+  detailContent.addEventListener('touchstart', e => {
+    const img = (e.target as HTMLElement).closest('img');
+    if (!img) return;
+    const touch = e.touches[0];
+    longPressTimer = setTimeout(() => {
+      showImgCtxMenu(touch.clientX, touch.clientY, img.src);
+    }, 600);
+  }, { passive: true });
+  
+  detailContent.addEventListener('touchend', () => {
+    clearTimeout(longPressTimer);
+  }, { passive: true });
+  
+  detailContent.addEventListener('touchmove', () => {
+    clearTimeout(longPressTimer);
+  }, { passive: true });
+}
+
+// 이미지 뷰어 롱프레스
+const viewerImg = document.getElementById('img-viewer-img');
+if (viewerImg) {
+  viewerImg.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const downloadBtn = document.getElementById('img-viewer-download') as HTMLElement;
+    const url = downloadBtn ? downloadBtn.dataset.url : null;
+    if (url) showImgCtxMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY, url);
+  });
+  viewerImg.addEventListener('touchstart', e => {
+    const touch = e.touches[0];
+    const downloadBtn = document.getElementById('img-viewer-download') as HTMLElement;
+    const url = downloadBtn ? downloadBtn.dataset.url : null;
+    longPressTimer = setTimeout(() => {
+      if (url) showImgCtxMenu(touch.clientX, touch.clientY, url);
+    }, 600);
+  }, { passive: true });
+  viewerImg.addEventListener('touchend', () => clearTimeout(longPressTimer), { passive: true });
+  viewerImg.addEventListener('touchmove', () => clearTimeout(longPressTimer), { passive: true });
+}
+
+// ── PWA HISTORY & BACK BUTTON
+initPwaNavigation((screen) => {
+  if (screen === 'modal') { 
+    closeModal(); 
+    history.pushState(null, '', location.href); 
+    return; 
+  }
+  if (screen === 'del-modal') { 
+    const modal = document.getElementById('del-modal');
+    if (modal) modal.style.display = 'none'; 
+    history.pushState(null, '', location.href); 
+    return; 
+  }
+  if (screen === 'share-modal') { 
+    const modal = document.getElementById('share-modal');
+    if (modal) modal.style.display = 'none'; 
+    history.pushState(null, '', location.href); 
+    return; 
+  }
   if (screen === 'detail') {
     if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
-    // 검색 관련 상태 초기화 (깨끗한 홈화면 복원)
     searchInput.value = '';
     searchClear.style.display = 'none';
     searchResults.style.display = 'none';
-    document.getElementById('cat-grid').style.display = '';
+    const grid = document.getElementById('cat-grid');
+    if (grid) grid.style.display = '';
     
     showAppScreen('home');
     history.pushState(null, '', location.href);
@@ -1379,16 +1141,14 @@ window.addEventListener('popstate', e => {
   }
   if (screen === 'list') {
     if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
-    // 검색 관련 상태 초기화
     searchInput.value = '';
     searchClear.style.display = 'none';
     searchResults.style.display = 'none';
-    document.getElementById('cat-grid').style.display = '';
+    const grid = document.getElementById('cat-grid');
+    if (grid) grid.style.display = '';
     
-    showAppScreen('home'); history.pushState(null, '', location.href); return;
+    showAppScreen('home'); 
+    history.pushState(null, '', location.href); 
+    return;
   }
-  // 홈화면에서 뒤로가기 → 앱 종료 (기본 동작)
 });
-
-// 앱 시작 시 history state 설정
-history.pushState(null, '', location.href);

@@ -1,4 +1,16 @@
 export const appState: any = {
+  // 전역 상태 변수들
+  currentUser: null,
+  currentCat: null,
+  currentTag: null,
+  currentNote: null,
+  editingNoteId: null,
+  deleteTargetId: null,
+  pendingImages: [],
+  existingImages: [],
+  allNotesCache: [],
+
+  // 콜백/구독 관리용 훅 및 유틸리티 매핑
   handleNoteLinkClick: null,
   openList: null,
   openImageViewer: null,
