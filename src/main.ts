@@ -368,7 +368,8 @@ async function doSearch(keyword: string) {
     const results = appState.allNotesCache.filter((n: any) => {
         const title = (n.title || '').toLowerCase();
         const body = (n.snippet || '').toLowerCase();
-        return keywords.every(kw => title.includes(kw) || body.includes(kw));
+        const keywordsField = (n.keywords || '').toLowerCase();
+        return keywords.every(kw => title.includes(kw) || body.includes(kw) || keywordsField.includes(kw));
     });
     if (results.length === 0) {
       searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
@@ -588,9 +589,11 @@ function openAddModal() {
   const body = document.getElementById('note-body') as HTMLTextAreaElement;
   const previewList = document.getElementById('img-preview-list');
   const modalTitle = document.getElementById('modal-title');
+  const keywordsInput = document.getElementById('note-keywords') as HTMLInputElement;
   if (title) title.value = '';
   if (body) body.value = '';
   if (previewList) previewList.innerHTML = '';
+  if (keywordsInput) keywordsInput.value = '';
   if (modalTitle) modalTitle.textContent = `새 메모 — ${CATEGORIES[appState.currentCat]?.name}`;
   
   renderTagOptions(appState.currentCat, appState.currentTag || null);
@@ -607,8 +610,10 @@ function openEditModal(note: any) {
   const title = document.getElementById('note-title') as HTMLInputElement;
   const body = document.getElementById('note-body') as HTMLTextAreaElement;
   const modalTitle = document.getElementById('modal-title');
+  const keywordsInput = document.getElementById('note-keywords') as HTMLInputElement;
   if (title) title.value = note.title || '';
   if (body) body.value = note.body || '';
+  if (keywordsInput) keywordsInput.value = note.keywords || '';
   if (modalTitle) modalTitle.textContent = '메모 수정';
   
   renderTagOptions(note.category, note.tag || null);
@@ -727,11 +732,13 @@ async function saveNote() {
   const bodyEl = document.getElementById('note-body') as HTMLTextAreaElement;
   const tagRadio = document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement;
   const pinnedEl = document.getElementById('note-pinned') as HTMLInputElement;
+  const keywordsEl = document.getElementById('note-keywords') as HTMLInputElement;
   
   const title = titleEl ? titleEl.value.trim() : '';
   const body = bodyEl ? bodyEl.value.trim() : '';
   const tag = tagRadio ? tagRadio.value : null;
   const pinned = pinnedEl ? pinnedEl.checked : false;
+  const keywords = keywordsEl ? keywordsEl.value.trim() : '';
   
   if (!title) { showToast('제목을 입력해주세요'); return; }
   const btn = document.getElementById('btn-save') as HTMLButtonElement;
@@ -762,10 +769,10 @@ async function saveNote() {
       const oldNote = { ...appState.currentNote };
       const updateData = {
         title, body, tag, images: allImages,
-        pinned, pinnedAt
+        pinned, pinnedAt, keywords
       };
       await updateSingleNote(appState.editingNoteId, updateData);
-      await syncNoteMeta('update', appState.editingNoteId, { title, body, tag, category: appState.currentNote.category }, oldNote);
+      await syncNoteMeta('update', appState.editingNoteId, { title, body, tag, category: appState.currentNote.category, keywords }, oldNote);
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       
       appState.currentNote = { ...appState.currentNote, ...updateData };
@@ -774,10 +781,10 @@ async function saveNote() {
       const noteData = {
         category: appState.currentCat,
         tag, title, body, images: allImages,
-        pinned, pinnedAt
+        pinned, pinnedAt, keywords
       };
       const newId = await createNote(noteData);
-      await syncNoteMeta('add', newId, { title, body, tag, category: appState.currentCat }, null);
+      await syncNoteMeta('add', newId, { title, body, tag, category: appState.currentCat, keywords }, null);
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
     closeModal();

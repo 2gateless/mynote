@@ -106,7 +106,8 @@ export async function migrateNotesToMeta() {
         title: data.title || '',
         category: data.category || '',
         tag: data.tag || '',
-        snippet: (data.body || '').substring(0, 200)
+        snippet: (data.body || '').substring(0, 200),
+        keywords: data.keywords || ''
       });
     });
     
@@ -136,7 +137,8 @@ export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: 
         title: newData.title || '',
         category: cat || '',
         tag: newData.tag || '',
-        snippet: (newData.body || '').substring(0, 200)
+        snippet: (newData.body || '').substring(0, 200),
+        keywords: newData.keywords || ''
       });
     } else if (action === 'update') {
       const idx = notesIndex.findIndex((n: any) => n.id === noteId);
@@ -146,7 +148,8 @@ export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: 
           title: newData.title !== undefined ? newData.title : notesIndex[idx].title,
           category: newData.category !== undefined ? newData.category : notesIndex[idx].category,
           tag: newData.tag !== undefined ? newData.tag : notesIndex[idx].tag,
-          snippet: newData.body !== undefined ? newData.body.substring(0, 200) : notesIndex[idx].snippet
+          snippet: newData.body !== undefined ? newData.body.substring(0, 200) : notesIndex[idx].snippet,
+          keywords: newData.keywords !== undefined ? newData.keywords : notesIndex[idx].keywords
         };
       }
     } else if (action === 'delete') {
