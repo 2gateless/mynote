@@ -342,7 +342,7 @@ async function openDetail(note: any, from?: string) {
       ${note.tag ? `<span class="detail-tag-badge" onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
-    <div class="detail-body">${parsedBody}</div>
+    <div class="detail-body" style="background: ${note.pinned ? '#F2EFE6' : 'var(--white)'}">${parsedBody}</div>
     ${imgHtml}`;
   showAppScreen('detail');
 }
