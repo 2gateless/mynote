@@ -692,7 +692,8 @@
 
   .app-footer {
     text-align: center; padding: 8px 20px 20px;
-    font-size: 10px; color: #B0C8D8; letter-spacing: 0.04em;
+    font-size: 10px; color: var(--text-light); letter-spacing: 0.04em;
+    opacity: 0.5;
   }
 
   /* ── 앱 내 메모 링크 ── */
