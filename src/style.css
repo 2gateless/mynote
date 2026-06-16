@@ -574,7 +574,7 @@
   }
   .modal {
     background: var(--white); border-radius: 24px 24px 0 0; padding: 28px 24px 40px;
-    width: 100%; max-width: 640px; max-height: 92vh; overflow-y: auto;
+    width: 100%; max-width: 640px; max-height: 96vh; overflow-y: auto;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
     animation: slideUp 0.3s ease;
   }
@@ -589,7 +589,7 @@
     font-size: 15px; color: var(--text); outline: none; transition: border-color 0.2s; font-family: inherit;
   }
   .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: white; }
-  .form-textarea { min-height: 140px; resize: vertical; }
+  .form-textarea { min-height: 320px; resize: vertical; }
 
   .img-upload-area {
     border: 2px dashed var(--sky); border-radius: 12px; padding: 18px;
@@ -699,25 +699,25 @@
   /* ── 앱 내 메모 링크 ── */
   .note-link {
     display: inline-flex; align-items: center; gap: 5px;
-    background: linear-gradient(135deg, #D4ECD4, #C8E4C8);
-    border: 1.5px solid #9ABFA0;
+    background: linear-gradient(135deg, #EFECE1, #E8E4D8);
+    border: 1.5px solid #C8C0A8;
     border-radius: 8px; padding: 2px 10px 2px 6px;
-    font-size: 0.9em; font-weight: 600; color: #3A6B3A;
+    font-size: 0.9em; font-weight: 600; color: #6B5D3E;
     cursor: pointer; text-decoration: none;
     transition: all 0.18s; vertical-align: middle;
     white-space: nowrap; max-width: 100%;
     overflow: hidden; text-overflow: ellipsis;
   }
   .note-link:hover {
-    background: linear-gradient(135deg, #C0DFC0, #B4D8B4);
-    border-color: #7AA880; color: #2A5A2A;
+    background: linear-gradient(135deg, #E4E0D4, #D8D4C6);
+    border-color: #A89880; color: #4A3E28;
     transform: translateY(-1px);
-    box-shadow: 0 3px 10px rgba(60,120,60,0.18);
+    box-shadow: 0 3px 10px rgba(107,93,62,0.18);
   }
   .note-link-icon { font-size: 0.9em; flex-shrink: 0; }
   .note-link.broken {
-    background: #EDEDED; border-color: #C8C8C8;
-    color: #888; cursor: default;
+    background: #EDECE8; border-color: #C8C4BC;
+    color: #9E9888; cursor: default;
   }
   .note-link.broken:hover { transform: none; box-shadow: none; }
 
