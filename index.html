@@ -52,16 +52,18 @@
 
   <!-- HOME SCREEN -->
   <div class="screen active" id="screen-home">
-    <div class="home-header">
-      <div class="home-logo">
-        <div class="home-icon">📝</div>
-        <span class="home-title">MyNote</span>
+    <!-- Folders 헤더 -->
+    <div class="folders-header">
+      <h1 class="folders-title">MyNote</h1>
+      <div class="folders-actions">
+        <button class="btn-icon-folders" id="btn-toggle-search" title="검색 토글">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        </button>
       </div>
-      <div class="home-subtitle">나만의 스마트 메모</div>
     </div>
 
-    <!-- 검색 -->
-    <div class="search-wrap">
+    <!-- 검색 바 (기본 숨김 또는 슬라이드 방식) -->
+    <div class="search-wrap" id="search-wrap" style="display: none;">
       <div class="search-box">
         <span>🔍</span>
         <input class="search-input" id="search-input" placeholder="메모에서 검색" autocomplete="off">
@@ -70,30 +72,48 @@
     </div>
     <div id="search-results"></div>
 
-    <!-- 카테고리 그리드 -->
-    <div class="cat-grid" id="cat-grid">
-      <div class="cat-row two">
-        <div class="cat-card" data-cat="memory"><span class="cat-card-icon">💭</span><div class="cat-card-info"><div class="cat-card-name">기억</div><div class="cat-card-count" id="cnt-memory">메모 0개</div></div><span class="cat-card-badge" id="badge-memory" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="ref_science"><span class="cat-card-icon">🔬</span><div class="cat-card-info"><div class="cat-card-name">과학</div><div class="cat-card-count" id="cnt-ref_science">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_science" style="display:none">0</span></div>
+    <!-- 카테고리 리스트 (Folders) -->
+    <div class="folders-list" id="folders-list">
+      <div class="folder-row" data-cat="memory">
+        <span class="folder-name">기억</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-memory">0</span> <span class="folder-arrow">›</span></span>
       </div>
-      <div class="cat-row two">
-        <div class="cat-card" data-cat="ref_art"><span class="cat-card-icon">🎨</span><div class="cat-card-info"><div class="cat-card-name">예술/종교</div><div class="cat-card-count" id="cnt-ref_art">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_art" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="nature"><span class="cat-card-icon">🌿</span><div class="cat-card-info"><div class="cat-card-name">식물/새/곤충</div><div class="cat-card-count" id="cnt-nature">메모 0개</div></div><span class="cat-card-badge" id="badge-nature" style="display:none">0</span></div>
+      <div class="folder-row" data-cat="ref_science">
+        <span class="folder-name">과학</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-ref_science">0</span> <span class="folder-arrow">›</span></span>
       </div>
-      <div class="cat-row two">
-        <div class="cat-card" data-cat="it_history"><span class="cat-card-icon">💻</span><div class="cat-card-info"><div class="cat-card-name">IT/역사/문화</div><div class="cat-card-count" id="cnt-it_history">메모 0개</div></div><span class="cat-card-badge" id="badge-it_history" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="ref_others"><span class="cat-card-icon">📋</span><div class="cat-card-info"><div class="cat-card-name">좋은글/건강/기타</div><div class="cat-card-count" id="cnt-ref_others">메모 0개</div></div><span class="cat-card-badge" id="badge-ref_others" style="display:none">0</span></div>
+      <div class="folder-row" data-cat="ref_art">
+        <span class="folder-name">예술/종교</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-ref_art">0</span> <span class="folder-arrow">›</span></span>
       </div>
-      <div class="cat-row two">
-        <div class="cat-card" data-cat="finance_realty"><span class="cat-card-icon">💰</span><div class="cat-card-info"><div class="cat-card-name">금융/부동산</div><div class="cat-card-count" id="cnt-finance_realty">메모 0개</div></div><span class="cat-card-badge" id="badge-finance_realty" style="display:none">0</span></div>
-        <div class="cat-card" data-cat="office"><span class="cat-card-icon">💼</span><div class="cat-card-info"><div class="cat-card-name">사무실</div><div class="cat-card-count" id="cnt-office">메모 0개</div></div><span class="cat-card-badge" id="badge-office" style="display:none">0</span></div>
+      <div class="folder-row" data-cat="nature">
+        <span class="folder-name">식물/새/곤충</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-nature">0</span> <span class="folder-arrow">›</span></span>
       </div>
-      <div class="cat-row one">
-        <div class="cat-card" data-cat="family"><span class="cat-card-icon">👨‍👩‍👧‍👦</span><div class="cat-card-info"><div class="cat-card-name">가족/private</div><div class="cat-card-count" id="cnt-family">메모 0개</div></div><span class="cat-card-badge" id="badge-family" style="display:none">0</span></div>
+      <div class="folder-row" data-cat="it_history">
+        <span class="folder-name">IT/역사/문화</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-it_history">0</span> <span class="folder-arrow">›</span></span>
+      </div>
+      <div class="folder-row" data-cat="ref_others">
+        <span class="folder-name">좋은글/건강/기타</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-ref_others">0</span> <span class="folder-arrow">›</span></span>
+      </div>
+      <!-- 기타 카테고리들도 로우 형태로 추가 -->
+      <div class="folder-row" data-cat="finance_realty">
+        <span class="folder-name">금융/부동산</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-finance_realty">0</span> <span class="folder-arrow">›</span></span>
+      </div>
+      <div class="folder-row" data-cat="office">
+        <span class="folder-name">사무실</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-office">0</span> <span class="folder-arrow">›</span></span>
+      </div>
+      <div class="folder-row" data-cat="family">
+        <span class="folder-name">가족/private</span>
+        <span class="folder-meta"><span class="folder-count" id="cnt-family">0</span> <span class="folder-arrow">›</span></span>
       </div>
     </div>
 
-    <!-- 유저바 -->
+    <!-- 유저바 및 하단 푸터 -->
     <div class="user-bar" id="user-bar">
       <div id="user-bar-avatar"></div>
       <span class="user-bar-name" id="user-bar-name"></span>

@@ -158,25 +158,70 @@ function loadAllCounts() {
     Object.keys(CATEGORIES).forEach(catId => {
       const n = categoryCount[catId] || 0;
       const cnt = document.getElementById('cnt-' + catId);
-      const badge = document.getElementById('badge-' + catId);
-      if (cnt) cnt.textContent = `메모 ${n}개`;
-      if (badge) {
-        badge.textContent = String(n);
-        badge.style.display = n > 0 ? 'inline-block' : 'none';
-      }
+      if (cnt) cnt.textContent = String(n);
     });
   });
 }
 
-// ── CATEGORY CARDS CLICK
-const catGrid = document.getElementById('cat-grid');
-if (catGrid) {
-  catGrid.addEventListener('click', e => {
-    const card = (e.target as HTMLElement).closest('.cat-card') as HTMLElement;
-    if (!card) return;
-    const catId = card.dataset.cat;
+// ── CATEGORY CARDS CLICK (Folders List 클릭)
+const foldersList = document.getElementById('folders-list');
+if (foldersList) {
+  foldersList.addEventListener('click', e => {
+    const row = (e.target as HTMLElement).closest('.folder-row') as HTMLElement;
+    if (!row) return;
+    const catId = row.dataset.cat;
     if (catId) openList(catId);
   });
+}
+
+// ── Folders Action (검색 토글, 더보기 기능 바인딩)
+const btnToggleSearch = document.getElementById('btn-toggle-search');
+const searchWrap = document.getElementById('search-wrap');
+if (btnToggleSearch && searchWrap) {
+  btnToggleSearch.onclick = () => {
+    const isHidden = searchWrap.style.display === 'none';
+    searchWrap.style.display = isHidden ? 'block' : 'none';
+    if (isHidden) {
+      const input = document.getElementById('search-input') as HTMLInputElement;
+      if (input) input.focus();
+    } else {
+      // 닫을 때 검색 초기화
+      const input = document.getElementById('search-input') as HTMLInputElement;
+      if (input) {
+        input.value = '';
+        const clearBtn = document.getElementById('search-clear');
+        if (clearBtn) clearBtn.style.display = 'none';
+      }
+      const results = document.getElementById('search-results');
+      if (results) results.style.display = 'none';
+      const fList = document.getElementById('folders-list');
+      if (fList) fList.style.display = '';
+    }
+  };
+}
+
+const btnMoreOptions = document.getElementById('btn-more-options');
+if (btnMoreOptions) {
+  btnMoreOptions.onclick = () => {
+    showToast('Folders 설정 메뉴 (준비 중입니다) ⚙️');
+  };
+}
+
+// 하단 원형 버튼 바인딩
+const btnAddFolder = document.getElementById('btn-add-folder');
+if (btnAddFolder) {
+  btnAddFolder.onclick = () => {
+    showToast('새 폴더 추가 기능 (준비 중입니다) 📂');
+  };
+}
+
+const btnAddNoteHome = document.getElementById('btn-add-note-home');
+if (btnAddNoteHome) {
+  btnAddNoteHome.onclick = () => {
+    // 현재 선택된 카테고리가 없으므로 기본 'memory'를 타겟으로 하거나 첫 번째 폴더로 모달 띄우기
+    appState.currentCat = 'memory'; 
+    openAddModal();
+  };
 }
 
 // ── LIST
@@ -340,7 +385,7 @@ if (searchInput) {
     clearTimeout(searchTimeout);
     if (!v) { 
       searchResults.style.display = 'none'; 
-      const grid = document.getElementById('cat-grid');
+      const grid = document.getElementById('folders-list');
       if (grid) grid.style.display = ''; 
       return; 
     }
@@ -353,13 +398,13 @@ if (searchClear) {
     searchInput.value = '';
     searchClear.style.display = 'none';
     searchResults.style.display = 'none';
-    const grid = document.getElementById('cat-grid');
+    const grid = document.getElementById('folders-list');
     if (grid) grid.style.display = '';
   };
 }
 
 async function doSearch(keyword: string) {
-  const grid = document.getElementById('cat-grid');
+  const grid = document.getElementById('folders-list');
   if (grid) grid.style.display = 'none';
   searchResults.style.display = 'block';
   searchResults.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:8px 4px">검색 중...</div>`;
@@ -377,7 +422,7 @@ async function doSearch(keyword: string) {
     }
     searchResults.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
       <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
-      <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--sky-mid);background:transparent;color:var(--text-light);cursor:pointer">🏠 홈으로</button>
+      <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
     </div>`;
     
     const homeBtn = document.getElementById('search-home-btn');
@@ -1139,7 +1184,7 @@ initPwaNavigation((screen) => {
     searchInput.value = '';
     searchClear.style.display = 'none';
     searchResults.style.display = 'none';
-    const grid = document.getElementById('cat-grid');
+    const grid = document.getElementById('folders-list');
     if (grid) grid.style.display = '';
     
     showAppScreen('home');
@@ -1151,7 +1196,7 @@ initPwaNavigation((screen) => {
     searchInput.value = '';
     searchClear.style.display = 'none';
     searchResults.style.display = 'none';
-    const grid = document.getElementById('cat-grid');
+    const grid = document.getElementById('folders-list');
     if (grid) grid.style.display = '';
     
     showAppScreen('home'); 

@@ -2,3 +2,5 @@ node_modules/
 dist/
 backups/serviceAccountKey.json
 backups/backup_*.json
+backups/backup/
+backups/backup_client.ts
