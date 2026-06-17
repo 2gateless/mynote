@@ -29,7 +29,7 @@ export const CATEGORIES: Record<string, { name: string; icon: string }> = {
 };
 
 export const SUB_TAGS: Record<string, string[]> = {
-  ref_science: ['물리', '수학', '화학', '생명', '지구/지질', '기타'],
+  ref_science: ['물리', '수학', '화학', '생명', '지구/지질', '돌/암석', '기타'],
   ref_art: ['문학', '미술', '음악', '종교', '기타'],
   nature: ['나무', '풀/꽃', '양치/선태', '균류/지의류', '새', '절지/곤충', '기타'],
   it_history: ['IT', '역사/문화'],
