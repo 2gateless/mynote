@@ -24,7 +24,7 @@ export const CATEGORIES: Record<string, { name: string; icon: string }> = {
   it_history:     { name: 'IT/역사/문화', icon: '💻' },
   ref_others:     { name: '좋은글/건강/기타',       icon: '📋' },
   finance_realty: { name: '금융/부동산', icon: '💰' },
-  office:         { name: '사무실',     icon: '💼' },
+  office:         { name: '법률/사무실', icon: '💼' },
   family:         { name: '가족/private', icon: '👨‍👩‍👧‍👦' },
 };
 
@@ -35,6 +35,7 @@ export const SUB_TAGS: Record<string, string[]> = {
   it_history: ['IT', '역사/문화'],
   finance_realty: ['금융', '부동산'],
   ref_others: ['좋은글', '건강', '레시피', '여행', '영화', '기타'],
+  office: ['법률', '사무실'],
   family: ['가족', 'private']
 };
 
@@ -108,6 +109,23 @@ export async function migrateCategories() {
     }
     if (snapInsect.size > 0) {
       console.log(`태그 마이그레이션: nature(곤충) → 절지/곤충 (${snapInsect.size}건)`);
+    }
+
+    // office 카테고리 중 태그가 없는 메모들을 '사무실' 태그로 마이그레이션
+    const qMigrateOffice = query(collection(db, 'notes'),
+      where('uid', '==', appState.currentUser.uid),
+      where('category', '==', 'office'));
+    const snapOffice = await getDocs(qMigrateOffice);
+    let officeMigrated = 0;
+    for (const d of snapOffice.docs) {
+      const tag = d.data().tag;
+      if (!tag || tag === '') {
+        await updateDoc(doc(db, 'notes', d.id), { tag: '사무실' });
+        officeMigrated++;
+      }
+    }
+    if (officeMigrated > 0) {
+      console.log(`태그 마이그레이션: office(태그없음) → 사무실 (${officeMigrated}건)`);
     }
   } catch(e) { console.error('마이그레이션 오류:', e); }
 }
