@@ -1,4 +1,5 @@
 const admin = require('firebase-admin');
+const { getFirestore } = require('firebase-admin/firestore');
 const fs = require('fs');
 const path = require('path');
 
@@ -14,10 +15,10 @@ if (!fs.existsSync(serviceAccountPath)) {
 const serviceAccount = require(serviceAccountPath);
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.cert(serviceAccount)
 });
 
-const db = admin.firestore();
+const db = getFirestore();
 
 async function backup() {
   console.log("🔄 Firestore 데이터 백업 시작...");
