@@ -31,7 +31,7 @@ export const CATEGORIES: Record<string, { name: string; icon: string }> = {
 export const SUB_TAGS: Record<string, string[]> = {
   ref_science: ['물리', '수학', '화학', '생명', '지구/지질', '기타'],
   ref_art: ['문학', '미술', '음악', '종교', '기타'],
-  nature: ['나무', '풀/꽃', '양치/선태', '지의류', '새', '곤충', '기타'],
+  nature: ['나무', '풀/꽃', '양치/선태', '균류/지의류', '새', '곤충', '기타'],
   it_history: ['IT', '역사/문화'],
   finance_realty: ['금융', '부동산'],
   ref_others: ['좋은글', '건강', '레시피', '여행', '영화', '기타'],
@@ -82,6 +82,19 @@ export async function migrateCategories() {
     }
     if (snapNature.size > 0) {
       console.log(`태그 마이그레이션: nature(꽃) → 풀/꽃 (${snapNature.size}건)`);
+    }
+
+    // nature 카테고리 중 '지의류' 태그가 붙은 것들을 '균류/지의류' 태그로 변경
+    const qMigrateLichen = query(collection(db, 'notes'),
+      where('uid', '==', appState.currentUser.uid),
+      where('category', '==', 'nature'),
+      where('tag', '==', '지의류'));
+    const snapLichen = await getDocs(qMigrateLichen);
+    for (const d of snapLichen.docs) {
+      await updateDoc(doc(db, 'notes', d.id), { tag: '균류/지의류' });
+    }
+    if (snapLichen.size > 0) {
+      console.log(`태그 마이그레이션: nature(지의류) → 균류/지의류 (${snapLichen.size}건)`);
     }
   } catch(e) { console.error('마이그레이션 오류:', e); }
 }
