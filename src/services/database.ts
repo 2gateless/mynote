@@ -15,6 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { appState } from '../state';
+import { Note, NoteIndexItem } from '../types';
 
 export const CATEGORIES: Record<string, { name: string; icon: string }> = {
   memory:         { name: '기억',       icon: '💭' },
@@ -141,7 +142,7 @@ export async function migrateNotesToMeta() {
     const snap = await getDocs(q);
     const categoryCount: Record<string, number> = {};
     Object.keys(CATEGORIES).forEach(k => categoryCount[k] = 0);
-    const notesIndex: any[] = [];
+    const notesIndex: NoteIndexItem[] = [];
     snap.docs.forEach(d => {
       const data = d.data();
       if (data.category && categoryCount[data.category] !== undefined) categoryCount[data.category]++;
@@ -163,7 +164,7 @@ export async function migrateNotesToMeta() {
   } catch(e) { console.error('메타 마이그레이션 오류:', e); }
 }
 
-export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: string, newData: any, oldData: any) {
+export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: string, newData: Partial<Note>, oldData: Partial<Note>) {
   if (!appState.currentUser) return;
   await runTransaction(db, async (t) => {
     const metaRef = doc(db, 'user_meta', appState.currentUser.uid);
@@ -185,7 +186,7 @@ export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: 
         keywords: newData.keywords || ''
       });
     } else if (action === 'update') {
-      const idx = notesIndex.findIndex((n: any) => n.id === noteId);
+      const idx = notesIndex.findIndex((n: NoteIndexItem) => n.id === noteId);
       if (idx !== -1) {
         notesIndex[idx] = {
           ...notesIndex[idx],
@@ -199,7 +200,7 @@ export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: 
     } else if (action === 'delete') {
       const cat = oldData.category;
       if (cat && categoryCount[cat]) categoryCount[cat] = Math.max(0, categoryCount[cat] - 1);
-      notesIndex = notesIndex.filter((n: any) => n.id !== noteId);
+      notesIndex = notesIndex.filter((n: NoteIndexItem) => n.id !== noteId);
     }
     t.set(metaRef, { categoryCount }, { merge: true });
     t.set(indexRef, { notes: notesIndex }, { merge: true });
@@ -214,7 +215,7 @@ export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, n
   });
 }
 
-export function subscribeAllNotes(onIndexChange: (notes: any[]) => void) {
+export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => void) {
   if (!appState.currentUser) return () => {};
   return onSnapshot(doc(db, 'note_index', appState.currentUser.uid), snap => {
     const notes = snap.exists() ? snap.data().notes || [] : [];
@@ -223,14 +224,14 @@ export function subscribeAllNotes(onIndexChange: (notes: any[]) => void) {
   });
 }
 
-export function subscribeNotesList(catId: string, onListChange: (notes: any[]) => void, onError: (err: Error) => void) {
+export function subscribeNotesList(catId: string, onListChange: (notes: Note[]) => void, onError: (err: Error) => void) {
   if (!appState.currentUser) return () => {};
   const q = query(collection(db, 'notes'),
     where('uid', '==', appState.currentUser.uid),
     where('category', '==', catId),
     orderBy('createdAt', 'desc'));
   return onSnapshot(q, snap => {
-    const notes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const notes = snap.docs.map(d => ({ id: d.id, ...d.data() } as Note));
     onListChange(notes);
   }, onError);
 }
@@ -238,7 +239,7 @@ export function subscribeNotesList(catId: string, onListChange: (notes: any[]) =
 export async function getSingleNote(noteId: string) {
   const docSnap = await getDoc(doc(db, 'notes', noteId));
   if (docSnap.exists()) {
-    return { id: docSnap.id, ...docSnap.data() };
+    return { id: docSnap.id, ...docSnap.data() } as Note;
   }
   return null;
 }
@@ -247,7 +248,7 @@ export async function deleteSingleNote(noteId: string) {
   return deleteDoc(doc(db, 'notes', noteId));
 }
 
-export async function createNote(noteData: any) {
+export async function createNote(noteData: Partial<Note>) {
   const noteRef = doc(collection(db, 'notes'));
   await setDoc(noteRef, {
     uid: appState.currentUser.uid,
@@ -257,7 +258,7 @@ export async function createNote(noteData: any) {
   return noteRef.id;
 }
 
-export async function updateSingleNote(noteId: string, noteData: any) {
+export async function updateSingleNote(noteId: string, noteData: Partial<Note>) {
   return updateDoc(doc(db, 'notes', noteId), {
     updatedAt: Timestamp.now(),
     ...noteData

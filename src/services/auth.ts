@@ -1,10 +1,10 @@
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { auth } from './firebase';
 import { appState } from '../state';
 
 export const ALLOWED_EMAILS = ['2gateless@gmail.com'];
 
-export function initAuthListener(onAuthSuccess: (user: any) => void, onAuthFailed: (email?: string) => void, onSignedOut: () => void) {
+export function initAuthListener(onAuthSuccess: (user: User) => void, onAuthFailed: (email?: string) => void, onSignedOut: () => void) {
   onAuthStateChanged(auth, user => {
     if (user) {
       if (ALLOWED_EMAILS.includes(user.email || '')) {
