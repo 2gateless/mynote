@@ -24,7 +24,7 @@ export const CATEGORIES: Record<string, { name: string; icon: string }> = {
   nature:         { name: '식물/새/곤충',  icon: '🌿' },
   it_history:     { name: 'IT/역사/문화', icon: '💻' },
   ref_others:     { name: '좋은글/건강/기타',       icon: '📋' },
-  finance_realty: { name: '금융/부동산', icon: '💰' },
+  finance_realty: { name: '경제/금융/부동산', icon: '💰' },
   office:         { name: '법률/사무실', icon: '💼' },
   family:         { name: '가족/private', icon: '👨‍👩‍👧‍👦' },
 };
@@ -34,7 +34,7 @@ export const SUB_TAGS: Record<string, string[]> = {
   ref_art: ['문학', '미술', '음악', '종교', '기타'],
   nature: ['나무', '풀/꽃', '양치/선태', '균류/지의류', '새', '절지/곤충', '기타'],
   it_history: ['IT', '역사/문화'],
-  finance_realty: ['금융', '부동산'],
+  finance_realty: ['경제', '금융', '부동산'],
   ref_others: ['좋은글', '건강', '레시피', '여행', '영화', '기타'],
   office: ['법률', '사무실'],
   family: ['가족', 'private']
