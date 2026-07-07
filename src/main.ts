@@ -663,7 +663,6 @@ function openEditModal(note: any) {
   
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
-  renderImgPreviews();
   const modal = document.getElementById('note-modal');
   if (modal) modal.style.display = 'flex';
 }
@@ -675,24 +674,6 @@ function closeModal() {
 }
 
 // ── IMAGE UPLOADS
-const imgUploadArea = document.getElementById('img-upload-area');
-if (imgUploadArea) {
-  imgUploadArea.onclick = () => {
-    const imgInput = document.getElementById('img-input');
-    if (imgInput) imgInput.click();
-  };
-}
-
-const imgInput = document.getElementById('img-input') as HTMLInputElement;
-if (imgInput) {
-  imgInput.onchange = e => {
-    const files = (e.target as HTMLInputElement).files;
-    if (files) {
-      Array.from(files).forEach(f => compressAndAdd(f));
-    }
-    imgInput.value = '';
-  };
-}
 
 // 본문 인라인 이미지 업로드
 const inlineImgBtn = document.getElementById('inline-img-btn') as HTMLButtonElement;
@@ -734,41 +715,6 @@ if (inlineImgInput) {
       inlineImgBtn.disabled = false;
     }
   };
-}
-
-async function compressAndAdd(file: File) {
-  try {
-    const compressed = await compressImage(file, 800, 800, 0.6);
-    const origKB = Math.round(file.size / 1024);
-    const compKB = Math.round(compressed.length * 0.75 / 1024);
-    console.log(`압축: ${origKB}KB → ${compKB}KB`);
-    appState.pendingImages.push({ dataUrl: compressed, name: file.name.replace(/\.[^.]+$/, '.jpg') });
-    renderImgPreviews();
-  } catch(e: any) {
-    showToast('이미지 처리 실패: ' + e.message);
-  }
-}
-
-function renderImgPreviews() {
-  const list = document.getElementById('img-preview-list');
-  if (!list) return;
-  list.innerHTML = '';
-  appState.existingImages.forEach((img: any, i: number) => {
-    const item = document.createElement('div');
-    item.className = 'img-preview-item';
-    item.innerHTML = `<img src="${img.url}"><button class="img-remove-btn">×</button>`;
-    const btn = item.querySelector('button');
-    if (btn) btn.onclick = () => { appState.existingImages.splice(i,1); renderImgPreviews(); };
-    list.appendChild(item);
-  });
-  appState.pendingImages.forEach((img: any, i: number) => {
-    const item = document.createElement('div');
-    item.className = 'img-preview-item';
-    item.innerHTML = `<img src="${img.dataUrl}"><button class="img-remove-btn">×</button>`;
-    const btn = item.querySelector('button');
-    if (btn) btn.onclick = () => { appState.pendingImages.splice(i,1); renderImgPreviews(); };
-    list.appendChild(item);
-  });
 }
 
 // ── SAVE NOTE
