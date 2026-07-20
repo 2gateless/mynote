@@ -33,7 +33,9 @@ import {
 } from './utils/share';
 import { 
   compressImage, 
-  uploadImageToStorage 
+  uploadImageToStorage, 
+  deleteImageFromStorage, 
+  collectImagePaths 
 } from './utils/image';
 import { 
   showAppScreen, 
@@ -765,6 +767,14 @@ async function saveNote() {
       };
       await updateSingleNote(appState.editingNoteId, updateData);
       await syncNoteMeta('update', appState.editingNoteId, { title, body, tag, category: appState.currentNote.category, keywords }, oldNote);
+
+      // 수정 과정에서 빠진 첨부 이미지를 Storage에서도 삭제
+      const removedImgs = (oldNote.images || []).filter(
+        (old: any) => !allImages.some((cur: any) => cur.url === old.url)
+      );
+      for (const img of removedImgs) {
+        await deleteImageFromStorage(img.path || img.url);
+      }
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       
       appState.currentNote = { ...appState.currentNote, ...updateData };
@@ -810,6 +820,13 @@ if (delConfirm) {
   delConfirm.onclick = async () => {
     if (!appState.deleteTargetId) return;
     try {
+      // 삭제 전에 메모를 읽어 첨부/인라인 이미지 파일을 Storage에서 먼저 정리
+      const noteToDelete = await getSingleNote(appState.deleteTargetId);
+      if (noteToDelete) {
+        for (const p of collectImagePaths(noteToDelete)) {
+          await deleteImageFromStorage(p);
+        }
+      }
       await deleteSingleNote(appState.deleteTargetId);
       await syncNoteMeta('delete', appState.deleteTargetId, null, appState.currentNote);
       showToast('메모가 삭제되었어요 🗑️');
