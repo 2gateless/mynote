@@ -1,7 +1,11 @@
-const admin = require('firebase-admin');
-const { getFirestore } = require('firebase-admin/firestore');
-const fs = require('fs');
-const path = require('path');
+import admin from 'firebase-admin';
+import { getFirestore } from 'firebase-admin/firestore';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // 서비스 계정 키 파일 경로 (반드시 같은 폴더에 serviceAccountKey.json 파일이 있어야 합니다)
 const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
@@ -12,7 +16,7 @@ if (!fs.existsSync(serviceAccountPath)) {
   process.exit(1);
 }
 
-const serviceAccount = require(serviceAccountPath);
+const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf-8'));
 
 admin.initializeApp({
   credential: admin.cert(serviceAccount)
