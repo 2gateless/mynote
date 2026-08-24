@@ -71,6 +71,7 @@ initAuthListener(
    // 마이그레이션 완료됨 (2026-07) — 카테고리/태그 개편 시에만 다시 활성화
     // await migrateCategories();
     // await migrateNotesToMeta();
+     await migrateNoteIndexToShards();
     loadAllCounts();
     subscribeAllNotesCache();
   },
