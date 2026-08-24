@@ -10,6 +10,7 @@ import {
   SUB_TAGS, 
   migrateCategories, 
   migrateNotesToMeta, 
+  migrateNoteIndexToShards,
   syncNoteMeta, 
   subscribeUserMeta, 
   subscribeAllNotes, 
