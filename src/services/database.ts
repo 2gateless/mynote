@@ -177,47 +177,147 @@ export async function migrateNotesToMeta() {
   } catch(e) { console.error('메타 마이그레이션 오류:', e); }
 }
 
+// 카테고리별 note_index 문서 참조 헬퍼 (note_index/{uid}_{category})
+function catIndexRef(uid: string, category: string) {
+  return doc(db, 'note_index', `${uid}_${category}`);
+}
+
+// 1회성 마이그레이션: note_index/{uid} 단일 문서 → note_index/{uid}_{category} 9개 문서로 분할
+// 실행 후 콘솔에 "분할 마이그레이션 완료!"가 뜨면 성공. main.ts에서 이 함수 호출을 다시 주석 처리할 것.
+export async function migrateNoteIndexToShards() {
+  if (!appState.currentUser) return;
+  try {
+    const uid = appState.currentUser.uid;
+    const oldRef = doc(db, 'note_index', uid);
+    const oldSnap = await getDoc(oldRef);
+    if (!oldSnap.exists()) {
+      console.log('기존 note_index 문서가 없어 분할 마이그레이션을 건너뜁니다.');
+      return;
+    }
+    const allNotes: NoteIndexItem[] = oldSnap.data().notes || [];
+    if (allNotes.length === 0) {
+      console.log('기존 note_index에 메모가 없어 분할 마이그레이션을 건너뜁니다.');
+      return;
+    }
+
+    const grouped: Record<string, NoteIndexItem[]> = {};
+    allNotes.forEach(n => {
+      const cat = n.category || '_미분류';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(n);
+    });
+
+    for (const cat of Object.keys(grouped)) {
+      await setDoc(catIndexRef(uid, cat), { notes: grouped[cat] });
+      console.log(`  → ${cat}: ${grouped[cat].length}건 이전 완료`);
+    }
+
+    console.log(`분할 마이그레이션 완료! (총 ${allNotes.length}건, ${Object.keys(grouped).length}개 카테고리)`);
+    console.log('※ 정상 동작(검색·목록 표시) 확인 후, Firebase 콘솔에서 기존 note_index/' + uid + ' 문서를 수동으로 삭제하세요.');
+  } catch (e) {
+    console.error('분할 마이그레이션 오류:', e);
+  }
+}
+
 export async function syncNoteMeta(action: 'add' | 'update' | 'delete', noteId: string, newData: Partial<Note>, oldData: Partial<Note>) {
   if (!appState.currentUser) return;
-  await runTransaction(db, async (t) => {
-    const metaRef = doc(db, 'user_meta', appState.currentUser.uid);
-    const indexRef = doc(db, 'note_index', appState.currentUser.uid);
-    const metaSnap = await t.get(metaRef);
-    const indexSnap = await t.get(indexRef);
-    let categoryCount = metaSnap.exists() ? metaSnap.data().categoryCount || {} : {};
-    let notesIndex = indexSnap.exists() ? indexSnap.data().notes || [] : [];
-    
-    if (action === 'add') {
-      const cat = newData.category;
-      if (cat) categoryCount[cat] = (categoryCount[cat] || 0) + 1;
+  const uid = appState.currentUser.uid;
+  const metaRef = doc(db, 'user_meta', uid);
+
+  if (action === 'add') {
+    const cat = newData.category || '';
+    const indexRef = catIndexRef(uid, cat);
+    await runTransaction(db, async (t) => {
+      const metaSnap = await t.get(metaRef);
+      const indexSnap = await t.get(indexRef);
+      let categoryCount = metaSnap.exists() ? metaSnap.data().categoryCount || {} : {};
+      let notesIndex = indexSnap.exists() ? indexSnap.data().notes || [] : [];
+      categoryCount[cat] = (categoryCount[cat] || 0) + 1;
       notesIndex.push({
         id: noteId,
         title: newData.title || '',
-        category: cat || '',
+        category: cat,
         tag: newData.tag || '',
         snippet: (newData.body || '').substring(0, 200),
         keywords: newData.keywords || ''
       });
-    } else if (action === 'update') {
+      t.set(metaRef, { categoryCount }, { merge: true });
+      t.set(indexRef, { notes: notesIndex }, { merge: true });
+    });
+    return;
+  }
+
+  if (action === 'delete') {
+    const cat = oldData.category || '';
+    const indexRef = catIndexRef(uid, cat);
+    await runTransaction(db, async (t) => {
+      const metaSnap = await t.get(metaRef);
+      const indexSnap = await t.get(indexRef);
+      let categoryCount = metaSnap.exists() ? metaSnap.data().categoryCount || {} : {};
+      let notesIndex = indexSnap.exists() ? indexSnap.data().notes || [] : [];
+      if (cat && categoryCount[cat]) categoryCount[cat] = Math.max(0, categoryCount[cat] - 1);
+      notesIndex = notesIndex.filter((n: NoteIndexItem) => n.id !== noteId);
+      t.set(metaRef, { categoryCount }, { merge: true });
+      t.set(indexRef, { notes: notesIndex }, { merge: true });
+    });
+    return;
+  }
+
+  // action === 'update'
+  const oldCat = oldData.category || '';
+  const newCat = newData.category !== undefined ? newData.category : oldCat;
+
+  if (newCat === oldCat) {
+    // 카테고리가 안 바뀌면 그 카테고리 문서 하나만 갱신 (제일 흔한 경우)
+    const indexRef = catIndexRef(uid, oldCat);
+    await runTransaction(db, async (t) => {
+      const indexSnap = await t.get(indexRef);
+      let notesIndex = indexSnap.exists() ? indexSnap.data().notes || [] : [];
       const idx = notesIndex.findIndex((n: NoteIndexItem) => n.id === noteId);
       if (idx !== -1) {
         notesIndex[idx] = {
           ...notesIndex[idx],
           title: newData.title !== undefined ? newData.title : notesIndex[idx].title,
-          category: newData.category !== undefined ? newData.category : notesIndex[idx].category,
           tag: newData.tag !== undefined ? newData.tag : notesIndex[idx].tag,
           snippet: newData.body !== undefined ? newData.body.substring(0, 200) : notesIndex[idx].snippet,
           keywords: newData.keywords !== undefined ? newData.keywords : notesIndex[idx].keywords
         };
       }
-    } else if (action === 'delete') {
-      const cat = oldData.category;
-      if (cat && categoryCount[cat]) categoryCount[cat] = Math.max(0, categoryCount[cat] - 1);
-      notesIndex = notesIndex.filter((n: NoteIndexItem) => n.id !== noteId);
-    }
-    t.set(metaRef, { categoryCount }, { merge: true });
-    t.set(indexRef, { notes: notesIndex }, { merge: true });
-  });
+      t.set(indexRef, { notes: notesIndex }, { merge: true });
+    });
+  } else {
+    // 카테고리가 바뀌면 이전 문서에서 빼고 새 문서에 넣는다
+    const oldIndexRef = catIndexRef(uid, oldCat);
+    const newIndexRef = catIndexRef(uid, newCat);
+    await runTransaction(db, async (t) => {
+      const metaSnap = await t.get(metaRef);
+      const oldIndexSnap = await t.get(oldIndexRef);
+      const newIndexSnap = await t.get(newIndexRef);
+      let categoryCount = metaSnap.exists() ? metaSnap.data().categoryCount || {} : {};
+      let oldNotesIndex = oldIndexSnap.exists() ? oldIndexSnap.data().notes || [] : [];
+      let newNotesIndex = newIndexSnap.exists() ? newIndexSnap.data().notes || [] : [];
+
+      const existingIdx = oldNotesIndex.findIndex((n: NoteIndexItem) => n.id === noteId);
+      const base = existingIdx !== -1 ? oldNotesIndex[existingIdx] : { id: noteId, title: '', tag: '', snippet: '', keywords: '' };
+      oldNotesIndex = oldNotesIndex.filter((n: NoteIndexItem) => n.id !== noteId);
+
+      newNotesIndex.push({
+        id: noteId,
+        title: newData.title !== undefined ? newData.title : base.title,
+        category: newCat,
+        tag: newData.tag !== undefined ? newData.tag : base.tag,
+        snippet: newData.body !== undefined ? newData.body.substring(0, 200) : base.snippet,
+        keywords: newData.keywords !== undefined ? newData.keywords : base.keywords
+      });
+
+      if (oldCat && categoryCount[oldCat]) categoryCount[oldCat] = Math.max(0, categoryCount[oldCat] - 1);
+      categoryCount[newCat] = (categoryCount[newCat] || 0) + 1;
+
+      t.set(metaRef, { categoryCount }, { merge: true });
+      t.set(oldIndexRef, { notes: oldNotesIndex }, { merge: true });
+      t.set(newIndexRef, { notes: newNotesIndex }, { merge: true });
+    });
+  }
 }
 
 export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, number>) => void) {
@@ -230,11 +330,22 @@ export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, n
 
 export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => void) {
   if (!appState.currentUser) return () => {};
-  return onSnapshot(doc(db, 'note_index', appState.currentUser.uid), snap => {
-    const notes = snap.exists() ? snap.data().notes || [] : [];
-    appState.allNotesCache = notes;
-    onIndexChange(notes);
-  });
+  const uid = appState.currentUser.uid;
+  const categoryKeys = Object.keys(CATEGORIES);
+  const perCategory: Record<string, NoteIndexItem[]> = {};
+
+  const unsubs = categoryKeys.map(cat =>
+    onSnapshot(catIndexRef(uid, cat), snap => {
+      perCategory[cat] = snap.exists() ? (snap.data().notes || []) : [];
+      // 카테고리 9개 중 하나만 바뀌어도 전체를 다시 합쳐서 캐시 갱신
+      const merged = categoryKeys.flatMap(c => perCategory[c] || []);
+      appState.allNotesCache = merged;
+      onIndexChange(merged);
+    })
+  );
+
+  // 구독 해제 시 9개 리스너 전부 해제
+  return () => unsubs.forEach(u => u());
 }
 
 export function subscribeNotesList(catId: string, onListChange: (notes: Note[]) => void, onError: (err: Error) => void) {
