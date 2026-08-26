@@ -128,10 +128,7 @@
   }
   .folders-actions {
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
+    gap: 16px;
   }
   .btn-icon-folders {
     background: none;
@@ -146,6 +143,12 @@
   }
   .btn-icon-folders:hover {
     opacity: 0.6;
+  }
+  .folders-meta-header {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 4px 26px 6px;
   }
   .total-notes-count {
     font-size: 13px;

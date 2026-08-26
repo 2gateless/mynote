@@ -400,6 +400,8 @@ if (searchInput) {
       searchResults.style.display = 'none'; 
       const grid = document.getElementById('folders-list');
       if (grid) grid.style.display = ''; 
+      const metaHeader = document.getElementById('folders-meta-header');
+      if (metaHeader) metaHeader.style.display = '';
       return; 
     }
     searchTimeout = setTimeout(() => doSearch(v), 350);
@@ -413,12 +415,16 @@ if (searchClear) {
     searchResults.style.display = 'none';
     const grid = document.getElementById('folders-list');
     if (grid) grid.style.display = '';
+    const metaHeader = document.getElementById('folders-meta-header');
+    if (metaHeader) metaHeader.style.display = '';
   };
 }
 
 async function doSearch(keyword: string) {
   const grid = document.getElementById('folders-list');
   if (grid) grid.style.display = 'none';
+  const metaHeader = document.getElementById('folders-meta-header');
+  if (metaHeader) metaHeader.style.display = 'none';
   searchResults.style.display = 'block';
   searchResults.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:8px 4px">검색 중...</div>`;
   try {
@@ -445,6 +451,8 @@ async function doSearch(keyword: string) {
         searchClear.style.display = 'none';
         searchResults.style.display = 'none';
         if (grid) grid.style.display = '';
+        const metaH = document.getElementById('folders-meta-header');
+        if (metaH) metaH.style.display = '';
         showAppScreen('home');
       };
     }
@@ -1160,6 +1168,8 @@ initPwaNavigation((screen) => {
     searchResults.style.display = 'none';
     const grid = document.getElementById('folders-list');
     if (grid) grid.style.display = '';
+    const metaHeader = document.getElementById('folders-meta-header');
+    if (metaHeader) metaHeader.style.display = '';
     
     showAppScreen('home');
     history.pushState(null, '', location.href);
@@ -1172,6 +1182,8 @@ initPwaNavigation((screen) => {
     searchResults.style.display = 'none';
     const grid = document.getElementById('folders-list');
     if (grid) grid.style.display = '';
+    const metaHeader = document.getElementById('folders-meta-header');
+    if (metaHeader) metaHeader.style.display = '';
     
     showAppScreen('home'); 
     history.pushState(null, '', location.href); 
