@@ -132,6 +132,10 @@ function subscribeAllNotesCache() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
   notesUnsubscribe = subscribeAllNotes((notes) => {
     appState.allNotesCache = notes;
+    const totalCnt = document.getElementById('cnt-total-notes');
+    if (totalCnt && notes) {
+      totalCnt.textContent = String(notes.length);
+    }
   });
 }
 
@@ -160,11 +164,15 @@ appState.handleNoteLinkClick = function(el: any) {
 function loadAllCounts() {
   if (catUnsubscribes['meta']) catUnsubscribes['meta']();
   catUnsubscribes['meta'] = subscribeUserMeta((categoryCount) => {
+    let total = 0;
     Object.keys(CATEGORIES).forEach(catId => {
       const n = categoryCount[catId] || 0;
+      total += n;
       const cnt = document.getElementById('cnt-' + catId);
       if (cnt) cnt.textContent = String(n);
     });
+    const totalCnt = document.getElementById('cnt-total-notes');
+    if (totalCnt) totalCnt.textContent = String(total);
   });
 }
 
