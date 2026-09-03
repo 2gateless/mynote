@@ -333,19 +333,28 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
   const uid = appState.currentUser.uid;
   const categoryKeys = Object.keys(CATEGORIES);
   const perCategory: Record<string, NoteIndexItem[]> = {};
+  let updateTimer: any = null;
+
+  const notifyMerged = () => {
+    const merged = categoryKeys.flatMap(c => perCategory[c] || []);
+    appState.allNotesCache = merged;
+    onIndexChange(merged);
+  };
 
   const unsubs = categoryKeys.map(cat =>
     onSnapshot(catIndexRef(uid, cat), snap => {
       perCategory[cat] = snap.exists() ? (snap.data().notes || []) : [];
-      // 카테고리 9개 중 하나만 바뀌어도 전체를 다시 합쳐서 캐시 갱신
-      const merged = categoryKeys.flatMap(c => perCategory[c] || []);
-      appState.allNotesCache = merged;
-      onIndexChange(merged);
+      // 9개 카테고리 스냅샷이 연속으로 도착할 때 한 번에 묶어서 병합 처리 (부하 감소)
+      if (updateTimer) clearTimeout(updateTimer);
+      updateTimer = setTimeout(notifyMerged, 20);
     })
   );
 
   // 구독 해제 시 9개 리스너 전부 해제
-  return () => unsubs.forEach(u => u());
+  return () => {
+    if (updateTimer) clearTimeout(updateTimer);
+    unsubs.forEach(u => u());
+  };
 }
 
 export function subscribeNotesList(catId: string, onListChange: (notes: Note[]) => void, onError: (err: Error) => void) {

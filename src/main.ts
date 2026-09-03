@@ -63,17 +63,26 @@ function showToast(msg: string) {
   }
 }
 
+let isAllNotesSubscribed = false;
+
+function ensureAllNotesCache() {
+  if (isAllNotesSubscribed) return;
+  isAllNotesSubscribed = true;
+  subscribeAllNotesCache();
+}
+
 // ── AUTH & 초기화
 initAuthListener(
   async (user) => {
     renderUserBar(user);
     showRootScreen('app');
-   // 마이그레이션 완료됨 (2026-07) — 카테고리/태그 개편 시에만 다시 활성화
-    // await migrateCategories();
-    // await migrateNotesToMeta();
-    // await migrateNoteIndexToShards();
     loadAllCounts();
-    subscribeAllNotesCache();
+    // 첫 부팅 시에는 카운트만 즉시 표시하고, 전체 인덱스는 화면 표시 후 유휴 시간(idle)에 백그라운드 프리페치
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(() => ensureAllNotesCache(), { timeout: 2000 });
+    } else {
+      setTimeout(ensureAllNotesCache, 1000);
+    }
   },
   (email) => {
     const el = document.getElementById('denied-email');
@@ -82,6 +91,7 @@ initAuthListener(
   },
   () => {
     if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
+    isAllNotesSubscribed = false;
     showRootScreen('auth-screen');
   }
 );
@@ -192,6 +202,7 @@ const btnToggleSearch = document.getElementById('btn-toggle-search');
 const searchWrap = document.getElementById('search-wrap');
 if (btnToggleSearch && searchWrap) {
   btnToggleSearch.onclick = () => {
+    ensureAllNotesCache();
     const isHidden = searchWrap.style.display === 'none';
     searchWrap.style.display = isHidden ? 'block' : 'none';
     if (isHidden) {
@@ -329,6 +340,7 @@ if (listBack) {
 
 // ── DETAIL
 async function openDetail(note: any, from?: string) {
+  ensureAllNotesCache();
   appState.currentNote = note;
   detailFrom = from || 'list';
   const detailHeaderTitle = document.getElementById('detail-header-title');
@@ -558,6 +570,7 @@ if (noteLinkModal) {
 }
 
 function openNoteLinkModal() {
+  ensureAllNotesCache();
   noteLinkSearchInput.value = '';
   renderNoteLinkList('');
   noteLinkModal.style.display = 'flex';
