@@ -33,7 +33,7 @@ export const SUB_TAGS: Record<string, string[]> = {
   ref_science: ['물리', '수학', '화학', '생명', '지구/지질', '돌/암석', '기타'],
   ref_art: ['문학', '미술', '음악', '종교', '기타'],
   nature: ['나무', '풀/꽃', '양치/선태', '균류/지의류', '새', '절지/곤충', '기타'],
-  it_history: ['IT', '국가/역사/문화', '생활'],
+  it_history: ['IT', '국가/역사/문화', '생활/화폐'],
   finance_realty: ['경제', '금융/crypto', '부동산'],
   ref_others: ['좋은글', '건강', '레시피', '여행', '영화', '기타'],
   office: ['법률', '사무실'],
@@ -64,7 +64,7 @@ export async function migrateCategories() {
     const qMigrateTags = query(collection(db, 'notes'),
       where('uid', '==', appState.currentUser.uid),
       where('category', '==', 'ref_others'),
-      where('tag', 'in', ['IT', '역사/문화', '국가/역사/문화', '생활']));
+      where('tag', 'in', ['IT', '역사/문화', '국가/역사/문화', '생활', '생활/화폐']));
     const snapTags = await getDocs(qMigrateTags);
     for (const d of snapTags.docs) {
       await updateDoc(doc(db, 'notes', d.id), { category: 'it_history' });
@@ -84,6 +84,19 @@ export async function migrateCategories() {
     }
     if (snapHistory.size > 0) {
       console.log(`태그 마이그레이션: it_history(역사/문화) → 국가/역사/문화 (${snapHistory.size}건)`);
+    }
+
+    // it_history 카테고리 중 '생활' 태그가 붙은 것들을 '생활/화폐' 태그로 변경
+    const qMigrateLife = query(collection(db, 'notes'),
+      where('uid', '==', appState.currentUser.uid),
+      where('category', '==', 'it_history'),
+      where('tag', '==', '생활'));
+    const snapLife = await getDocs(qMigrateLife);
+    for (const d of snapLife.docs) {
+      await updateDoc(doc(db, 'notes', d.id), { tag: '생활/화폐' });
+    }
+    if (snapLife.size > 0) {
+      console.log(`태그 마이그레이션: it_history(생활) → 생활/화폐 (${snapLife.size}건)`);
     }
 
     // nature 카테고리 중 '꽃' 태그가 붙은 것들을 '풀/꽃' 태그로 변경
