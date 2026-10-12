@@ -71,9 +71,62 @@ function ensureAllNotesCache() {
   subscribeAllNotesCache();
 }
 
+function renderUserBar(user: any) {
+  const av = document.getElementById('user-bar-avatar');
+  const nameEl = document.getElementById('user-bar-name');
+  if (nameEl) nameEl.textContent = user.displayName || user.email;
+  if (av) {
+    if (user.photoURL) {
+      av.className = 'user-bar-avatar';
+      av.innerHTML = `<img src="${user.photoURL}" alt="">`;
+    } else {
+      av.className = 'user-bar-avatar-default';
+      av.textContent = (user.displayName || 'U')[0].toUpperCase();
+    }
+  }
+}
+
+// ── 로컬 스토리지 조기 캐시 복원 (낙관적 UI)
+function applyEarlyCache() {
+  try {
+    const rawUser = localStorage.getItem('mynote_user_cache');
+    if (rawUser) {
+      const user = JSON.parse(rawUser);
+      renderUserBar(user);
+      showRootScreen('app');
+    }
+    const rawCounts = localStorage.getItem('mynote_counts_cache');
+    if (rawCounts) {
+      const counts = JSON.parse(rawCounts);
+      let total = 0;
+      Object.keys(CATEGORIES).forEach(catId => {
+        const n = counts[catId] || 0;
+        total += n;
+        const cnt = document.getElementById('cnt-' + catId);
+        if (cnt) cnt.textContent = String(n);
+      });
+      const totalCnt = document.getElementById('cnt-total-notes');
+      if (totalCnt) totalCnt.textContent = String(total);
+    }
+  } catch (e) {
+    console.warn('초기 캐시 복원 실패:', e);
+  }
+}
+
+// 스크립트 실행 즉시 캐시 적용
+applyEarlyCache();
+
 // ── AUTH & 초기화
 initAuthListener(
   async (user) => {
+    try {
+      localStorage.setItem('mynote_user_cache', JSON.stringify({
+        displayName: user.displayName,
+        email: user.email,
+        photoURL: user.photoURL,
+        uid: user.uid
+      }));
+    } catch (e) {}
     renderUserBar(user);
     showRootScreen('app');
     loadAllCounts();
@@ -85,21 +138,31 @@ initAuthListener(
     }
   },
   (email) => {
+    try {
+      localStorage.removeItem('mynote_user_cache');
+      localStorage.removeItem('mynote_counts_cache');
+    } catch (e) {}
+    document.documentElement.classList.remove('has-cached-auth');
     const el = document.getElementById('denied-email');
     if (el) el.textContent = email || '';
     showRootScreen('denied-screen');
   },
   () => {
+    try {
+      localStorage.removeItem('mynote_user_cache');
+      localStorage.removeItem('mynote_counts_cache');
+    } catch (e) {}
+    document.documentElement.classList.remove('has-cached-auth');
     if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
     isAllNotesSubscribed = false;
     showRootScreen('auth-screen');
   }
 );
 
-// 로딩 타임아웃
+// 로딩 타임아웃 (캐시가 없을 때만 5초 후 로그인 화면 유도)
 setTimeout(() => {
   const ls = document.getElementById('loading-screen');
-  if (ls && ls.style.display !== 'none') {
+  if (ls && ls.style.display !== 'none' && !localStorage.getItem('mynote_user_cache')) {
     showRootScreen('auth-screen');
   }
 }, 5000);
@@ -114,27 +177,26 @@ if (btnLogin) {
 
 const btnLogout = document.getElementById('btn-logout');
 if (btnLogout) {
-  btnLogout.onclick = () => logout();
+  btnLogout.onclick = () => {
+    try {
+      localStorage.removeItem('mynote_user_cache');
+      localStorage.removeItem('mynote_counts_cache');
+    } catch (e) {}
+    document.documentElement.classList.remove('has-cached-auth');
+    logout();
+  };
 }
 
 const btnDeniedSignout = document.getElementById('btn-denied-signout');
 if (btnDeniedSignout) {
-  btnDeniedSignout.onclick = () => logout();
-}
-
-function renderUserBar(user: any) {
-  const av = document.getElementById('user-bar-avatar');
-  const nameEl = document.getElementById('user-bar-name');
-  if (nameEl) nameEl.textContent = user.displayName || user.email;
-  if (av) {
-    if (user.photoURL) {
-      av.className = 'user-bar-avatar';
-      av.innerHTML = `<img src="${user.photoURL}" alt="">`;
-    } else {
-      av.className = 'user-bar-avatar-default';
-      av.textContent = (user.displayName || 'U')[0].toUpperCase();
-    }
-  }
+  btnDeniedSignout.onclick = () => {
+    try {
+      localStorage.removeItem('mynote_user_cache');
+      localStorage.removeItem('mynote_counts_cache');
+    } catch (e) {}
+    document.documentElement.classList.remove('has-cached-auth');
+    logout();
+  };
 }
 
 // 전체 메모 구독 (메모 링크 및 캐시용)
@@ -174,6 +236,9 @@ appState.handleNoteLinkClick = function(el: any) {
 function loadAllCounts() {
   if (catUnsubscribes['meta']) catUnsubscribes['meta']();
   catUnsubscribes['meta'] = subscribeUserMeta((categoryCount) => {
+    try {
+      localStorage.setItem('mynote_counts_cache', JSON.stringify(categoryCount));
+    } catch (e) {}
     let total = 0;
     Object.keys(CATEGORIES).forEach(catId => {
       const n = categoryCount[catId] || 0;

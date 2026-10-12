@@ -1,7 +1,19 @@
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 import { CATEGORIES } from '../services/database';
 import { appState } from '../state';
+
+// Lazy loading marked & DOMPurify module
+let markedModule: any = null;
+let purifyModule: any = null;
+
+async function loadMarkdownModules() {
+  if (markedModule && purifyModule) return;
+  const [m, p] = await Promise.all([
+    import('marked'),
+    import('dompurify')
+  ]);
+  markedModule = m.marked || m.default || m;
+  purifyModule = p.default || p;
+}
 
 // Lazy loading KaTeX module
 let katexModule: any = null;
@@ -101,7 +113,13 @@ export function buildVideoEmbed(url: string, index = 0) {
 }
 
 export async function parseMarkdownBody(rawBody: string): Promise<string> {
-  if (!marked || !DOMPurify) {
+  try {
+    await loadMarkdownModules();
+  } catch (e) {
+    console.error('Markdown modules load error', e);
+  }
+
+  if (!markedModule || !purifyModule) {
     return linkify(rawBody);
   }
 
@@ -139,7 +157,7 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     });
 
   // ③ marked 파싱
-  let html: any = marked.parse(processed, { breaks: true });
+  let html: any = markedModule.parse(processed, { breaks: true });
 
   // ④ KaTeX 복원
   if (mathBlocks.length > 0) {
@@ -159,7 +177,7 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
   }
 
   // ⑤ DOMPurify 살균
-  let parsedBody = DOMPurify.sanitize(html, {
+  let parsedBody = purifyModule.sanitize(html, {
     ADD_TAGS: ['math', 'mrow', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac',
                'msubsup', 'mover', 'munder', 'moverunder', 'menclose',
                'msqrt', 'mroot', 'mtable', 'mtr', 'mtd', 'mtext',

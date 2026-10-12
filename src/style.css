@@ -28,6 +28,9 @@
     background: var(--bg-base);
     display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 999;
   }
+  html.has-cached-auth #loading-screen {
+    display: none !important;
+  }
   .spinner {
     width: 36px; height: 36px; border: 3px solid var(--sky-mid);
     border-top-color: var(--sky-dark); border-radius: 50%;

@@ -15,6 +15,15 @@
 <meta name="x5-orientation" content="portrait">
 <meta name="browsermode" content="application">
   <link rel="stylesheet" href="/src/style.css">
+  <script>
+    (function() {
+      try {
+        if (localStorage.getItem('mynote_user_cache')) {
+          document.documentElement.classList.add('has-cached-auth');
+        }
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
 <!-- Loading -->
