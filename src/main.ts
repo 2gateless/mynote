@@ -1,24 +1,21 @@
+import { Timestamp } from 'firebase/firestore';
 import { appState } from './state';
 import { 
   initAuthListener, 
   loginWithGoogle, 
-  logout, 
-  ALLOWED_EMAILS 
+  logout 
 } from './services/auth';
 import { 
   CATEGORIES, 
   SUB_TAGS, 
-  migrateCategories, 
-  migrateNotesToMeta, 
-  migrateNoteIndexToShards,
-  syncNoteMeta, 
   subscribeUserMeta, 
   subscribeAllNotes, 
-  subscribeNotesList, 
+  subscribeCategoryIndex,
+  rebuildCategoryIndex,
   getSingleNote, 
-  deleteSingleNote, 
-  createNote, 
-  updateSingleNote 
+  createNoteWithIndex, 
+  updateNoteWithIndex,
+  deleteNoteWithIndex 
 } from './services/database';
 import { 
   escHtml, 
@@ -34,51 +31,114 @@ import {
 } from './utils/share';
 import { 
   compressImage, 
+  imageFileName,
   uploadImageToStorage, 
-  deleteImageFromStorage, 
+  deleteImagesFromStorage, 
   collectImagePaths 
 } from './utils/image';
+import { showToast } from './utils/toast';
+import { initImageViewer } from './ui/imageViewer';
 import { 
   showAppScreen, 
   showRootScreen, 
-  initPwaNavigation, 
-  currentScreen 
+  initPwaNavigation 
 } from './pwa';
+import { NoteIndexItem } from './types';
 
 let recognition: any = null;
 let isRecording = false;
-let catUnsubscribes: Record<string, () => void> = {};
+let metaUnsubscribe: (() => void) | null = null;
 let listUnsubscribe: (() => void) | null = null;
-let searchTimeout: any = null;
 let notesUnsubscribe: (() => void) | null = null;
+let searchTimeout: any = null;
 let detailFrom = 'list'; // 'list' or 'search'
+let detailRenderToken = 0;
 
-// Toast 메시지 유틸리티
-function showToast(msg: string) {
-  const t = document.getElementById('toast');
-  if (t) {
-    t.textContent = msg;
-    t.classList.add('show');
-    setTimeout(() => t.classList.remove('show'), 2500);
-  }
+// 목록 화면 캐시 (같은 카테고리에서 태그만 바꿀 때 재구독하지 않기 위함)
+let listCatId: string | null = null;
+let listNotesCache: NoteIndexItem[] = [];
+// 구버전 인덱스 자동 보정을 세션당 카테고리별 1회만 수행
+const rebuiltCats = new Set<string>();
+// 최근 카테고리 카운트 (인덱스 누락 감지용)
+let lastCounts: Record<string, number> = {};
+
+const koCollator = new Intl.Collator('ko');
+
+// ─────────────────────────────────────────────
+// 공통 헬퍼
+// ─────────────────────────────────────────────
+const $ = (id: string) => document.getElementById(id);
+
+function setDisplay(id: string, value: string) {
+  const el = $(id);
+  if (el) el.style.display = value;
 }
 
-let isAllNotesSubscribed = false;
+function clearAuthCache() {
+  try {
+    localStorage.removeItem('mynote_user_cache');
+    localStorage.removeItem('mynote_counts_cache');
+  } catch (e) {}
+  document.documentElement.classList.remove('has-cached-auth');
+}
 
-function ensureAllNotesCache() {
-  if (isAllNotesSubscribed) return;
-  isAllNotesSubscribed = true;
-  subscribeAllNotesCache();
+function toMillis(ts: any): number {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === 'function') return ts.toMillis();
+  if (ts instanceof Date) return ts.getTime();
+  if (typeof ts.seconds === 'number') return ts.seconds * 1000;
+  return 0;
+}
+
+// 카테고리별/전체 카운트 표시
+function applyCounts(counts: Record<string, number>) {
+  let total = 0;
+  Object.keys(CATEGORIES).forEach(catId => {
+    const n = Math.max(0, counts[catId] || 0);
+    total += n;
+    const cnt = $('cnt-' + catId);
+    if (cnt) cnt.textContent = String(n);
+  });
+  const totalCnt = $('cnt-total-notes');
+  if (totalCnt) totalCnt.textContent = String(total);
+}
+
+// 태그 칩 HTML (클릭은 이벤트 위임으로 처리 — 인라인 onclick 미사용)
+function tagChipHtml(category: string, tag: string, className: string, style = '') {
+  return `<span class="${className}" data-tag-link data-cat="${escHtml(category)}" data-tag="${escHtml(tag)}"${style ? ` style="${style}"` : ''}>#${escHtml(tag)}</span>`;
+}
+
+// 위임된 클릭 이벤트에서 태그 칩을 처리. 처리했으면 true
+function handleTagLink(e: Event): boolean {
+  const el = (e.target as HTMLElement).closest('[data-tag-link]') as HTMLElement | null;
+  if (!el) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  if (el.dataset.cat) openList(el.dataset.cat, el.dataset.tag || null);
+  return true;
+}
+
+function insertAtCursor(ta: HTMLTextAreaElement, text: string) {
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+  ta.selectionStart = ta.selectionEnd = start + text.length;
+  ta.focus();
 }
 
 function renderUserBar(user: any) {
-  const av = document.getElementById('user-bar-avatar');
-  const nameEl = document.getElementById('user-bar-name');
+  const av = $('user-bar-avatar');
+  const nameEl = $('user-bar-name');
   if (nameEl) nameEl.textContent = user.displayName || user.email;
   if (av) {
+    av.textContent = '';
     if (user.photoURL) {
       av.className = 'user-bar-avatar';
-      av.innerHTML = `<img src="${user.photoURL}" alt="">`;
+      // innerHTML 대신 DOM API로 생성 (URL 이스케이프 문제 방지)
+      const img = document.createElement('img');
+      img.src = user.photoURL;
+      img.alt = '';
+      av.appendChild(img);
     } else {
       av.className = 'user-bar-avatar-default';
       av.textContent = (user.displayName || 'U')[0].toUpperCase();
@@ -91,22 +151,13 @@ function applyEarlyCache() {
   try {
     const rawUser = localStorage.getItem('mynote_user_cache');
     if (rawUser) {
-      const user = JSON.parse(rawUser);
-      renderUserBar(user);
+      renderUserBar(JSON.parse(rawUser));
       showRootScreen('app');
     }
     const rawCounts = localStorage.getItem('mynote_counts_cache');
     if (rawCounts) {
-      const counts = JSON.parse(rawCounts);
-      let total = 0;
-      Object.keys(CATEGORIES).forEach(catId => {
-        const n = counts[catId] || 0;
-        total += n;
-        const cnt = document.getElementById('cnt-' + catId);
-        if (cnt) cnt.textContent = String(n);
-      });
-      const totalCnt = document.getElementById('cnt-total-notes');
-      if (totalCnt) totalCnt.textContent = String(total);
+      lastCounts = JSON.parse(rawCounts);
+      applyCounts(lastCounts);
     }
   } catch (e) {
     console.warn('초기 캐시 복원 실패:', e);
@@ -116,7 +167,51 @@ function applyEarlyCache() {
 // 스크립트 실행 즉시 캐시 적용
 applyEarlyCache();
 
-// ── AUTH & 초기화
+// ─────────────────────────────────────────────
+// 전체 메모 인덱스 캐시 (검색·메모 링크용)
+// ─────────────────────────────────────────────
+let isAllNotesSubscribed = false;
+
+function ensureAllNotesCache() {
+  if (isAllNotesSubscribed) return;
+  isAllNotesSubscribed = true;
+  subscribeAllNotesCache();
+}
+
+// 캐시 갱신 시 검색용 텍스트/제목 Map을 한 번만 계산해 둔다
+function updateNotesCache(notes: NoteIndexItem[]) {
+  appState.allNotesCache = notes;
+  appState.searchIndex = notes.map(n => ({
+    note: n,
+    text: `${n.title || ''}\n${n.snippet || ''}\n${n.keywords || ''}`.toLowerCase()
+  }));
+  const map = new Map<string, NoteIndexItem>();
+  for (const n of notes) {
+    if (n.title && !map.has(n.title)) map.set(n.title, n);
+  }
+  appState.notesByTitle = map;
+  appState.sortedNotesByTitle = null; // 메모 링크 모달을 열 때 지연 계산
+}
+
+function subscribeAllNotesCache() {
+  if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
+  notesUnsubscribe = subscribeAllNotes((notes) => {
+    updateNotesCache(notes);
+    const totalCnt = $('cnt-total-notes');
+    if (totalCnt) totalCnt.textContent = String(notes.length);
+  });
+}
+
+function stopAllSubscriptions() {
+  if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
+  if (metaUnsubscribe) { metaUnsubscribe(); metaUnsubscribe = null; }
+  stopListSubscription();
+  isAllNotesSubscribed = false;
+}
+
+// ─────────────────────────────────────────────
+// AUTH & 초기화
+// ─────────────────────────────────────────────
 initAuthListener(
   async (user) => {
     try {
@@ -138,36 +233,27 @@ initAuthListener(
     }
   },
   (email) => {
-    try {
-      localStorage.removeItem('mynote_user_cache');
-      localStorage.removeItem('mynote_counts_cache');
-    } catch (e) {}
-    document.documentElement.classList.remove('has-cached-auth');
-    const el = document.getElementById('denied-email');
+    clearAuthCache();
+    const el = $('denied-email');
     if (el) el.textContent = email || '';
     showRootScreen('denied-screen');
   },
   () => {
-    try {
-      localStorage.removeItem('mynote_user_cache');
-      localStorage.removeItem('mynote_counts_cache');
-    } catch (e) {}
-    document.documentElement.classList.remove('has-cached-auth');
-    if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
-    isAllNotesSubscribed = false;
+    clearAuthCache();
+    stopAllSubscriptions();
     showRootScreen('auth-screen');
   }
 );
 
 // 로딩 타임아웃 (캐시가 없을 때만 5초 후 로그인 화면 유도)
 setTimeout(() => {
-  const ls = document.getElementById('loading-screen');
+  const ls = $('loading-screen');
   if (ls && ls.style.display !== 'none' && !localStorage.getItem('mynote_user_cache')) {
     showRootScreen('auth-screen');
   }
 }, 5000);
 
-const btnLogin = document.getElementById('btn-google-login');
+const btnLogin = $('btn-google-login');
 if (btnLogin) {
   btnLogin.onclick = async () => {
     try { await loginWithGoogle(); }
@@ -175,84 +261,53 @@ if (btnLogin) {
   };
 }
 
-const btnLogout = document.getElementById('btn-logout');
-if (btnLogout) {
-  btnLogout.onclick = () => {
-    try {
-      localStorage.removeItem('mynote_user_cache');
-      localStorage.removeItem('mynote_counts_cache');
-    } catch (e) {}
-    document.documentElement.classList.remove('has-cached-auth');
-    logout();
-  };
-}
-
-const btnDeniedSignout = document.getElementById('btn-denied-signout');
-if (btnDeniedSignout) {
-  btnDeniedSignout.onclick = () => {
-    try {
-      localStorage.removeItem('mynote_user_cache');
-      localStorage.removeItem('mynote_counts_cache');
-    } catch (e) {}
-    document.documentElement.classList.remove('has-cached-auth');
-    logout();
-  };
-}
-
-// 전체 메모 구독 (메모 링크 및 캐시용)
-function subscribeAllNotesCache() {
-  if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
-  notesUnsubscribe = subscribeAllNotes((notes) => {
-    appState.allNotesCache = notes;
-    const totalCnt = document.getElementById('cnt-total-notes');
-    if (totalCnt && notes) {
-      totalCnt.textContent = String(notes.length);
-    }
-  });
-}
-
-// 메모 링크 클릭 핸들러
-appState.handleNoteLinkClick = function(el: any) {
-  const noteId = el.dataset.noteId;
-  if (!noteId) return;
-  getSingleNote(noteId)
-    .then(note => {
-      if (note) {
-        appState.currentCat = note.category;
-        const listTitle = document.getElementById('list-title');
-        if (listTitle) {
-          listTitle.textContent =
-            (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
-        }
-        openDetail(note, detailFrom || 'list');
-      } else {
-        showToast('해당 메모를 찾을 수 없어요');
-      }
-    })
-    .catch(() => showToast('메모를 불러오는 중 오류가 발생했어요'));
+const handleSignOut = () => {
+  clearAuthCache();
+  logout();
 };
+const btnLogout = $('btn-logout');
+if (btnLogout) btnLogout.onclick = handleSignOut;
+const btnDeniedSignout = $('btn-denied-signout');
+if (btnDeniedSignout) btnDeniedSignout.onclick = handleSignOut;
 
 // ── COUNTS
 function loadAllCounts() {
-  if (catUnsubscribes['meta']) catUnsubscribes['meta']();
-  catUnsubscribes['meta'] = subscribeUserMeta((categoryCount) => {
+  if (metaUnsubscribe) metaUnsubscribe();
+  metaUnsubscribe = subscribeUserMeta((categoryCount) => {
+    lastCounts = categoryCount;
     try {
       localStorage.setItem('mynote_counts_cache', JSON.stringify(categoryCount));
     } catch (e) {}
-    let total = 0;
-    Object.keys(CATEGORIES).forEach(catId => {
-      const n = categoryCount[catId] || 0;
-      total += n;
-      const cnt = document.getElementById('cnt-' + catId);
-      if (cnt) cnt.textContent = String(n);
-    });
-    const totalCnt = document.getElementById('cnt-total-notes');
-    if (totalCnt) totalCnt.textContent = String(total);
+    applyCounts(categoryCount);
   });
 }
 
-// ── CATEGORY CARDS CLICK (Folders List 클릭)
-const foldersList = document.getElementById('folders-list');
+// ── 메모 ID로 전체 메모를 불러와 상세 화면 열기 (목록·검색·메모 링크 공통)
+async function openNoteById(noteId: string, from: string) {
+  try {
+    const note = await getSingleNote(noteId);
+    if (!note) { showToast('해당 메모를 찾을 수 없어요'); return; }
+    appState.currentCat = note.category;
+    const listTitle = $('list-title');
+    if (listTitle) {
+      listTitle.textContent = (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
+    }
+    openDetail(note, from);
+  } catch (e) {
+    showToast('메모를 불러오는 중 오류가 발생했어요');
+  }
+}
+
+// 메모 링크 클릭 핸들러
+appState.handleNoteLinkClick = function(el: HTMLElement) {
+  const noteId = el.dataset.noteId;
+  if (noteId) openNoteById(noteId, detailFrom || 'list');
+};
+
+// ─────────────────────────────────────────────
+// HOME (폴더 목록 / 검색 토글)
+// ─────────────────────────────────────────────
+const foldersList = $('folders-list');
 if (foldersList) {
   foldersList.addEventListener('click', e => {
     const row = (e.target as HTMLElement).closest('.folder-row') as HTMLElement;
@@ -262,66 +317,74 @@ if (foldersList) {
   });
 }
 
-// ── Folders Action (검색 토글, 더보기 기능 바인딩)
-const btnToggleSearch = document.getElementById('btn-toggle-search');
-const searchWrap = document.getElementById('search-wrap');
+const searchInput = $('search-input') as HTMLInputElement;
+const searchClear = $('search-clear') as HTMLElement;
+const searchResults = $('search-results') as HTMLElement;
+
+function setHomeListVisible(visible: boolean) {
+  setDisplay('folders-list', visible ? '' : 'none');
+  setDisplay('folders-meta-header', visible ? '' : 'none');
+}
+
+// 검색 상태 초기화 + 폴더 목록 복원 (여러 곳에서 공통 사용)
+function resetSearchUI() {
+  clearTimeout(searchTimeout);
+  if (searchInput) searchInput.value = '';
+  if (searchClear) searchClear.style.display = 'none';
+  if (searchResults) {
+    searchResults.style.display = 'none';
+    searchResults.innerHTML = '';
+  }
+  setHomeListVisible(true);
+}
+
+const btnToggleSearch = $('btn-toggle-search');
+const searchWrap = $('search-wrap');
 if (btnToggleSearch && searchWrap) {
   btnToggleSearch.onclick = () => {
     ensureAllNotesCache();
     const isHidden = searchWrap.style.display === 'none';
     searchWrap.style.display = isHidden ? 'block' : 'none';
     if (isHidden) {
-      const input = document.getElementById('search-input') as HTMLInputElement;
-      if (input) input.focus();
+      searchInput?.focus();
     } else {
       // 닫을 때 검색 초기화
-      const input = document.getElementById('search-input') as HTMLInputElement;
-      if (input) {
-        input.value = '';
-        const clearBtn = document.getElementById('search-clear');
-        if (clearBtn) clearBtn.style.display = 'none';
-      }
-      const results = document.getElementById('search-results');
-      if (results) results.style.display = 'none';
-      const fList = document.getElementById('folders-list');
-      if (fList) fList.style.display = '';
+      resetSearchUI();
     }
   };
 }
 
-const btnMoreOptions = document.getElementById('btn-more-options');
+const btnMoreOptions = $('btn-more-options');
 if (btnMoreOptions) {
-  btnMoreOptions.onclick = () => {
-    showToast('Folders 설정 메뉴 (준비 중입니다) ⚙️');
-  };
+  btnMoreOptions.onclick = () => showToast('Folders 설정 메뉴 (준비 중입니다) ⚙️');
 }
 
-// 하단 원형 버튼 바인딩
-const btnAddFolder = document.getElementById('btn-add-folder');
+const btnAddFolder = $('btn-add-folder');
 if (btnAddFolder) {
-  btnAddFolder.onclick = () => {
-    showToast('새 폴더 추가 기능 (준비 중입니다) 📂');
-  };
+  btnAddFolder.onclick = () => showToast('새 폴더 추가 기능 (준비 중입니다) 📂');
 }
 
-const btnAddNoteHome = document.getElementById('btn-add-note-home');
+const btnAddNoteHome = $('btn-add-note-home');
 if (btnAddNoteHome) {
   btnAddNoteHome.onclick = () => {
-    // 현재 선택된 카테고리가 없으므로 기본 'memory'를 타겟으로 하거나 첫 번째 폴더로 모달 띄우기
-    appState.currentCat = 'memory'; 
+    // 현재 선택된 카테고리가 없으므로 기본 'memory'를 타겟으로 모달 띄우기
+    appState.currentCat = 'memory';
+    appState.currentTag = null;
     openAddModal();
   };
 }
 
-// ── LIST
+// ─────────────────────────────────────────────
+// LIST (카테고리 인덱스만 구독 — 본문 문서를 읽지 않음)
+// ─────────────────────────────────────────────
 appState.openList = openList;
 function openList(catId: string, tag: string | null = null) {
+  const cat = CATEGORIES[catId];
+  if (!cat) return;
   appState.currentCat = catId;
   appState.currentTag = tag;
-  const cat = CATEGORIES[catId];
-  let titleText = cat.icon + ' ' + cat.name;
-  const listTitle = document.getElementById('list-title');
-  if (listTitle) listTitle.textContent = titleText;
+  const listTitle = $('list-title');
+  if (listTitle) listTitle.textContent = cat.icon + ' ' + cat.name;
   
   renderListTagFilter(catId, tag);
   showAppScreen('list');
@@ -329,107 +392,156 @@ function openList(catId: string, tag: string | null = null) {
 }
 
 function renderListTagFilter(catId: string, activeTag: string | null) {
-  const filterBar = document.getElementById('list-tag-filter');
+  const filterBar = $('list-tag-filter');
   if (!filterBar) return;
   const tags = SUB_TAGS[catId];
   if (!tags || tags.length === 0) {
     filterBar.style.display = 'none';
+    filterBar.innerHTML = '';
     return;
   }
   filterBar.style.display = 'flex';
-  let html = `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" onclick="appState.openList('${catId}', null)">전체</div>`;
-  tags.forEach(t => {
-    html += `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" onclick="appState.openList('${catId}', '${t}')">#${t}</div>`;
+  filterBar.innerHTML =
+    `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" data-filter-tag="">전체</div>` +
+    tags.map(t =>
+      `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" data-filter-tag="${escHtml(t)}">#${escHtml(t)}</div>`
+    ).join('');
+}
+
+const listTagFilter = $('list-tag-filter');
+if (listTagFilter) {
+  listTagFilter.addEventListener('click', e => {
+    const btn = (e.target as HTMLElement).closest('[data-filter-tag]') as HTMLElement | null;
+    if (!btn || !appState.currentCat) return;
+    openList(appState.currentCat, btn.dataset.filterTag || null);
   });
-  filterBar.innerHTML = html;
+}
+
+function stopListSubscription() {
+  if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+  listCatId = null;
+  listNotesCache = [];
 }
 
 function loadList(catId: string) {
-  if (listUnsubscribe) listUnsubscribe();
-  const content = document.getElementById('list-content');
+  // 같은 카테고리를 이미 구독 중이면 재구독 없이 캐시만 다시 필터링
+  if (listUnsubscribe && listCatId === catId) {
+    renderList();
+    return;
+  }
+  stopListSubscription();
+  listCatId = catId;
+  const content = $('list-content');
   if (content) {
     content.innerHTML = `<div style="color:var(--text-light);font-size:14px;padding:8px">불러오는 중...</div>`;
   }
-  listUnsubscribe = subscribeNotesList(catId, (notes) => {
-    if (appState.currentTag) {
-      notes = notes.filter(n => n.tag === appState.currentTag);
+  listUnsubscribe = subscribeCategoryIndex(catId, (notes) => {
+    listNotesCache = notes;
+    renderList();
+
+    // 구버전 인덱스(목록용 필드 누락) 또는 인덱스 누락 감지 시 1회 자동 보정
+    const needsRebuild =
+      notes.some(n => n.createdAt === undefined || n.pinned === undefined) ||
+      (notes.length === 0 && (lastCounts[catId] || 0) > 0);
+    if (needsRebuild && !rebuiltCats.has(catId)) {
+      rebuiltCats.add(catId);
+      rebuildCategoryIndex(catId).catch(err => console.error('인덱스 보정 오류:', err));
     }
-    renderList(notes);
   }, (err) => {
-    if (content) content.innerHTML = `<div style="color:var(--danger);font-size:13px">${err.message}</div>`;
+    if (content) content.innerHTML = `<div style="color:var(--danger);font-size:13px">${escHtml(err.message)}</div>`;
   });
 }
 
-function renderList(notes: any[]) {
-  const content = document.getElementById('list-content');
+function renderList() {
+  const content = $('list-content');
   if (!content) return;
+  const notes = appState.currentTag
+    ? listNotesCache.filter(n => n.tag === appState.currentTag)
+    : listNotesCache;
+
   if (notes.length === 0) {
     content.innerHTML = `<div class="empty-list">
-      <div class="ei">${CATEGORIES[appState.currentCat].icon}</div>
+      <div class="ei">${CATEGORIES[appState.currentCat]?.icon || '📝'}</div>
       <p>아직 메모가 없어요.<br>첫 번째 메모를 추가해보세요!</p>
     </div>`;
     return;
   }
-  // 핀 고정된 메모를 최상단에
-  const pinned = notes.filter(n => n.pinned).sort((a, b) => {
-    const ta = a.pinnedAt?.toMillis ? a.pinnedAt.toMillis() : 0;
-    const tb = b.pinnedAt?.toMillis ? b.pinnedAt.toMillis() : 0;
-    return tb - ta;
-  });
-  const unpinned = notes.filter(n => !n.pinned);
-  const sorted = [...pinned, ...unpinned];
+  // 핀 고정 메모(최근 고정순) → 일반 메모(최신 작성순)
+  const pinned = notes.filter(n => n.pinned).sort((a, b) => toMillis(b.pinnedAt) - toMillis(a.pinnedAt));
+  const unpinned = notes.filter(n => !n.pinned).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
 
-  content.innerHTML = '';
-  sorted.forEach(note => {
-    const item = document.createElement('div');
-    item.className = 'note-list-item' + (note.pinned ? ' pinned' : '');
-    item.innerHTML = `
+  // 한 번의 innerHTML 대입으로 렌더링 (항목별 appendChild/리스너 등록 제거)
+  content.innerHTML = [...pinned, ...unpinned].map(note => `
+    <div class="note-list-item${note.pinned ? ' pinned' : ''}" data-id="${escHtml(note.id)}">
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
         <div class="note-list-title">${escHtml(note.title || '제목 없음')}</div>
-        <div class="note-list-date">${note.tag ? `<span onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')" style="color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}${fmtDate(note.createdAt)}</div>
+        <div class="note-list-date">${note.tag ? tagChipHtml(note.category, note.tag, 'note-list-tag', 'color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer') : ''}${fmtDate(note.createdAt)}</div>
       </div>
-      ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : '<span class="note-list-arrow">›</span>'}`;
-    item.onclick = () => openDetail(note);
-    content.appendChild(item);
+      ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : '<span class="note-list-arrow">›</span>'}
+    </div>`).join('');
+}
+
+const listContent = $('list-content');
+if (listContent) {
+  listContent.addEventListener('click', e => {
+    if (handleTagLink(e)) return;
+    const item = (e.target as HTMLElement).closest('.note-list-item') as HTMLElement | null;
+    if (item?.dataset.id) openNoteById(item.dataset.id, 'list');
   });
 }
 
-const listBack = document.getElementById('list-back');
+// 목록으로 돌아가기 (현재 메모의 카테고리 목록이 구독 중이 아니면 다시 연다)
+function goBackToList() {
+  if (appState.currentCat && listCatId !== appState.currentCat) {
+    openList(appState.currentCat, null);
+  } else {
+    showAppScreen('list');
+  }
+}
+
+const listBack = $('list-back');
 if (listBack) {
   listBack.onclick = () => {
-    if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
+    stopListSubscription();
     showAppScreen('home');
   };
 }
 
-// ── DETAIL
+// ─────────────────────────────────────────────
+// DETAIL
+// ─────────────────────────────────────────────
 async function openDetail(note: any, from?: string) {
   ensureAllNotesCache();
+  const token = ++detailRenderToken;
   appState.currentNote = note;
   detailFrom = from || 'list';
-  const detailHeaderTitle = document.getElementById('detail-header-title');
+  const detailHeaderTitle = $('detail-header-title');
   if (detailHeaderTitle) detailHeaderTitle.textContent = note.title || '제목 없음';
 
-  const backBtn = document.getElementById('detail-back');
+  const backBtn = $('detail-back');
   if (backBtn) {
     backBtn.textContent = detailFrom === 'search' ? '🏠' : '←';
     backBtn.title = detailFrom === 'search' ? '홈으로' : '목록으로';
   }
 
-  const content = document.getElementById('detail-content');
+  const content = $('detail-content');
   if (!content) return;
   const imgs = note.images || [];
+  // 이미지 클릭은 imageViewer 모듈의 이벤트 위임에서 처리
   const imgHtml = imgs.length > 0
-    ? `<div class="detail-images">${imgs.map((i: any) => `<img class="detail-img" src="${i.url}" alt="이미지" onclick="appState.openImageViewer('${i.url}')">`).join('')}</div>`
+    ? `<div class="detail-images">${imgs.map((i: any) => `<img class="detail-img" src="${escHtml(i.url)}" alt="이미지">`).join('')}</div>`
     : '';
 
   const parsedBody = await parseMarkdownBody(note.body || '');
+  // 파싱 도중 다른 메모가 열렸다면 이전 결과는 버림 (경쟁 상태 방지)
+  if (token !== detailRenderToken) return;
 
+  const cat = CATEGORIES[note.category];
   content.innerHTML = `
     <div class="detail-meta">
-      <span class="detail-cat-badge">${CATEGORIES[note.category]?.icon} ${CATEGORIES[note.category]?.name}</span>
-      ${note.tag ? `<span class="detail-tag-badge" onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')">#${note.tag}</span>` : ''}
+      <span class="detail-cat-badge">${cat?.icon || ''} ${cat?.name || ''}</span>
+      ${note.tag ? tagChipHtml(note.category, note.tag, 'detail-tag-badge') : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
     <div class="detail-body" style="background: ${note.pinned ? '#F2EFE6' : 'var(--white)'}">${parsedBody}</div>
@@ -437,196 +549,171 @@ async function openDetail(note: any, from?: string) {
   showAppScreen('detail');
 }
 
-const detailBack = document.getElementById('detail-back');
+// 상세 본문의 태그 칩 / 메모 링크 클릭 (이벤트 위임)
+const detailContentEl = $('detail-content');
+if (detailContentEl) {
+  detailContentEl.addEventListener('click', e => {
+    if (handleTagLink(e)) return;
+    const link = (e.target as HTMLElement).closest('.note-link[data-note-id]') as HTMLElement | null;
+    if (link) appState.handleNoteLinkClick(link);
+  });
+}
+
+const detailBack = $('detail-back');
 if (detailBack) {
   detailBack.onclick = () => {
     if (detailFrom === 'search') {
-      searchInput.value = '';
-      searchClear.style.display = 'none';
-      searchResults.style.display = 'none';
-      const grid = document.getElementById('cat-grid');
-      if (grid) grid.style.display = '';
+      // (버그 수정) 존재하지 않는 'cat-grid' 대신 폴더 목록·메타 헤더를 올바르게 복원
+      resetSearchUI();
       showAppScreen('home');
     } else {
-      showAppScreen('list');
+      goBackToList();
     }
   };
 }
 
-const btnEditDetail = document.getElementById('btn-edit-detail');
+const btnEditDetail = $('btn-edit-detail');
 if (btnEditDetail) {
   btnEditDetail.onclick = () => openEditModal(appState.currentNote);
 }
 
-const btnDelDetail = document.getElementById('btn-del-detail');
+const btnDelDetail = $('btn-del-detail');
 if (btnDelDetail) {
   btnDelDetail.onclick = () => openDelModal(appState.currentNote.id);
 }
 
-// ── SEARCH
-const searchInput = document.getElementById('search-input') as HTMLInputElement;
-const searchClear = document.getElementById('search-clear') as HTMLElement;
-const searchResults = document.getElementById('search-results') as HTMLElement;
-
+// ─────────────────────────────────────────────
+// SEARCH
+// ─────────────────────────────────────────────
 if (searchInput) {
   searchInput.addEventListener('input', () => {
     const v = searchInput.value.trim();
     searchClear.style.display = v ? 'block' : 'none';
     clearTimeout(searchTimeout);
-    if (!v) { 
-      searchResults.style.display = 'none'; 
-      const grid = document.getElementById('folders-list');
-      if (grid) grid.style.display = ''; 
-      const metaHeader = document.getElementById('folders-meta-header');
-      if (metaHeader) metaHeader.style.display = '';
-      return; 
+    if (!v) {
+      searchResults.style.display = 'none';
+      searchResults.innerHTML = '';
+      setHomeListVisible(true);
+      return;
     }
     searchTimeout = setTimeout(() => doSearch(v), 350);
   });
 }
 
 if (searchClear) {
-  searchClear.onclick = () => {
-    searchInput.value = '';
-    searchClear.style.display = 'none';
-    searchResults.style.display = 'none';
-    const grid = document.getElementById('folders-list');
-    if (grid) grid.style.display = '';
-    const metaHeader = document.getElementById('folders-meta-header');
-    if (metaHeader) metaHeader.style.display = '';
-  };
+  searchClear.onclick = () => resetSearchUI();
 }
 
-async function doSearch(keyword: string) {
-  const grid = document.getElementById('folders-list');
-  if (grid) grid.style.display = 'none';
-  const metaHeader = document.getElementById('folders-meta-header');
-  if (metaHeader) metaHeader.style.display = 'none';
+function doSearch(keyword: string) {
+  setHomeListVisible(false);
   searchResults.style.display = 'block';
-  searchResults.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:8px 4px">검색 중...</div>`;
   try {
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
-    const results = appState.allNotesCache.filter((n: any) => {
-        const title = (n.title || '').toLowerCase();
-        const body = (n.snippet || '').toLowerCase();
-        const keywordsField = (n.keywords || '').toLowerCase();
-        return keywords.every(kw => title.includes(kw) || body.includes(kw) || keywordsField.includes(kw));
-    });
+    // 미리 소문자화해 둔 검색 텍스트 사용 (매 검색마다 toLowerCase 반복 제거)
+    const results = (appState.searchIndex as { note: NoteIndexItem; text: string }[])
+      .filter(entry => keywords.every(kw => entry.text.includes(kw)))
+      .map(entry => entry.note);
+
     if (results.length === 0) {
       searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
       return;
     }
-    searchResults.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
+    const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
       <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
       <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
     </div>`;
-    
-    const homeBtn = document.getElementById('search-home-btn');
-    if (homeBtn) {
-      homeBtn.onclick = () => {
-        searchInput.value = '';
-        searchClear.style.display = 'none';
-        searchResults.style.display = 'none';
-        if (grid) grid.style.display = '';
-        const metaH = document.getElementById('folders-meta-header');
-        if (metaH) metaH.style.display = '';
-        showAppScreen('home');
-      };
-    }
-    
-    results.forEach((note: any) => {
-      const item = document.createElement('div');
-      item.className = 'search-result-item';
+    const items = results.map(note => {
       const cat = CATEGORIES[note.category];
-      item.innerHTML = `
+      return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
         <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
-        <span class="search-result-cat">${cat?.icon} ${cat?.name}</span>
-        ${note.tag ? `<span class="search-result-cat" onclick="event.stopPropagation(); event.preventDefault(); appState.openList('${note.category}', '${note.tag}')" style="background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer">#${escHtml(note.tag)}</span>` : ''}
-        <div class="search-result-body">${escHtml(note.snippet || '')}</div>`;
-      
-      const goToDetail = async () => {
-        clearTimeout(searchTimeout);
-        searchInput.blur();
-        appState.currentCat = note.category;
-        const listTitle = document.getElementById('list-title');
-        if (listTitle) listTitle.textContent = (cat?.icon || '') + ' ' + (cat?.name || '');
-        const fullNote = await getSingleNote(note.id);
-        if (fullNote) {
-          openDetail(fullNote, 'search');
-        } else {
-          showToast('삭제된 메모입니다.');
-        }
-      };
-      
-      let startX = 0, startY = 0;
-      let isMoving = false;
-
-      const handleTouchStart = (e: any) => {
-        const touch = e.touches[0];
-        startX = touch.clientX;
-        startY = touch.clientY;
-        isMoving = false;
-      };
-
-      const handleTouchMove = (e: any) => {
-        if (isMoving) return;
-        const touch = e.touches[0];
-        const diffX = Math.abs(touch.clientX - startX);
-        const diffY = Math.abs(touch.clientY - startY);
-        if (diffX > 8 || diffY > 8) {
-          isMoving = true;
-        }
-      };
-
-      const handleTouchEnd = (e: any) => {
-        if (e.target.closest('.search-result-cat')) return;
-        if (isMoving) return;
-        e.preventDefault();
-        goToDetail();
-      };
-      
-      const handleMouseDown = (e: any) => {
-        if (e.button !== 0) return;
-        if (e.target.closest('.search-result-cat')) return;
-        goToDetail();
-      };
-      
-      item.addEventListener('touchstart', handleTouchStart, { passive: true });
-      item.addEventListener('touchmove', handleTouchMove, { passive: true });
-      item.addEventListener('touchend', handleTouchEnd, { passive: false });
-      item.addEventListener('mousedown', handleMouseDown);
-      
-      searchResults.appendChild(item);
-    });
+        <span class="search-result-cat">${cat?.icon || ''} ${cat?.name || ''}</span>
+        ${note.tag ? tagChipHtml(note.category, note.tag, 'search-result-cat', 'background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer') : ''}
+        <div class="search-result-body">${escHtml(note.snippet || '')}</div>
+      </div>`;
+    }).join('');
+    // 한 번의 innerHTML 대입 + 컨테이너 이벤트 위임 (항목당 리스너 4개 → 0개)
+    searchResults.innerHTML = header + items;
   } catch(e: any) {
-    searchResults.innerHTML = `<div style="color:var(--danger);font-size:13px">${e.message}</div>`;
+    searchResults.innerHTML = `<div style="color:var(--danger);font-size:13px">${escHtml(e.message)}</div>`;
   }
 }
 
-// ── MODAL ACTIONS
-const btnAddNote = document.getElementById('btn-add-note');
+function goToSearchDetail(item: HTMLElement) {
+  const id = item.dataset.id;
+  if (!id) return;
+  clearTimeout(searchTimeout);
+  searchInput?.blur();
+  openNoteById(id, 'search');
+}
+
+if (searchResults) {
+  let startX = 0, startY = 0;
+  let isMoving = false;
+
+  const itemOf = (e: Event) => (e.target as HTMLElement).closest('.search-result-item') as HTMLElement | null;
+  const onCatChip = (e: Event) => !!(e.target as HTMLElement).closest('.search-result-cat');
+
+  searchResults.addEventListener('touchstart', (e: TouchEvent) => {
+    const touch = e.touches[0];
+    startX = touch.clientX;
+    startY = touch.clientY;
+    isMoving = false;
+  }, { passive: true });
+
+  searchResults.addEventListener('touchmove', (e: TouchEvent) => {
+    if (isMoving) return;
+    const touch = e.touches[0];
+    if (Math.abs(touch.clientX - startX) > 8 || Math.abs(touch.clientY - startY) > 8) {
+      isMoving = true;
+    }
+  }, { passive: true });
+
+  searchResults.addEventListener('touchend', (e: TouchEvent) => {
+    const item = itemOf(e);
+    if (!item || onCatChip(e) || isMoving) return;
+    e.preventDefault();
+    goToSearchDetail(item);
+  }, { passive: false });
+
+  searchResults.addEventListener('mousedown', (e: MouseEvent) => {
+    if (e.button !== 0) return;
+    const item = itemOf(e);
+    if (!item || onCatChip(e)) return;
+    goToSearchDetail(item);
+  });
+
+  searchResults.addEventListener('click', e => {
+    if (handleTagLink(e)) return;
+    if ((e.target as HTMLElement).closest('#search-home-btn')) {
+      resetSearchUI();
+      showAppScreen('home');
+    }
+  });
+}
+
+// ─────────────────────────────────────────────
+// MODAL ACTIONS
+// ─────────────────────────────────────────────
+const btnAddNote = $('btn-add-note');
 if (btnAddNote) btnAddNote.onclick = openAddModal;
 
-const btnCancel = document.getElementById('btn-cancel');
+const btnCancel = $('btn-cancel');
 if (btnCancel) btnCancel.onclick = closeModal;
 
-const btnSave = document.getElementById('btn-save');
+const btnSave = $('btn-save');
 if (btnSave) btnSave.onclick = saveNote;
 
 // ── 메모 링크 삽입 모달
-const noteLinkModal = document.getElementById('note-link-modal') as HTMLElement;
-const noteLinkSearchInput = document.getElementById('note-link-search-input') as HTMLInputElement;
-const noteLinkList = document.getElementById('note-link-list') as HTMLElement;
+const noteLinkModal = $('note-link-modal') as HTMLElement;
+const noteLinkSearchInput = $('note-link-search-input') as HTMLInputElement;
+const noteLinkList = $('note-link-list') as HTMLElement;
+let noteLinkSearchTimer: any = null;
 
-const noteLinkBtn = document.getElementById('note-link-btn');
-if (noteLinkBtn) {
-  noteLinkBtn.onclick = () => openNoteLinkModal();
-}
+const noteLinkBtn = $('note-link-btn');
+if (noteLinkBtn) noteLinkBtn.onclick = () => openNoteLinkModal();
 
-const noteLinkCancel = document.getElementById('note-link-cancel');
-if (noteLinkCancel) {
-  noteLinkCancel.onclick = () => closeNoteLinkModal();
-}
+const noteLinkCancel = $('note-link-cancel');
+if (noteLinkCancel) noteLinkCancel.onclick = () => closeNoteLinkModal();
 
 if (noteLinkModal) {
   noteLinkModal.addEventListener('click', e => { 
@@ -642,146 +729,148 @@ function openNoteLinkModal() {
   setTimeout(() => noteLinkSearchInput.focus(), 80);
 }
 function closeNoteLinkModal() {
+  clearTimeout(noteLinkSearchTimer);
   noteLinkModal.style.display = 'none';
+}
+
+// 제목순 정렬본은 캐시가 바뀐 뒤 처음 필요할 때 1회만 계산
+function getSortedNotesByTitle(): NoteIndexItem[] {
+  if (!appState.sortedNotesByTitle) {
+    appState.sortedNotesByTitle = (appState.allNotesCache as NoteIndexItem[])
+      .slice()
+      .sort((a, b) => koCollator.compare(a.title || '', b.title || ''));
+  }
+  return appState.sortedNotesByTitle;
 }
 
 function renderNoteLinkList(keyword: string) {
   const kw = keyword.toLowerCase().trim();
-  const items = kw
-    ? appState.allNotesCache.filter((n: any) => n.title.toLowerCase().includes(kw))
-    : appState.allNotesCache.slice();
-  
-  const filtered = appState.editingNoteId ? items.filter((n: any) => n.id !== appState.editingNoteId) : items;
-  filtered.sort((a: any, b: any) => a.title.localeCompare(b.title, 'ko'));
+  const filtered = getSortedNotesByTitle().filter(n =>
+    n.id !== appState.editingNoteId &&
+    (!kw || (n.title || '').toLowerCase().includes(kw))
+  );
 
   if (filtered.length === 0) {
     noteLinkList.innerHTML = `<div style="text-align:center;padding:28px;color:var(--text-light);font-size:13px">`
       + (kw ? `🔍 "${escHtml(kw)}" 결과 없음` : '📝 메모가 없어요') + `</div>`;
     return;
   }
-  noteLinkList.innerHTML = '';
-  filtered.forEach((note: any) => {
+  noteLinkList.innerHTML = filtered.map(note => {
     const cat = CATEGORIES[note.category];
-    const item = document.createElement('div');
-    item.className = 'note-link-item';
-    item.innerHTML = `<span class="note-link-item-cat">${cat ? cat.icon : '📝'}</span>`
+    return `<div class="note-link-item" data-title="${escHtml(note.title)}">`
+      + `<span class="note-link-item-cat">${cat ? cat.icon : '📝'}</span>`
       + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
-      + (note.tag ? `<span class="note-link-item-tag">#${escHtml(note.tag)}</span>` : '');
-    item.onclick = () => insertNoteLink(note.title);
-    noteLinkList.appendChild(item);
+      + (note.tag ? `<span class="note-link-item-tag">#${escHtml(note.tag)}</span>` : '')
+      + `</div>`;
+  }).join('');
+}
+
+if (noteLinkList) {
+  noteLinkList.addEventListener('click', e => {
+    const item = (e.target as HTMLElement).closest('.note-link-item') as HTMLElement | null;
+    if (item && item.dataset.title !== undefined) insertNoteLink(item.dataset.title);
   });
 }
 
 function insertNoteLink(title: string) {
-  const ta = document.getElementById('note-body') as HTMLTextAreaElement;
-  const start = ta.selectionStart;
-  const end = ta.selectionEnd;
-  const linkText = `[[${title}]]`;
-  ta.value = ta.value.slice(0, start) + linkText + ta.value.slice(end);
-  ta.selectionStart = ta.selectionEnd = start + linkText.length;
-  ta.focus();
+  const ta = $('note-body') as HTMLTextAreaElement;
+  if (ta) insertAtCursor(ta, `[[${title}]]`);
   closeNoteLinkModal();
   showToast(`"${title}" 메모 링크를 삽입했어요 📝`);
 }
 
 if (noteLinkSearchInput) {
+  // 키 입력마다가 아니라 입력이 잠시 멈췄을 때 렌더링 (디바운스)
   noteLinkSearchInput.addEventListener('input', () => {
-    renderNoteLinkList(noteLinkSearchInput.value);
+    clearTimeout(noteLinkSearchTimer);
+    noteLinkSearchTimer = setTimeout(() => renderNoteLinkList(noteLinkSearchInput.value), 120);
   });
 }
 
 function renderTagOptions(catId: string, selectedTag: string | null) {
-  const tg = document.getElementById('tag-group');
-  const to = document.getElementById('tag-options');
-  if (tg && to) {
-    if (SUB_TAGS[catId]) {
-      tg.style.display = 'block';
-      to.innerHTML = SUB_TAGS[catId].map((tag) => `
-        <label style="display:inline-flex">
-          <input type="radio" name="note-tag" value="${tag}" class="tag-radio" ${tag === selectedTag ? 'checked' : ''}>
-          <span class="tag-label">${tag}</span>
-        </label>
-      `).join('');
-    } else {
-      tg.style.display = 'none';
-      to.innerHTML = '';
-    }
+  const tg = $('tag-group');
+  const to = $('tag-options');
+  if (!tg || !to) return;
+  if (SUB_TAGS[catId]) {
+    tg.style.display = 'block';
+    to.innerHTML = SUB_TAGS[catId].map((tag) => `
+      <label style="display:inline-flex">
+        <input type="radio" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${tag === selectedTag ? 'checked' : ''}>
+        <span class="tag-label">${escHtml(tag)}</span>
+      </label>
+    `).join('');
+  } else {
+    tg.style.display = 'none';
+    to.innerHTML = '';
   }
 }
 
 function setPinToggleUI(isPinned: boolean) {
-  const cb = document.getElementById('note-pinned') as HTMLInputElement;
-  const wrap = document.getElementById('pin-toggle-wrap');
-  const status = document.getElementById('pin-toggle-status');
+  const cb = $('note-pinned') as HTMLInputElement;
+  const wrap = $('pin-toggle-wrap');
+  const status = $('pin-toggle-status');
   if (cb) cb.checked = isPinned;
   if (wrap && status) {
-    if (isPinned) {
-      wrap.classList.add('active');
-      status.textContent = '📌 고정됨';
-    } else {
-      wrap.classList.remove('active');
-      status.textContent = '고정 안 됨';
-    }
+    wrap.classList.toggle('active', isPinned);
+    status.textContent = isPinned ? '📌 고정됨' : '고정 안 됨';
   }
+}
+
+function fillNoteForm(title: string, body: string, keywords: string, modalTitleText: string) {
+  const titleEl = $('note-title') as HTMLInputElement;
+  const bodyEl = $('note-body') as HTMLTextAreaElement;
+  const keywordsEl = $('note-keywords') as HTMLInputElement;
+  const modalTitle = $('modal-title');
+  const previewList = $('img-preview-list');
+  if (titleEl) titleEl.value = title;
+  if (bodyEl) bodyEl.value = body;
+  if (keywordsEl) keywordsEl.value = keywords;
+  if (modalTitle) modalTitle.textContent = modalTitleText;
+  if (previewList) previewList.innerHTML = '';
 }
 
 function openAddModal() {
   appState.editingNoteId = null; 
   appState.pendingImages = []; 
   appState.existingImages = [];
-  const title = document.getElementById('note-title') as HTMLInputElement;
-  const body = document.getElementById('note-body') as HTMLTextAreaElement;
-  const previewList = document.getElementById('img-preview-list');
-  const modalTitle = document.getElementById('modal-title');
-  const keywordsInput = document.getElementById('note-keywords') as HTMLInputElement;
-  if (title) title.value = '';
-  if (body) body.value = '';
-  if (previewList) previewList.innerHTML = '';
-  if (keywordsInput) keywordsInput.value = '';
-  if (modalTitle) modalTitle.textContent = `새 메모 — ${CATEGORIES[appState.currentCat]?.name}`;
-  
+  fillNoteForm('', '', '', `새 메모 — ${CATEGORIES[appState.currentCat]?.name || ''}`);
   renderTagOptions(appState.currentCat, appState.currentTag || null);
   setPinToggleUI(false);
-  const modal = document.getElementById('note-modal');
-  if (modal) modal.style.display = 'flex';
+  setDisplay('note-modal', 'flex');
 }
 
 function openEditModal(note: any) {
   appState.editingNoteId = note.id; 
   appState.pendingImages = [];
   appState.existingImages = (note.images || []).map((i: any) => ({...i}));
-  
-  const title = document.getElementById('note-title') as HTMLInputElement;
-  const body = document.getElementById('note-body') as HTMLTextAreaElement;
-  const modalTitle = document.getElementById('modal-title');
-  const keywordsInput = document.getElementById('note-keywords') as HTMLInputElement;
-  if (title) title.value = note.title || '';
-  if (body) body.value = note.body || '';
-  if (keywordsInput) keywordsInput.value = note.keywords || '';
-  if (modalTitle) modalTitle.textContent = '메모 수정';
-  
+  fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
-  const modal = document.getElementById('note-modal');
-  if (modal) modal.style.display = 'flex';
+  setDisplay('note-modal', 'flex');
 }
 
 function closeModal() {
-  const modal = document.getElementById('note-modal');
-  if (modal) modal.style.display = 'none';
+  setDisplay('note-modal', 'none');
   stopRecording();
 }
 
-// ── IMAGE UPLOADS
+// ─────────────────────────────────────────────
+// IMAGE UPLOADS (본문 인라인 이미지)
+// ─────────────────────────────────────────────
+const noteBodyEl = $('note-body') as HTMLTextAreaElement;
 
-// 본문 인라인 이미지 업로드
-const inlineImgBtn = document.getElementById('inline-img-btn') as HTMLButtonElement;
-const inlineImgInput = document.getElementById('inline-img-input') as HTMLInputElement;
+// 이미지 압축(Blob) → Storage 업로드 → 본문 커서 위치에 마크다운 삽입
+async function uploadAndInsertImage(file: File, prefix: string) {
+  const blob = await compressImage(file, 2560, 2560, 0.88);
+  const { url } = await uploadImageToStorage(blob, imageFileName(prefix, blob));
+  if (noteBodyEl) insertAtCursor(noteBodyEl, `\n![이미지](${url})\n`);
+}
+
+const inlineImgBtn = $('inline-img-btn') as HTMLButtonElement;
+const inlineImgInput = $('inline-img-input') as HTMLInputElement;
 
 if (inlineImgBtn) {
-  inlineImgBtn.onclick = () => {
-    if (inlineImgInput) inlineImgInput.click();
-  };
+  inlineImgBtn.onclick = () => inlineImgInput?.click();
 }
 
 if (inlineImgInput) {
@@ -791,25 +880,17 @@ if (inlineImgInput) {
     const file = files[0];
     inlineImgInput.value = '';
     
+    const originalLabel = inlineImgBtn.textContent;
     inlineImgBtn.textContent = '⏳ 업로드 중...';
     inlineImgBtn.classList.add('uploading');
     inlineImgBtn.disabled = true;
     try {
-      const compressed = await compressImage(file, 2560, 2560, 0.88);
-      const { url } = await uploadImageToStorage(compressed, `inline_${Date.now()}.jpg`);
-      
-      const ta = document.getElementById('note-body') as HTMLTextAreaElement;
-      const start = ta.selectionStart;
-      const end = ta.selectionEnd;
-      const mdImg = `\n![이미지](${url})\n`;
-      ta.value = ta.value.slice(0, start) + mdImg + ta.value.slice(end);
-      ta.selectionStart = ta.selectionEnd = start + mdImg.length;
-      ta.focus();
+      await uploadAndInsertImage(file, 'inline');
       showToast('이미지가 본문에 삽입되었어요 🖼️');
     } catch(e: any) {
       showToast('업로드 실패: ' + e.message);
     } finally {
-      inlineImgBtn.textContent = '🖼️ 본문에 이미지';
+      inlineImgBtn.textContent = originalLabel || '🖼️ 이미지 삽입';
       inlineImgBtn.classList.remove('uploading');
       inlineImgBtn.disabled = false;
     }
@@ -817,44 +898,39 @@ if (inlineImgInput) {
 }
 
 // 클립보드 이미지 직접 붙여넣기 (Ctrl+V) 지원
-const noteBodyEl = document.getElementById('note-body') as HTMLTextAreaElement;
 if (noteBodyEl) {
   noteBodyEl.addEventListener('paste', async (e: ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      if (item.type.indexOf('image') !== -1) {
-        const file = item.getAsFile();
-        if (!file) continue;
-        e.preventDefault();
-        showToast('붙여넣은 이미지 업로드 중... ⏳');
-        try {
-          const compressed = await compressImage(file, 2560, 2560, 0.88);
-          const { url } = await uploadImageToStorage(compressed, `pasted_${Date.now()}.jpg`);
-          const start = noteBodyEl.selectionStart;
-          const end = noteBodyEl.selectionEnd;
-          const mdImg = `\n![이미지](${url})\n`;
-          noteBodyEl.value = noteBodyEl.value.slice(0, start) + mdImg + noteBodyEl.value.slice(end);
-          noteBodyEl.selectionStart = noteBodyEl.selectionEnd = start + mdImg.length;
-          noteBodyEl.focus();
-          showToast('이미지가 본문에 붙여넣어졌어요 🖼️');
-        } catch(err: any) {
-          showToast('이미지 붙여넣기 실패: ' + err.message);
-        }
-        break;
+      if (item.type.indexOf('image') === -1) continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      e.preventDefault();
+      showToast('붙여넣은 이미지 업로드 중... ⏳');
+      try {
+        await uploadAndInsertImage(file, 'pasted');
+        showToast('이미지가 본문에 붙여넣어졌어요 🖼️');
+      } catch(err: any) {
+        showToast('이미지 붙여넣기 실패: ' + err.message);
       }
+      break;
     }
   });
 }
 
-// ── SAVE NOTE
+// ─────────────────────────────────────────────
+// SAVE NOTE
+// ─────────────────────────────────────────────
+let isSaving = false;
 async function saveNote() {
-  const titleEl = document.getElementById('note-title') as HTMLInputElement;
-  const bodyEl = document.getElementById('note-body') as HTMLTextAreaElement;
+  if (isSaving) return;
+  const titleEl = $('note-title') as HTMLInputElement;
+  const bodyEl = $('note-body') as HTMLTextAreaElement;
   const tagRadio = document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement;
-  const pinnedEl = document.getElementById('note-pinned') as HTMLInputElement;
-  const keywordsEl = document.getElementById('note-keywords') as HTMLInputElement;
+  const pinnedEl = $('note-pinned') as HTMLInputElement;
+  const keywordsEl = $('note-keywords') as HTMLInputElement;
   
   const title = titleEl ? titleEl.value.trim() : '';
   const body = bodyEl ? bodyEl.value.trim() : '';
@@ -863,64 +939,62 @@ async function saveNote() {
   const keywords = keywordsEl ? keywordsEl.value.trim() : '';
   
   if (!title) { showToast('제목을 입력해주세요'); return; }
-  const btn = document.getElementById('btn-save') as HTMLButtonElement;
+  isSaving = true;
+  const btn = $('btn-save') as HTMLButtonElement;
   if (btn) {
     btn.textContent = '저장 중...'; 
     btn.disabled = true;
   }
   try {
-    const uploadedImgs: any[] = [];
-    for (const img of appState.pendingImages) {
-      try {
-        const { url, path } = await uploadImageToStorage(img.dataUrl, img.name);
-        uploadedImgs.push({ url, path });
-      } catch(imgErr) {
-        console.error('이미지 업로드 오류:', imgErr);
-        showToast('이미지 업로드 실패 — 텍스트만 저장돼요');
-      }
+    // 첨부 이미지 병렬 업로드 (실패한 것만 건너뜀)
+    const uploadResults = await Promise.allSettled(
+      (appState.pendingImages || []).map((img: any) =>
+        uploadImageToStorage(img.blob || img.dataUrl, img.name))
+    );
+    const uploadedImgs = uploadResults
+      .filter((r): r is PromiseFulfilledResult<{ url: string; path: string }> => r.status === 'fulfilled')
+      .map(r => ({ url: r.value.url, path: r.value.path }));
+    if (uploadedImgs.length < uploadResults.length) {
+      uploadResults.forEach(r => { if (r.status === 'rejected') console.error('이미지 업로드 오류:', r.reason); });
+      showToast('일부 이미지 업로드 실패 — 나머지만 저장돼요');
     }
     const allImages = [...appState.existingImages, ...uploadedImgs];
-    const prevPinned = appState.editingNoteId ? !!appState.currentNote?.pinned : false;
-    // pinnedAt 타임스탬프 계산
-    let pinnedAt: any = null;
-    if (pinned) {
-      pinnedAt = prevPinned && appState.currentNote?.pinnedAt ? appState.currentNote.pinnedAt : new Date();
-    }
-    
-    if (appState.editingNoteId) {
-      const oldNote = { ...appState.currentNote };
-      const updateData = {
-        title, body, tag, images: allImages,
-        pinned, pinnedAt, keywords
-      };
-      await updateSingleNote(appState.editingNoteId, updateData);
-      await syncNoteMeta('update', appState.editingNoteId, { title, body, tag, category: appState.currentNote.category, keywords }, oldNote);
 
-      // 수정 과정에서 빠진 첨부 이미지를 Storage에서도 삭제
-      const removedImgs = (oldNote.images || []).filter(
-        (old: any) => !allImages.some((cur: any) => cur.url === old.url)
-      );
-      for (const img of removedImgs) {
-        await deleteImageFromStorage(img.path || img.url);
-      }
+    const isEdit = !!appState.editingNoteId;
+    const prevPinned = isEdit ? !!appState.currentNote?.pinned : false;
+    // pinnedAt: 이미 고정돼 있던 메모면 기존 시각 유지, 새로 고정하면 현재 시각
+    const pinnedAt = pinned
+      ? (prevPinned && appState.currentNote?.pinnedAt ? appState.currentNote.pinnedAt : Timestamp.now())
+      : null;
+    
+    if (isEdit) {
+      const oldNote = { ...appState.currentNote };
+      const updateData = { title, body, tag, images: allImages, pinned, pinnedAt, keywords };
+      // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장
+      await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
+
+      // 수정 과정에서 빠진 첨부 이미지를 Storage에서 병렬 삭제 (UI는 기다리지 않음)
+      const removed = (oldNote.images || [])
+        .filter((old: any) => !allImages.some((cur: any) => cur.url === old.url))
+        .map((img: any) => img.path || img.url);
+      if (removed.length) deleteImagesFromStorage(removed).catch(console.error);
+
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
-      
       appState.currentNote = { ...appState.currentNote, ...updateData };
-      openDetail(appState.currentNote);
+      openDetail(appState.currentNote, detailFrom);
     } else {
-      const noteData = {
+      await createNoteWithIndex({
         category: appState.currentCat,
         tag, title, body, images: allImages,
         pinned, pinnedAt, keywords
-      };
-      const newId = await createNote(noteData);
-      await syncNoteMeta('add', newId, { title, body, tag, category: appState.currentCat, keywords }, null);
+      });
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
     closeModal();
   } catch(e: any) { 
     showToast('저장 실패: ' + e.message); 
   } finally { 
+    isSaving = false;
     if (btn) {
       btn.textContent = '💾 저장'; 
       btn.disabled = false; 
@@ -928,132 +1002,108 @@ async function saveNote() {
   }
 }
 
-// ── DELETE NOTE
+// ─────────────────────────────────────────────
+// DELETE NOTE
+// ─────────────────────────────────────────────
 function openDelModal(id: string) {
   appState.deleteTargetId = id;
-  const modal = document.getElementById('del-modal');
-  if (modal) modal.style.display = 'flex';
+  setDisplay('del-modal', 'flex');
 }
 
-const delCancel = document.getElementById('del-cancel');
-if (delCancel) {
-  delCancel.onclick = () => {
-    const modal = document.getElementById('del-modal');
-    if (modal) modal.style.display = 'none';
-  };
-}
+const delCancel = $('del-cancel');
+if (delCancel) delCancel.onclick = () => setDisplay('del-modal', 'none');
 
-const delConfirm = document.getElementById('del-confirm');
+const delConfirm = $('del-confirm') as HTMLButtonElement;
 if (delConfirm) {
   delConfirm.onclick = async () => {
-    if (!appState.deleteTargetId) return;
+    const id = appState.deleteTargetId;
+    if (!id || delConfirm.disabled) return;
+    delConfirm.disabled = true;
     try {
-      // 삭제 전에 메모를 읽어 첨부/인라인 이미지 파일을 Storage에서 먼저 정리
-      const noteToDelete = await getSingleNote(appState.deleteTargetId);
-      if (noteToDelete) {
-        for (const p of collectImagePaths(noteToDelete)) {
-          await deleteImageFromStorage(p);
-        }
+      // 상세 화면에 이미 전체 메모가 있으므로 재조회하지 않음 (없을 때만 조회)
+      const target = appState.currentNote?.id === id ? appState.currentNote : await getSingleNote(id);
+      if (!target) {
+        showToast('이미 삭제된 메모예요');
+      } else {
+        // 메모 문서 + 인덱스 + 카운트를 단일 트랜잭션으로 삭제
+        await deleteNoteWithIndex(id, target);
+        // 메모 삭제가 확정된 뒤 Storage 이미지를 병렬로 정리 (UI는 기다리지 않음)
+        const paths = collectImagePaths(target);
+        if (paths.length) deleteImagesFromStorage(paths).catch(console.error);
+        showToast('메모가 삭제되었어요 🗑️');
       }
-      await deleteSingleNote(appState.deleteTargetId);
-      await syncNoteMeta('delete', appState.deleteTargetId, null, appState.currentNote);
-      showToast('메모가 삭제되었어요 🗑️');
-      const modal = document.getElementById('del-modal');
-      if (modal) modal.style.display = 'none';
+      setDisplay('del-modal', 'none');
       appState.deleteTargetId = null;
-      showAppScreen('list');
-    } catch(e: any) { showToast('삭제 실패: ' + e.message); }
+      goBackToList();
+    } catch(e: any) {
+      showToast('삭제 실패: ' + e.message);
+    } finally {
+      delConfirm.disabled = false;
+    }
   };
 }
 
-// ── SHARE ACTIONS
-const btnShareDetail = document.getElementById('btn-share-detail');
+// ─────────────────────────────────────────────
+// SHARE ACTIONS
+// ─────────────────────────────────────────────
+const btnShareDetail = $('btn-share-detail');
 if (btnShareDetail) {
   btnShareDetail.onclick = () => {
     const { title, body } = getShareText(appState.currentNote);
     if (navigator.share) {
       navigator.share({ title, text: body }).catch(err => {
-        if (err.name !== 'AbortError') {
-          const modal = document.getElementById('share-modal');
-          if (modal) modal.style.display = 'flex';
-        }
+        if (err.name !== 'AbortError') setDisplay('share-modal', 'flex');
       });
     } else {
-      const modal = document.getElementById('share-modal');
-      if (modal) modal.style.display = 'flex';
+      setDisplay('share-modal', 'flex');
     }
   };
 }
 
-const shareCancel = document.getElementById('share-cancel');
-if (shareCancel) {
-  shareCancel.onclick = () => {
-    const modal = document.getElementById('share-modal');
-    if (modal) modal.style.display = 'none';
-  };
-}
+const shareCancel = $('share-cancel');
+if (shareCancel) shareCancel.onclick = () => setDisplay('share-modal', 'none');
 
-const shareGmail = document.getElementById('share-gmail');
-if (shareGmail) {
-  shareGmail.onclick = () => {
+// 공유 버튼 공통 바인딩: 모달을 닫고 해당 공유 함수 실행
+function bindShare(id: string, fn: (title: string, body: string) => void) {
+  const el = $(id);
+  if (!el) return;
+  el.onclick = () => {
     const { title, body } = getShareText(appState.currentNote);
-    const modal = document.getElementById('share-modal');
-    if (modal) modal.style.display = 'none';
-    shareViaEmail(title, body);
+    setDisplay('share-modal', 'none');
+    fn(title, body);
   };
 }
+bindShare('share-gmail', (t, b) => shareViaEmail(t, b));
+bindShare('share-kakao', (t, b) => shareViaKakao(t, b, showToast));
+bindShare('share-telegram', (t, b) => shareViaTelegram(t, b));
+bindShare('share-native', (t, b) => shareViaNative(t, b, showToast));
 
-const shareKakaoBtn = document.getElementById('share-kakao');
-if (shareKakaoBtn) {
-  shareKakaoBtn.onclick = () => {
-    const { title, body } = getShareText(appState.currentNote);
-    const modal = document.getElementById('share-modal');
-    if (modal) modal.style.display = 'none';
-    shareViaKakao(title, body, showToast);
-  };
-}
-
-const shareTelegramBtn = document.getElementById('share-telegram');
-if (shareTelegramBtn) {
-  shareTelegramBtn.onclick = () => {
-    const { title, body } = getShareText(appState.currentNote);
-    const modal = document.getElementById('share-modal');
-    if (modal) modal.style.display = 'none';
-    shareViaTelegram(title, body);
-  };
-}
-
-const shareNativeBtn = document.getElementById('share-native');
-if (shareNativeBtn) {
-  shareNativeBtn.onclick = () => {
-    const { title, body } = getShareText(appState.currentNote);
-    const modal = document.getElementById('share-modal');
-    if (modal) modal.style.display = 'none';
-    shareViaNative(title, body, showToast);
-  };
-}
-
-// ── VOICE SPEECH INPUT
-const voiceBtn = document.getElementById('voice-btn');
+// ─────────────────────────────────────────────
+// VOICE SPEECH INPUT
+// ─────────────────────────────────────────────
+const voiceBtn = $('voice-btn');
 if (voiceBtn) {
   voiceBtn.onclick = () => {
     if (isRecording) { stopRecording(); return; }
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) { showToast('이 브라우저는 음성 입력을 지원하지 않아요'); return; }
+    const bodyTa = $('note-body') as HTMLTextAreaElement;
+    // (버그 수정) 녹음 시작 시점의 본문을 기준으로, 확정 텍스트 + 현재 중간 텍스트만 덧붙인다.
+    // 이전에는 중간(interim) 결과가 올 때마다 누적되어 같은 말이 반복 입력되었음.
+    const baseText = bodyTa ? bodyTa.value : '';
+    let finalText = '';
+
     recognition = new SR();
     recognition.lang = 'ko-KR'; 
     recognition.continuous = true; 
     recognition.interimResults = true;
-    let final = '';
     recognition.onresult = (e: any) => {
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) final += e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
         else interim += e.results[i][0].transcript;
       }
-      const bodyTa = document.getElementById('note-body') as HTMLTextAreaElement;
-      if (bodyTa) bodyTa.value += final + interim;
-      final = '';
+      if (bodyTa) bodyTa.value = baseText + finalText + interim;
     };
     recognition.onerror = () => { stopRecording(); showToast('음성 인식 오류'); };
     recognition.onend = () => { if (isRecording) stopRecording(); };
@@ -1067,7 +1117,7 @@ if (voiceBtn) {
 function stopRecording() {
   if (recognition) { try { recognition.stop(); } catch(e){} recognition = null; }
   isRecording = false;
-  const vb = document.getElementById('voice-btn');
+  const vb = $('voice-btn');
   if (vb) {
     vb.textContent = '🎤 음성 입력';
     vb.classList.remove('recording');
@@ -1075,10 +1125,10 @@ function stopRecording() {
 }
 
 // Pin 토글 UI 바인딩
-const pinToggleWrap = document.getElementById('pin-toggle-wrap');
+const pinToggleWrap = $('pin-toggle-wrap');
 if (pinToggleWrap) {
   pinToggleWrap.addEventListener('click', () => {
-    const cb = document.getElementById('note-pinned') as HTMLInputElement;
+    const cb = $('note-pinned') as HTMLInputElement;
     if (cb) {
       cb.checked = !cb.checked;
       setPinToggleUI(cb.checked);
@@ -1087,436 +1137,43 @@ if (pinToggleWrap) {
 }
 
 // 모달 바깥 배경 클릭 시 닫기
-const noteModal = document.getElementById('note-modal');
+const noteModal = $('note-modal');
 if (noteModal) {
   noteModal.addEventListener('click', e => { 
     if ((e.target as HTMLElement).id === 'note-modal') closeModal(); 
   });
 }
-
-const delModal = document.getElementById('del-modal');
-if (delModal) {
-  delModal.addEventListener('click', e => { 
-    if ((e.target as HTMLElement).id === 'del-modal') delModal.style.display = 'none'; 
-  });
-}
-
-const shareModal = document.getElementById('share-modal');
-if (shareModal) {
-  shareModal.addEventListener('click', e => { 
-    if ((e.target as HTMLElement).id === 'share-modal') shareModal.style.display = 'none'; 
-  });
-}
-
-// ── IMAGE VIEWER
-async function downloadImage(url: string) {
-  showToast('이미지 저장 중...');
-  try {
-    const response = await fetch(url);
-    const blob = await response.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const ext = blob.type.includes('png') ? 'png' : blob.type.includes('gif') ? 'gif' : blob.type.includes('webp') ? 'webp' : 'jpg';
-    a.href = blobUrl;
-    a.download = `mynote_image_${Date.now()}.${ext}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-    showToast('이미지가 저장되었어요 ✅');
-  } catch(e) {
-    window.open(url, '_blank');
-    showToast('새 탭에서 이미지를 길게 눌러 저장하세요');
-  }
-}
-
-// ── IMAGE VIEWER (2배 더블클릭 확대 / 마우스·터치 드래그 이동 / 휠 줌)
-let viewerScale = 1;
-let viewerPanX = 0;
-let viewerPanY = 0;
-let isPanning = false;
-let panStartX = 0;
-let panStartY = 0;
-let panStartPanX = 0;
-let panStartPanY = 0;
-let hasMoved = false;
-
-const viewer = document.getElementById('img-viewer');
-const viewerViewport = document.getElementById('img-viewer-viewport');
-const viewerImg = document.getElementById('img-viewer-img') as HTMLImageElement;
-const viewerBadge = document.getElementById('img-viewer-zoom-badge');
-const viewerToggleBtn = document.getElementById('img-viewer-zoom-toggle');
-const viewerResetBtn = document.getElementById('img-viewer-zoom-reset');
-const viewerZoomInBtn = document.getElementById('img-viewer-zoom-in');
-const viewerZoomOutBtn = document.getElementById('img-viewer-zoom-out');
-const viewerCloseBtn = document.getElementById('img-viewer-close');
-const viewerDownloadBtn = document.getElementById('img-viewer-download') as HTMLElement;
-
-function updateViewerTransform(smooth = true) {
-  if (!viewerImg) return;
-  viewerImg.style.transition = smooth ? 'transform 0.22s cubic-bezier(0.16, 1, 0.3, 1)' : 'none';
-  viewerImg.style.transform = `translate(${viewerPanX}px, ${viewerPanY}px) scale(${viewerScale})`;
-  
-  if (viewerBadge) {
-    viewerBadge.textContent = `${Math.round(viewerScale * 100)}%`;
-  }
-  
-  if (viewerToggleBtn) {
-    viewerToggleBtn.textContent = viewerScale > 1.05 ? '↺ 맞춤' : '2x 확대';
-  }
-  
-  if (viewerViewport) {
-    if (viewerScale > 1.05) {
-      viewerViewport.classList.add('zoomed');
-      viewerImg.style.cursor = isPanning ? 'grabbing' : 'grab';
-    } else {
-      viewerViewport.classList.remove('zoomed');
-      viewerImg.style.cursor = 'zoom-in';
-    }
-  }
-}
-
-function resetViewerZoom(smooth = true) {
-  viewerScale = 1;
-  viewerPanX = 0;
-  viewerPanY = 0;
-  updateViewerTransform(smooth);
-}
-
-function toggleViewerDoubleZoom(originX?: number, originY?: number) {
-  if (viewerScale <= 1.05) {
-    viewerScale = 2;
-    if (originX !== undefined && originY !== undefined && viewerViewport) {
-      const rect = viewerViewport.getBoundingClientRect();
-      const clickOffsetX = originX - (rect.left + rect.width / 2);
-      const clickOffsetY = originY - (rect.top + rect.height / 2);
-      // 더블클릭한 영역이 시야 중심에 가깝게 이동하도록 팬 좌표 보정
-      viewerPanX = Math.round(-clickOffsetX * 0.7);
-      viewerPanY = Math.round(-clickOffsetY * 0.7);
-    } else {
-      viewerPanX = 0;
-      viewerPanY = 0;
-    }
-  } else {
-    viewerScale = 1;
-    viewerPanX = 0;
-    viewerPanY = 0;
-  }
-  updateViewerTransform(true);
-}
-
-function closeImageViewer() {
-  if (viewer) viewer.style.display = 'none';
-  resetViewerZoom(false);
-}
-
-appState.openImageViewer = function(url: string, initialScale = 1) {
-  if (!viewer || !viewerImg) return;
-  viewerImg.src = url;
-  if (viewerDownloadBtn) viewerDownloadBtn.dataset.url = url;
-  viewer.style.display = 'flex';
-  viewerScale = initialScale || 1;
-  viewerPanX = 0;
-  viewerPanY = 0;
-  updateViewerTransform(false);
-  viewer.focus();
-};
-
-if (viewerCloseBtn) viewerCloseBtn.onclick = () => closeImageViewer();
-if (viewerResetBtn) viewerResetBtn.onclick = () => resetViewerZoom(true);
-if (viewerToggleBtn) viewerToggleBtn.onclick = () => toggleViewerDoubleZoom();
-
-if (viewerZoomInBtn) {
-  viewerZoomInBtn.onclick = () => {
-    viewerScale = Math.min(5, Math.round((viewerScale + 0.5) * 10) / 10);
-    updateViewerTransform(true);
-  };
-}
-
-if (viewerZoomOutBtn) {
-  viewerZoomOutBtn.onclick = () => {
-    viewerScale = Math.max(1, Math.round((viewerScale - 0.5) * 10) / 10);
-    if (viewerScale === 1) { viewerPanX = 0; viewerPanY = 0; }
-    updateViewerTransform(true);
-  };
-}
-
-if (viewerDownloadBtn) {
-  viewerDownloadBtn.onclick = () => {
-    const url = viewerDownloadBtn.dataset.url;
-    if (url) downloadImage(url);
-  };
-}
-
-// 뷰포트 내 마우스 더블클릭 (2배 확대 토글)
-if (viewerViewport) {
-  viewerViewport.addEventListener('dblclick', (e: MouseEvent) => {
-    e.preventDefault();
-    toggleViewerDoubleZoom(e.clientX, e.clientY);
-  });
-}
-
-// 마우스 드래그 (Pan)
-if (viewerViewport) {
-  viewerViewport.addEventListener('mousedown', (e: MouseEvent) => {
-    if (e.button !== 0) return;
-    if (viewerScale <= 1.05) return;
-    isPanning = true;
-    hasMoved = false;
-    panStartX = e.clientX;
-    panStartY = e.clientY;
-    panStartPanX = viewerPanX;
-    panStartPanY = viewerPanY;
-    viewerViewport.classList.add('panning');
-    viewerImg?.classList.add('dragging');
-  });
-
-  window.addEventListener('mousemove', (e: MouseEvent) => {
-    if (!isPanning) return;
-    const dx = e.clientX - panStartX;
-    const dy = e.clientY - panStartY;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
-    viewerPanX = panStartPanX + dx;
-    viewerPanY = panStartPanY + dy;
-    updateViewerTransform(false);
-  });
-
-  window.addEventListener('mouseup', () => {
-    if (!isPanning) return;
-    isPanning = false;
-    viewerViewport.classList.remove('panning');
-    viewerImg?.classList.remove('dragging');
-    updateViewerTransform(false);
-  });
-
-  // 휠 스크롤 부드러운 줌
-  viewerViewport.addEventListener('wheel', (e: WheelEvent) => {
-    e.preventDefault();
-    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
-    let newScale = viewerScale * zoomFactor;
-    if (newScale < 1) newScale = 1;
-    if (newScale > 5) newScale = 5;
-    viewerScale = Math.round(newScale * 100) / 100;
-    if (viewerScale === 1) { viewerPanX = 0; viewerPanY = 0; }
-    updateViewerTransform(true);
-  }, { passive: false });
-
-  // 배경 빈 영역 클릭 시 닫기 (드래그하지 않은 경우)
-  viewerViewport.addEventListener('click', (e: MouseEvent) => {
-    if (hasMoved) return;
-    if (e.target === viewerViewport) {
-      closeImageViewer();
-    }
-  });
-}
-
-// 모바일 터치 제스처 (드래그 및 더블탭)
-let lastViewerTouchEnd = 0;
-if (viewerViewport) {
-  viewerViewport.addEventListener('touchstart', (e: TouchEvent) => {
-    if (e.touches.length === 1 && viewerScale > 1.05) {
-      isPanning = true;
-      hasMoved = false;
-      panStartX = e.touches[0].clientX;
-      panStartY = e.touches[0].clientY;
-      panStartPanX = viewerPanX;
-      panStartPanY = viewerPanY;
-      viewerImg?.classList.add('dragging');
-    }
-  }, { passive: true });
-
-  viewerViewport.addEventListener('touchmove', (e: TouchEvent) => {
-    if (!isPanning || e.touches.length !== 1) return;
-    const dx = e.touches[0].clientX - panStartX;
-    const dy = e.touches[0].clientY - panStartY;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
-    viewerPanX = panStartPanX + dx;
-    viewerPanY = panStartPanY + dy;
-    updateViewerTransform(false);
-  }, { passive: true });
-
-  viewerViewport.addEventListener('touchend', (e: TouchEvent) => {
-    if (isPanning) {
-      isPanning = false;
-      viewerImg?.classList.remove('dragging');
-    }
-    const now = Date.now();
-    if (now - lastViewerTouchEnd <= 300 && !hasMoved) {
-      const touch = e.changedTouches[0];
-      toggleViewerDoubleZoom(touch?.clientX, touch?.clientY);
-    }
-    lastViewerTouchEnd = now;
-  });
-}
-
-// ESC 키로 뷰어 닫기
-window.addEventListener('keydown', (e: KeyboardEvent) => {
-  if (e.key === 'Escape' && viewer && viewer.style.display !== 'none') {
-    closeImageViewer();
+['del-modal', 'share-modal'].forEach(id => {
+  const modal = $(id);
+  if (modal) {
+    modal.addEventListener('click', e => {
+      if ((e.target as HTMLElement).id === id) modal.style.display = 'none';
+    });
   }
 });
 
-// ── IMAGE CONTEXT MENU (ContextMenu & LongPress)
-let ctxMenuUrl: string | null = null;
-let longPressTimer: any = null;
-const ctxMenu = document.getElementById('img-ctx-menu') as HTMLElement;
+// ── 이미지 뷰어 / 컨텍스트 메뉴 초기화 (src/ui/imageViewer.ts)
+initImageViewer();
 
-function showImgCtxMenu(x: number, y: number, url: string) {
-  ctxMenuUrl = url;
-  ctxMenu.style.display = 'block';
-  const menuW = 200, menuH = 110;
-  const vw = window.innerWidth, vh = window.innerHeight;
-  ctxMenu.style.left = Math.min(x, vw - menuW - 8) + 'px';
-  ctxMenu.style.top  = Math.min(y, vh - menuH - 8) + 'px';
-}
-function hideImgCtxMenu() {
-  ctxMenu.style.display = 'none';
-  ctxMenuUrl = null;
-}
-
-const ctxView = document.getElementById('img-ctx-view');
-if (ctxView) {
-  ctxView.onclick = () => {
-    if (ctxMenuUrl) appState.openImageViewer(ctxMenuUrl, 1);
-    hideImgCtxMenu();
-  };
-}
-
-const ctxDownload = document.getElementById('img-ctx-download');
-if (ctxDownload) {
-  ctxDownload.onclick = () => {
-    if (ctxMenuUrl) downloadImage(ctxMenuUrl);
-    hideImgCtxMenu();
-  };
-}
-
-document.addEventListener('click', e => {
-  if (ctxMenu && !ctxMenu.contains(e.target as Node)) hideImgCtxMenu();
-});
-document.addEventListener('contextmenu', e => {
-  if (ctxMenu && !ctxMenu.contains(e.target as Node)) hideImgCtxMenu();
-});
-
-// 이미지 컨텍스트 메뉴 터치/클릭/더블클릭 감지 (DetailContent 위임)
-let detailTouchTime = 0;
-const detailContent = document.getElementById('detail-content');
-if (detailContent) {
-  // 우클릭 컨텍스트 메뉴
-  detailContent.addEventListener('contextmenu', e => {
-    const img = (e.target as HTMLElement).closest('img');
-    if (!img) return;
-    e.preventDefault();
-    showImgCtxMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY, img.src);
-  });
-
-  // 본문 이미지 1회 클릭 시 이미지 뷰어 열기
-  detailContent.addEventListener('click', e => {
-    const img = (e.target as HTMLElement).closest('img');
-    if (!img) return;
-    appState.openImageViewer(img.src, 1);
-  });
-
-  // 본문 이미지 더블클릭 시 즉시 2배 확대 상태로 열기!
-  detailContent.addEventListener('dblclick', e => {
-    const img = (e.target as HTMLElement).closest('img');
-    if (!img) return;
-    e.preventDefault();
-    appState.openImageViewer(img.src, 2);
-  });
-  
-  // 모바일 롱프레스 (컨텍스트 메뉴)
-  detailContent.addEventListener('touchstart', e => {
-    const img = (e.target as HTMLElement).closest('img');
-    if (!img) return;
-    const touch = e.touches[0];
-    longPressTimer = setTimeout(() => {
-      showImgCtxMenu(touch.clientX, touch.clientY, img.src);
-    }, 600);
-  }, { passive: true });
-  
-  detailContent.addEventListener('touchend', e => {
-    clearTimeout(longPressTimer);
-    const img = (e.target as HTMLElement).closest('img');
-    if (!img) return;
-    const now = Date.now();
-    // 모바일 더블 탭 시 2배 확대 뷰어로 즉시 열기
-    if (now - detailTouchTime <= 300) {
-      e.preventDefault();
-      appState.openImageViewer(img.src, 2);
-    }
-    detailTouchTime = now;
-  });
-  
-  detailContent.addEventListener('touchmove', () => {
-    clearTimeout(longPressTimer);
-  }, { passive: true });
-}
-
-// 이미지 뷰어 롱프레스
-if (viewerImg) {
-  viewerImg.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    const downloadBtn = document.getElementById('img-viewer-download') as HTMLElement;
-    const url = downloadBtn ? downloadBtn.dataset.url : null;
-    if (url) showImgCtxMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY, url);
-  });
-  viewerImg.addEventListener('touchstart', e => {
-    const touch = e.touches[0];
-    const downloadBtn = document.getElementById('img-viewer-download') as HTMLElement;
-    const url = downloadBtn ? downloadBtn.dataset.url : null;
-    longPressTimer = setTimeout(() => {
-      if (url) showImgCtxMenu(touch.clientX, touch.clientY, url);
-    }, 600);
-  }, { passive: true });
-  viewerImg.addEventListener('touchend', () => clearTimeout(longPressTimer), { passive: true });
-  viewerImg.addEventListener('touchmove', () => clearTimeout(longPressTimer), { passive: true });
-}
-
-// ── PWA HISTORY & BACK BUTTON
+// ─────────────────────────────────────────────
+// PWA HISTORY & BACK BUTTON
+// ─────────────────────────────────────────────
 initPwaNavigation((screen) => {
   if (screen === 'modal') { 
     closeModal(); 
     history.pushState(null, '', location.href); 
     return; 
   }
-  if (screen === 'del-modal') { 
-    const modal = document.getElementById('del-modal');
-    if (modal) modal.style.display = 'none'; 
+  if (screen === 'del-modal' || screen === 'share-modal') { 
+    setDisplay(screen, 'none');
     history.pushState(null, '', location.href); 
     return; 
   }
-  if (screen === 'share-modal') { 
-    const modal = document.getElementById('share-modal');
-    if (modal) modal.style.display = 'none'; 
-    history.pushState(null, '', location.href); 
-    return; 
-  }
-  if (screen === 'detail') {
-    if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
-    searchInput.value = '';
-    searchClear.style.display = 'none';
-    searchResults.style.display = 'none';
-    const grid = document.getElementById('folders-list');
-    if (grid) grid.style.display = '';
-    const metaHeader = document.getElementById('folders-meta-header');
-    if (metaHeader) metaHeader.style.display = '';
-    
+  if (screen === 'detail' || screen === 'list') {
+    stopListSubscription();
+    resetSearchUI();
     showAppScreen('home');
     history.pushState(null, '', location.href);
-    return;
-  }
-  if (screen === 'list') {
-    if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
-    searchInput.value = '';
-    searchClear.style.display = 'none';
-    searchResults.style.display = 'none';
-    const grid = document.getElementById('folders-list');
-    if (grid) grid.style.display = '';
-    const metaHeader = document.getElementById('folders-meta-header');
-    if (metaHeader) metaHeader.style.display = '';
-    
-    showAppScreen('home'); 
-    history.pushState(null, '', location.href); 
     return;
   }
 });

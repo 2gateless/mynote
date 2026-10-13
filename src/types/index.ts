@@ -20,6 +20,11 @@ export interface NoteIndexItem {
   tag: string;
   snippet: string;
   keywords?: string;
+  // 목록 화면을 notes 컬렉션 조회 없이 인덱스만으로 그리기 위한 필드
+  // (구버전 인덱스에는 없을 수 있으며, 목록 최초 진입 시 자동 보정됨)
+  createdAt?: Timestamp | null;
+  pinned?: boolean;
+  pinnedAt?: Timestamp | null;
 }
 
 export interface UserMeta {

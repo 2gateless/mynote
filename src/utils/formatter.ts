@@ -24,8 +24,14 @@ async function loadKatex() {
   katexModule = mod.default || mod;
 }
 
+// HTML 텍스트·속성값 모두에 안전하도록 따옴표까지 이스케이프
 export function escHtml(s: string) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s ?? '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 export function linkify(text: string) {
@@ -195,18 +201,22 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     return buildVideoEmbed(videoEmbeds[parseInt(i)], parseInt(i));
   });
 
-  // ⑦ [[메모 제목]] 복원
+  // ⑦ [[메모 제목]] 복원 (제목→메모 Map으로 O(1) 조회, 클릭은 detail-content 이벤트 위임에서 처리)
+  const titleMap: Map<string, any> | undefined = appState.notesByTitle;
   parsedBody = parsedBody.replace(/NOTELINK_(\d+)_END/g, (_: string, i: string) => {
-    const title = noteLinkRefs[parseInt(i)];
-    const found = appState.allNotesCache.find((n: any) => n.title === title.trim());
+    const title = noteLinkRefs[parseInt(i)].trim();
+    const safeTitle = escHtml(title);
+    const found = titleMap
+      ? titleMap.get(title)
+      : appState.allNotesCache.find((n: any) => n.title === title);
     if (found) {
       const cat = CATEGORIES[found.category];
       const icon = cat ? cat.icon : '📝';
-      return `<span class="note-link" data-note-id="${found.id}" data-note-title="${escHtml(title.trim())}" onclick="appState.handleNoteLinkClick(this)" title="메모로 이동: ${escHtml(title.trim())}">`
-        + `<span class="note-link-icon">${icon}</span>${escHtml(title.trim())}</span>`;
+      return `<span class="note-link" data-note-id="${escHtml(found.id)}" data-note-title="${safeTitle}" title="메모로 이동: ${safeTitle}">`
+        + `<span class="note-link-icon">${icon}</span>${safeTitle}</span>`;
     } else {
-      return `<span class="note-link broken" title="연결된 메모 없음: ${escHtml(title.trim())}">`
-        + `<span class="note-link-icon">📝</span>${escHtml(title.trim())} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
+      return `<span class="note-link broken" title="연결된 메모 없음: ${safeTitle}">`
+        + `<span class="note-link-icon">📝</span>${safeTitle} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
     }
   });
 
