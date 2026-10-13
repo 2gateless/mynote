@@ -2,8 +2,8 @@ import { ref, uploadString, getDownloadURL, deleteObject } from 'firebase/storag
 import { storage } from '../services/firebase';
 import { appState } from '../state';
 
-// 이미지 압축 및 dataUrl 생성
-export async function compressImage(file: File, maxW = 800, maxH = 800, quality = 0.6): Promise<string> {
+// 이미지 압축 및 dataUrl 생성 (문서/텍스트 가독성을 위해 고해상도 2560px, 품질 0.88 기본 적용)
+export async function compressImage(file: File, maxW = 2560, maxH = 2560, quality = 0.88): Promise<string> {
   const dataUrl = await new Promise<string>((res, rej) => {
     const reader = new FileReader();
     reader.onload = ev => res(ev.target?.result as string);
@@ -28,9 +28,15 @@ export async function compressImage(file: File, maxW = 800, maxH = 800, quality 
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
-  canvas.getContext('2d')?.drawImage(img, 0, 0, w, h);
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, w, h);
+  }
   
-  return canvas.toDataURL('image/jpeg', quality);
+  const isPng = file.type === 'image/png';
+  return canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', isPng ? undefined : quality);
 }
 
 // Storage에 업로드
