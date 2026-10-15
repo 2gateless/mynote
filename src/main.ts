@@ -78,6 +78,7 @@ function clearAuthCache() {
   try {
     localStorage.removeItem('mynote_user_cache');
     localStorage.removeItem('mynote_counts_cache');
+    localStorage.removeItem('mynote_search_cache');
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
 }
@@ -146,7 +147,7 @@ function renderUserBar(user: any) {
   }
 }
 
-// ── 로컬 스토리지 조기 캐시 복원 (낙관적 UI)
+// ── 로컬 스토리지 조기 캐시 복원 (낙관적 UI 및 즉시 검색 지원)
 function applyEarlyCache() {
   try {
     const rawUser = localStorage.getItem('mynote_user_cache');
@@ -159,6 +160,16 @@ function applyEarlyCache() {
       lastCounts = JSON.parse(rawCounts);
       applyCounts(lastCounts);
     }
+    // 앱 시작 즉시 이전 검색 인덱스 복원 -> 첫 화면에서 0.01초 만에 바로 검색 가능
+    const rawSearch = localStorage.getItem('mynote_search_cache');
+    if (rawSearch) {
+      const cachedNotes = JSON.parse(rawSearch);
+      if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
+        updateNotesCache(cachedNotes, false);
+        const totalCnt = $('cnt-total-notes');
+        if (totalCnt) totalCnt.textContent = String(cachedNotes.length);
+      }
+    }
   } catch (e) {
     console.warn('초기 캐시 복원 실패:', e);
   }
@@ -170,16 +181,23 @@ applyEarlyCache();
 // ─────────────────────────────────────────────
 // 전체 메모 인덱스 캐시 (검색·메모 링크용)
 // ─────────────────────────────────────────────
-let isAllNotesSubscribed = false;
+let pendingAllNotesSubscription = false;
+let hasNotesLoaded = false;
 
 function ensureAllNotesCache() {
-  if (isAllNotesSubscribed) return;
-  isAllNotesSubscribed = true;
+  if (notesUnsubscribe) return; // 이미 구독 중이면 중복 방지
+  if (!appState.currentUser) {
+    // Auth 인증 완료 전이면 플래그만 세워두고 인증 완료 시 즉시 구독
+    pendingAllNotesSubscription = true;
+    return;
+  }
+  pendingAllNotesSubscription = false;
   subscribeAllNotesCache();
 }
 
 // 캐시 갱신 시 검색용 텍스트/제목 Map을 한 번만 계산해 둔다
-function updateNotesCache(notes: NoteIndexItem[]) {
+function updateNotesCache(notes: NoteIndexItem[], persist = true) {
+  hasNotesLoaded = true;
   appState.allNotesCache = notes;
   appState.searchIndex = notes.map(n => ({
     note: n,
@@ -191,12 +209,25 @@ function updateNotesCache(notes: NoteIndexItem[]) {
   }
   appState.notesByTitle = map;
   appState.sortedNotesByTitle = null; // 메모 링크 모달을 열 때 지연 계산
+
+  if (persist) {
+    try {
+      localStorage.setItem('mynote_search_cache', JSON.stringify(notes));
+    } catch (e) {
+      console.warn('검색 캐시 로컬 저장 실패:', e);
+    }
+  }
+
+  // 사용자가 이미 검색어를 입력해 둔 상태라면 최신 인덱스로 자동 재검색
+  if (searchInput && searchInput.value.trim() && searchWrap && searchWrap.style.display !== 'none') {
+    doSearch(searchInput.value.trim());
+  }
 }
 
 function subscribeAllNotesCache() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
   notesUnsubscribe = subscribeAllNotes((notes) => {
-    updateNotesCache(notes);
+    updateNotesCache(notes, true);
     const totalCnt = $('cnt-total-notes');
     if (totalCnt) totalCnt.textContent = String(notes.length);
   });
@@ -206,7 +237,7 @@ function stopAllSubscriptions() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
   if (metaUnsubscribe) { metaUnsubscribe(); metaUnsubscribe = null; }
   stopListSubscription();
-  isAllNotesSubscribed = false;
+  pendingAllNotesSubscription = false;
 }
 
 // ─────────────────────────────────────────────
@@ -225,11 +256,13 @@ initAuthListener(
     renderUserBar(user);
     showRootScreen('app');
     loadAllCounts();
-    // 첫 부팅 시에는 카운트만 즉시 표시하고, 전체 인덱스는 화면 표시 후 유휴 시간(idle)에 백그라운드 프리페치
-    if ('requestIdleCallback' in window) {
-      (window as any).requestIdleCallback(() => ensureAllNotesCache(), { timeout: 2000 });
+
+    // 사용자가 이미 검색창을 열었거나 인덱스 요청이 대기 중이면 즉시 구독,
+    // 그렇지 않더라도 초기 렌더링을 방해하지 않는 짧은 지연(300ms) 후 최신 인덱스 동기화 시작
+    if (pendingAllNotesSubscription || (searchWrap && searchWrap.style.display !== 'none')) {
+      ensureAllNotesCache();
     } else {
-      setTimeout(ensureAllNotesCache, 1000);
+      setTimeout(ensureAllNotesCache, 300);
     }
   },
   (email) => {
@@ -596,7 +629,8 @@ if (searchInput) {
       setHomeListVisible(true);
       return;
     }
-    searchTimeout = setTimeout(() => doSearch(v), 350);
+    ensureAllNotesCache();
+    searchTimeout = setTimeout(() => doSearch(v), 250);
   });
 }
 
@@ -609,8 +643,17 @@ function doSearch(keyword: string) {
   searchResults.style.display = 'block';
   try {
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
+    const searchIdx = (appState.searchIndex as { note: NoteIndexItem; text: string }[]) || [];
+
+    // 아직 인덱스 로딩 전이고 로컬 캐시도 없는 극초기 상태인 경우
+    if (searchIdx.length === 0 && !hasNotesLoaded) {
+      searchResults.innerHTML = `<div class="search-no-result" style="color:var(--text-light);font-size:14px;padding:24px 0">🔍 메모 색인을 불러오는 중입니다...</div>`;
+      ensureAllNotesCache();
+      return;
+    }
+
     // 미리 소문자화해 둔 검색 텍스트 사용 (매 검색마다 toLowerCase 반복 제거)
-    const results = (appState.searchIndex as { note: NoteIndexItem; text: string }[])
+    const results = searchIdx
       .filter(entry => keywords.every(kw => entry.text.includes(kw)))
       .map(entry => entry.note);
 
