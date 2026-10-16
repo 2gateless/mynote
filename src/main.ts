@@ -20,6 +20,7 @@ import {
 import { 
   escHtml, 
   fmtDate, 
+  toMillis,
   parseMarkdownBody 
 } from './utils/formatter';
 import { 
@@ -54,6 +55,9 @@ let searchTimeout: any = null;
 let detailFrom = 'list'; // 'list' or 'search'
 let detailRenderToken = 0;
 
+// 모달에서 새로 업로드한 인라인 이미지 경로 추적 (취소/수정 시 미사용 파일 정리용)
+let sessionUploadedInlineImages: { url: string; path: string }[] = [];
+
 // 목록 화면 캐시 (같은 카테고리에서 태그만 바꿀 때 재구독하지 않기 위함)
 let listCatId: string | null = null;
 let listNotesCache: NoteIndexItem[] = [];
@@ -81,14 +85,6 @@ function clearAuthCache() {
     localStorage.removeItem('mynote_search_cache');
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
-}
-
-function toMillis(ts: any): number {
-  if (!ts) return 0;
-  if (typeof ts.toMillis === 'function') return ts.toMillis();
-  if (ts instanceof Date) return ts.getTime();
-  if (typeof ts.seconds === 'number') return ts.seconds * 1000;
-  return 0;
 }
 
 // 카테고리별/전체 카운트 표시
@@ -384,26 +380,6 @@ if (btnToggleSearch && searchWrap) {
       // 닫을 때 검색 초기화
       resetSearchUI();
     }
-  };
-}
-
-const btnMoreOptions = $('btn-more-options');
-if (btnMoreOptions) {
-  btnMoreOptions.onclick = () => showToast('Folders 설정 메뉴 (준비 중입니다) ⚙️');
-}
-
-const btnAddFolder = $('btn-add-folder');
-if (btnAddFolder) {
-  btnAddFolder.onclick = () => showToast('새 폴더 추가 기능 (준비 중입니다) 📂');
-}
-
-const btnAddNoteHome = $('btn-add-note-home');
-if (btnAddNoteHome) {
-  btnAddNoteHome.onclick = () => {
-    // 현재 선택된 카테고리가 없으므로 기본 'memory'를 타겟으로 모달 띄우기
-    appState.currentCat = 'memory';
-    appState.currentTag = null;
-    openAddModal();
   };
 }
 
@@ -741,7 +717,7 @@ const btnAddNote = $('btn-add-note');
 if (btnAddNote) btnAddNote.onclick = openAddModal;
 
 const btnCancel = $('btn-cancel');
-if (btnCancel) btnCancel.onclick = closeModal;
+if (btnCancel) btnCancel.onclick = () => closeModal(false);
 
 const btnSave = $('btn-save');
 if (btnSave) btnSave.onclick = saveNote;
@@ -864,18 +840,17 @@ function fillNoteForm(title: string, body: string, keywords: string, modalTitleT
   const bodyEl = $('note-body') as HTMLTextAreaElement;
   const keywordsEl = $('note-keywords') as HTMLInputElement;
   const modalTitle = $('modal-title');
-  const previewList = $('img-preview-list');
   if (titleEl) titleEl.value = title;
   if (bodyEl) bodyEl.value = body;
   if (keywordsEl) keywordsEl.value = keywords;
   if (modalTitle) modalTitle.textContent = modalTitleText;
-  if (previewList) previewList.innerHTML = '';
 }
 
 function openAddModal() {
   appState.editingNoteId = null; 
   appState.pendingImages = []; 
   appState.existingImages = [];
+  sessionUploadedInlineImages = [];
   fillNoteForm('', '', '', `새 메모 — ${CATEGORIES[appState.currentCat]?.name || ''}`);
   renderTagOptions(appState.currentCat, appState.currentTag || null);
   setPinToggleUI(false);
@@ -886,15 +861,22 @@ function openEditModal(note: any) {
   appState.editingNoteId = note.id; 
   appState.pendingImages = [];
   appState.existingImages = (note.images || []).map((i: any) => ({...i}));
+  sessionUploadedInlineImages = [];
   fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
   setDisplay('note-modal', 'flex');
 }
 
-function closeModal() {
+function closeModal(saved = false) {
   setDisplay('note-modal', 'none');
   stopRecording();
+  // 저장하지 않고 닫은(취소) 경우 이번 세션에서 업로드한 인라인 이미지를 Storage에서 삭제
+  if (!saved && sessionUploadedInlineImages.length > 0) {
+    const pathsToDelete = sessionUploadedInlineImages.map(i => i.path || i.url);
+    sessionUploadedInlineImages = [];
+    deleteImagesFromStorage(pathsToDelete).catch(console.error);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -905,7 +887,8 @@ const noteBodyEl = $('note-body') as HTMLTextAreaElement;
 // 이미지 압축(Blob) → Storage 업로드 → 본문 커서 위치에 마크다운 삽입
 async function uploadAndInsertImage(file: File, prefix: string) {
   const blob = await compressImage(file, 2560, 2560, 0.88);
-  const { url } = await uploadImageToStorage(blob, imageFileName(prefix, blob));
+  const { url, path } = await uploadImageToStorage(blob, imageFileName(prefix, blob));
+  sessionUploadedInlineImages.push({ url, path });
   if (noteBodyEl) insertAtCursor(noteBodyEl, `\n![이미지](${url})\n`);
 }
 
@@ -1010,16 +993,24 @@ async function saveNote() {
       ? (prevPinned && appState.currentNote?.pinnedAt ? appState.currentNote.pinnedAt : Timestamp.now())
       : null;
     
+    // 이번 세션에서 업로드했지만 저장 시점의 본문에는 남아있지 않은 인라인 이미지 추출
+    const unusedSessionInlinePaths = sessionUploadedInlineImages
+      .filter(img => !body.includes(img.url))
+      .map(img => img.path || img.url);
+
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
       const updateData = { title, body, tag, images: allImages, pinned, pinnedAt, keywords };
       // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
-      // 수정 과정에서 빠진 첨부 이미지를 Storage에서 병렬 삭제 (UI는 기다리지 않음)
-      const removed = (oldNote.images || [])
-        .filter((old: any) => !allImages.some((cur: any) => cur.url === old.url))
-        .map((img: any) => img.path || img.url);
+      // 기존 메모(첨부 + 본문 인라인)에 있었지만 수정 후 사라진 이미지 + 미사용 세션 이미지를 병렬 삭제
+      const oldPaths = collectImagePaths(oldNote);
+      const newPathsSet = new Set(collectImagePaths({ images: allImages, body }));
+      const removed = [
+        ...oldPaths.filter(p => !newPathsSet.has(p)),
+        ...unusedSessionInlinePaths
+      ];
       if (removed.length) deleteImagesFromStorage(removed).catch(console.error);
 
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
@@ -1031,9 +1022,13 @@ async function saveNote() {
         tag, title, body, images: allImages,
         pinned, pinnedAt, keywords
       });
+      if (unusedSessionInlinePaths.length) {
+        deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
+      }
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
-    closeModal();
+    sessionUploadedInlineImages = [];
+    closeModal(true);
   } catch(e: any) { 
     showToast('저장 실패: ' + e.message); 
   } finally { 
@@ -1202,6 +1197,16 @@ initImageViewer();
 // PWA HISTORY & BACK BUTTON
 // ─────────────────────────────────────────────
 initPwaNavigation((screen) => {
+  if (screen === 'img-viewer') {
+    appState.closeImageViewer?.();
+    history.pushState(null, '', location.href);
+    return;
+  }
+  if (screen === 'note-link-modal') {
+    closeNoteLinkModal();
+    history.pushState(null, '', location.href);
+    return;
+  }
   if (screen === 'modal') { 
     closeModal(); 
     history.pushState(null, '', location.href); 
@@ -1212,7 +1217,17 @@ initPwaNavigation((screen) => {
     history.pushState(null, '', location.href); 
     return; 
   }
-  if (screen === 'detail' || screen === 'list') {
+  if (screen === 'detail') {
+    if (detailFrom === 'search') {
+      resetSearchUI();
+      showAppScreen('home');
+    } else {
+      goBackToList();
+    }
+    history.pushState(null, '', location.href);
+    return;
+  }
+  if (screen === 'list') {
     stopListSubscription();
     resetSearchUI();
     showAppScreen('home');

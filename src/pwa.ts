@@ -2,9 +2,15 @@ import { appState } from './state';
 import { stopAllVideos } from './utils/formatter';
 
 export function currentScreen(): string {
-  if (document.getElementById('note-modal')?.style.display !== 'none') return 'modal';
-  if (document.getElementById('del-modal')?.style.display !== 'none') return 'del-modal';
-  if (document.getElementById('share-modal')?.style.display !== 'none') return 'share-modal';
+  const isShown = (id: string) => {
+    const el = document.getElementById(id);
+    return !!el && el.style.display !== 'none';
+  };
+  if (isShown('img-viewer')) return 'img-viewer';
+  if (isShown('note-link-modal')) return 'note-link-modal';
+  if (isShown('note-modal')) return 'modal';
+  if (isShown('del-modal')) return 'del-modal';
+  if (isShown('share-modal')) return 'share-modal';
   const active = document.querySelector('.screen.active');
   return active ? active.id.replace('screen-', '') : 'home';
 }

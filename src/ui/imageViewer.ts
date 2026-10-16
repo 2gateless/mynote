@@ -107,6 +107,8 @@ export function initImageViewer() {
     resetViewerZoom(false);
   }
 
+  appState.closeImageViewer = closeImageViewer;
+
   appState.openImageViewer = function(url: string, initialScale = 1) {
     if (!viewer || !viewerImg) return;
     viewerImg.src = url;

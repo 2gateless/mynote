@@ -19,6 +19,7 @@ export const appState: any = {
   handleNoteLinkClick: null,
   openList: null,
   openImageViewer: null,
+  closeImageViewer: null,
 };
 
 // 디버깅 편의를 위해 window 객체에 상태 객체를 연결합니다. (인라인 onclick은 더 이상 사용하지 않음)

@@ -45,9 +45,20 @@ export function linkify(text: string) {
   }).join('');
 }
 
+export function toMillis(ts: any): number {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === 'function') return ts.toMillis();
+  if (ts instanceof Date) return ts.getTime();
+  if (typeof ts.seconds === 'number') return ts.seconds * 1000;
+  if (typeof ts._seconds === 'number') return ts._seconds * 1000;
+  if (typeof ts === 'number') return ts;
+  return 0;
+}
+
 export function fmtDate(ts: any) {
-  if (!ts?.toDate) return '';
-  return ts.toDate().toLocaleDateString('ko-KR', {year:'numeric',month:'long',day:'numeric'});
+  const ms = toMillis(ts);
+  if (!ms) return '';
+  return new Date(ms).toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
 export function stopAllVideos() {
