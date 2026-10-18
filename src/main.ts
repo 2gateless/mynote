@@ -846,11 +846,33 @@ function fillNoteForm(title: string, body: string, keywords: string, modalTitleT
   if (modalTitle) modalTitle.textContent = modalTitleText;
 }
 
+// 모달 세션 토큰 (모달을 닫거나 새로 열 때 이전 업로드 작업 무효화용)
+let modalSessionToken = 0;
+
+const inlineImgBtn = $('inline-img-btn') as HTMLButtonElement;
+const inlineImgInput = $('inline-img-input') as HTMLInputElement;
+
+function resetInlineImgBtn() {
+  if (!inlineImgBtn) return;
+  inlineImgBtn.textContent = '🖼️ 이미지 삽입';
+  inlineImgBtn.classList.remove('uploading');
+  inlineImgBtn.disabled = false;
+}
+
+function setInlineImgBtnUploading() {
+  if (!inlineImgBtn) return;
+  inlineImgBtn.textContent = '⏳ 업로드 중...';
+  inlineImgBtn.classList.add('uploading');
+  inlineImgBtn.disabled = true;
+}
+
 function openAddModal() {
+  modalSessionToken++;
   appState.editingNoteId = null; 
   appState.pendingImages = []; 
   appState.existingImages = [];
   sessionUploadedInlineImages = [];
+  resetInlineImgBtn();
   fillNoteForm('', '', '', `새 메모 — ${CATEGORIES[appState.currentCat]?.name || ''}`);
   renderTagOptions(appState.currentCat, appState.currentTag || null);
   setPinToggleUI(false);
@@ -858,10 +880,12 @@ function openAddModal() {
 }
 
 function openEditModal(note: any) {
+  modalSessionToken++;
   appState.editingNoteId = note.id; 
   appState.pendingImages = [];
   appState.existingImages = (note.images || []).map((i: any) => ({...i}));
   sessionUploadedInlineImages = [];
+  resetInlineImgBtn();
   fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
@@ -869,8 +893,10 @@ function openEditModal(note: any) {
 }
 
 function closeModal(saved = false) {
+  modalSessionToken++;
   setDisplay('note-modal', 'none');
   stopRecording();
+  resetInlineImgBtn();
   // 저장하지 않고 닫은(취소) 경우 이번 세션에서 업로드한 인라인 이미지를 Storage에서 삭제
   if (!saved && sessionUploadedInlineImages.length > 0) {
     const pathsToDelete = sessionUploadedInlineImages.map(i => i.path || i.url);
@@ -885,15 +911,18 @@ function closeModal(saved = false) {
 const noteBodyEl = $('note-body') as HTMLTextAreaElement;
 
 // 이미지 압축(Blob) → Storage 업로드 → 본문 커서 위치에 마크다운 삽입
-async function uploadAndInsertImage(file: File, prefix: string) {
+async function uploadAndInsertImage(file: File, prefix: string, token: number): Promise<boolean> {
   const blob = await compressImage(file, 2560, 2560, 0.88);
   const { url, path } = await uploadImageToStorage(blob, imageFileName(prefix, blob));
+  // 업로드 도중 모달이 닫혔거나 다른 메모 모달이 열렸다면 방금 올린 파일을 정리하고 중단
+  if (token !== modalSessionToken) {
+    deleteImagesFromStorage([path || url]).catch(console.error);
+    return false;
+  }
   sessionUploadedInlineImages.push({ url, path });
   if (noteBodyEl) insertAtCursor(noteBodyEl, `\n![이미지](${url})\n`);
+  return true;
 }
-
-const inlineImgBtn = $('inline-img-btn') as HTMLButtonElement;
-const inlineImgInput = $('inline-img-input') as HTMLInputElement;
 
 if (inlineImgBtn) {
   inlineImgBtn.onclick = () => inlineImgInput?.click();
@@ -904,21 +933,22 @@ if (inlineImgInput) {
     const files = (e.target as HTMLInputElement).files;
     if (!files || files.length === 0) return;
     const file = files[0];
-    inlineImgInput.value = '';
-    
-    const originalLabel = inlineImgBtn.textContent;
-    inlineImgBtn.textContent = '⏳ 업로드 중...';
-    inlineImgBtn.classList.add('uploading');
-    inlineImgBtn.disabled = true;
+    const token = modalSessionToken;
+
+    setInlineImgBtnUploading();
     try {
-      await uploadAndInsertImage(file, 'inline');
-      showToast('이미지가 본문에 삽입되었어요 🖼️');
+      const inserted = await uploadAndInsertImage(file, 'inline', token);
+      if (inserted) showToast('이미지가 본문에 삽입되었어요 🖼️');
     } catch(e: any) {
-      showToast('업로드 실패: ' + e.message);
+      if (token === modalSessionToken) {
+        showToast('업로드 실패: ' + (e?.message || '알 수 없는 오류'));
+      }
     } finally {
-      inlineImgBtn.textContent = originalLabel || '🖼️ 이미지 삽입';
-      inlineImgBtn.classList.remove('uploading');
-      inlineImgBtn.disabled = false;
+      // 파일 읽기 완료 후 input 초기화 (먼저 비우면 모바일 웹뷰에서 파일 핸들이 무효화될 수 있음)
+      inlineImgInput.value = '';
+      if (token === modalSessionToken) {
+        resetInlineImgBtn();
+      }
     }
   };
 }
@@ -934,12 +964,20 @@ if (noteBodyEl) {
       const file = item.getAsFile();
       if (!file) continue;
       e.preventDefault();
+      const token = modalSessionToken;
+      setInlineImgBtnUploading();
       showToast('붙여넣은 이미지 업로드 중... ⏳');
       try {
-        await uploadAndInsertImage(file, 'pasted');
-        showToast('이미지가 본문에 붙여넣어졌어요 🖼️');
+        const inserted = await uploadAndInsertImage(file, 'pasted', token);
+        if (inserted) showToast('이미지가 본문에 붙여넣어졌어요 🖼️');
       } catch(err: any) {
-        showToast('이미지 붙여넣기 실패: ' + err.message);
+        if (token === modalSessionToken) {
+          showToast('이미지 붙여넣기 실패: ' + (err?.message || '알 수 없는 오류'));
+        }
+      } finally {
+        if (token === modalSessionToken) {
+          resetInlineImgBtn();
+        }
       }
       break;
     }

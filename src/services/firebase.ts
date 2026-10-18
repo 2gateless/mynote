@@ -24,4 +24,7 @@ export const db = initializeFirestore(app, {
   })
 });
 export const storage = getStorage(app);
+// 기본 재시도 제한 시간(2분)으로 인해 업로드 실패 시 UI가 멈추는 현상을 막기 위해 15초로 단축
+storage.maxUploadRetryTime = 15000;
+storage.maxOperationRetryTime = 15000;
 
