@@ -14,7 +14,10 @@
 <meta name="screen-orientation" content="portrait">
 <meta name="x5-orientation" content="portrait">
 <meta name="browsermode" content="application">
-  <link rel="stylesheet" href="/src/style.css">
+  <style>
+    /* 외부 CSS 다운로드 전에도 캐시가 있으면 로딩 화면이 단 1프레임도 뜨지 않도록 인라인 적용 */
+    html.has-cached-auth #loading-screen { display: none !important; }
+  </style>
   <script>
     (function() {
       try {
@@ -24,10 +27,17 @@
       } catch (e) {}
     })();
   </script>
+  <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
 <!-- Loading -->
 <div id="loading-screen">
+  <script>
+    /* DOM 파싱 즉시 캐시 존재 여부를 확인하여 로딩 화면 블로킹 원천 차단 */
+    if (localStorage.getItem('mynote_user_cache')) {
+      document.getElementById('loading-screen').style.display = 'none';
+    }
+  </script>
   <div style="font-size:52px;margin-bottom:16px">📝</div>
   <div class="spinner"></div>
   <p style="color:var(--text-light);font-size:14px">MyNote 불러오는 중...</p>

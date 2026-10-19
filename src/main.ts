@@ -143,7 +143,35 @@ function renderUserBar(user: any) {
   }
 }
 
-// ── 로컬 스토리지 조기 캐시 복원 (낙관적 UI 및 즉시 검색 지원)
+// ─────────────────────────────────────────────
+// 로컬 스토리지 조기 캐시 복원 & 지능형 검색 인덱스 준비
+// ─────────────────────────────────────────────
+let isSearchIndexReady = false;
+
+// 로컬 스토리지의 검색 캐시를 복원하는 함수 (필요 시 즉시 동기 실행 가능)
+function ensureSearchIndexReady(): boolean {
+  if (isSearchIndexReady) return true;
+  try {
+    const rawSearch = localStorage.getItem('mynote_search_cache');
+    if (rawSearch) {
+      const cachedNotes = JSON.parse(rawSearch);
+      if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
+        updateNotesCache(cachedNotes, false);
+        isSearchIndexReady = true;
+        const totalCnt = $('cnt-total-notes');
+        if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
+          totalCnt.textContent = String(cachedNotes.length);
+        }
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('검색 캐시 복원 실패:', e);
+  }
+  return false;
+}
+
+// 1단계: 첫 화면(홈 화면)을 0.001초 만에 즉시 띄우기 위해 유저 프로필과 카운트만 동기 복원
 function applyEarlyCache() {
   try {
     const rawUser = localStorage.getItem('mynote_user_cache');
@@ -156,22 +184,28 @@ function applyEarlyCache() {
       lastCounts = JSON.parse(rawCounts);
       applyCounts(lastCounts);
     }
-    // 앱 시작 즉시 이전 검색 인덱스 복원 -> 첫 화면에서 0.01초 만에 바로 검색 가능
-    const rawSearch = localStorage.getItem('mynote_search_cache');
-    if (rawSearch) {
-      const cachedNotes = JSON.parse(rawSearch);
-      if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
-        updateNotesCache(cachedNotes, false);
-        const totalCnt = $('cnt-total-notes');
-        if (totalCnt) totalCnt.textContent = String(cachedNotes.length);
+
+    // 2단계: 무거운 전체 검색 캐시 파싱 및 소문자 맵 구축은
+    // 첫 프레임 페인팅을 막지 않도록 브라우저가 화면을 그린 직후 백그라운드에서 실행
+    const scheduleWarmup = () => {
+      if ('requestIdleCallback' in window) {
+        (window as any).requestIdleCallback(() => ensureSearchIndexReady(), { timeout: 1500 });
+      } else {
+        setTimeout(ensureSearchIndexReady, 50);
       }
+    };
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => scheduleWarmup());
+    } else {
+      setTimeout(scheduleWarmup, 0);
     }
   } catch (e) {
     console.warn('초기 캐시 복원 실패:', e);
   }
 }
 
-// 스크립트 실행 즉시 캐시 적용
+// 스크립트 실행 즉시 1단계 캐시 적용 -> 첫 화면 0.001초 초고속 노출
 applyEarlyCache();
 
 // ─────────────────────────────────────────────
@@ -194,6 +228,7 @@ function ensureAllNotesCache() {
 // 캐시 갱신 시 검색용 텍스트/제목 Map을 한 번만 계산해 둔다
 function updateNotesCache(notes: NoteIndexItem[], persist = true) {
   hasNotesLoaded = true;
+  isSearchIndexReady = true;
   appState.allNotesCache = notes;
   appState.searchIndex = notes.map(n => ({
     note: n,
@@ -253,12 +288,13 @@ initAuthListener(
     showRootScreen('app');
     loadAllCounts();
 
-    // 사용자가 이미 검색창을 열었거나 인덱스 요청이 대기 중이면 즉시 구독,
-    // 그렇지 않더라도 초기 렌더링을 방해하지 않는 짧은 지연(300ms) 후 최신 인덱스 동기화 시작
+    // 사용자가 이미 검색창을 열었거나 인덱스 요청이 대기 중이면 즉시 동기화,
+    // 그렇지 않다면 첫 화면 부팅 속도와 반응성을 최우선으로 보장하기 위해
+    // 첫 렌더링이 완전히 안정화된 후(1.2초) 백그라운드에서 부드럽게 동기화
     if (pendingAllNotesSubscription || (searchWrap && searchWrap.style.display !== 'none')) {
       ensureAllNotesCache();
     } else {
-      setTimeout(ensureAllNotesCache, 300);
+      setTimeout(ensureAllNotesCache, 1200);
     }
   },
   (email) => {
@@ -274,13 +310,22 @@ initAuthListener(
   }
 );
 
-// 로딩 타임아웃 (캐시가 없을 때만 5초 후 로그인 화면 유도)
+// 로딩 안전 타임아웃
+// 1) 캐시가 있는 기존 사용자의 경우: 만에 하나 로딩 화면이 남아있다면 1초 후 강제 해제하고 홈 화면 표시
+setTimeout(() => {
+  const ls = $('loading-screen');
+  if (ls && ls.style.display !== 'none' && localStorage.getItem('mynote_user_cache')) {
+    showRootScreen('app');
+  }
+}, 1000);
+
+// 2) 캐시가 없는 신규/로그아웃 사용자의 경우: 4초 후 로그인 화면 유도
 setTimeout(() => {
   const ls = $('loading-screen');
   if (ls && ls.style.display !== 'none' && !localStorage.getItem('mynote_user_cache')) {
     showRootScreen('auth-screen');
   }
-}, 5000);
+}, 4000);
 
 const btnLogin = $('btn-google-login');
 if (btnLogin) {
@@ -371,6 +416,7 @@ const btnToggleSearch = $('btn-toggle-search');
 const searchWrap = $('search-wrap');
 if (btnToggleSearch && searchWrap) {
   btnToggleSearch.onclick = () => {
+    ensureSearchIndexReady(); // 검색창을 여는 즉시 캐시 인덱스 준비 (0ms 즉시 검색)
     ensureAllNotesCache();
     const isHidden = searchWrap.style.display === 'none';
     searchWrap.style.display = isHidden ? 'block' : 'none';
@@ -605,8 +651,9 @@ if (searchInput) {
       setHomeListVisible(true);
       return;
     }
+    ensureSearchIndexReady();
     ensureAllNotesCache();
-    searchTimeout = setTimeout(() => doSearch(v), 250);
+    searchTimeout = setTimeout(() => doSearch(v), 200);
   });
 }
 
@@ -617,6 +664,7 @@ if (searchClear) {
 function doSearch(keyword: string) {
   setHomeListVisible(false);
   searchResults.style.display = 'block';
+  ensureSearchIndexReady();
   try {
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
     const searchIdx = (appState.searchIndex as { note: NoteIndexItem; text: string }[]) || [];
