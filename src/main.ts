@@ -42,7 +42,8 @@ import { initImageViewer } from './ui/imageViewer';
 import { 
   showAppScreen, 
   showRootScreen, 
-  initPwaNavigation 
+  initPwaNavigation,
+  currentScreen 
 } from './pwa';
 import { NoteIndexItem } from './types';
 
@@ -61,6 +62,8 @@ let sessionUploadedInlineImages: { url: string; path: string }[] = [];
 // 목록 화면 캐시 (같은 카테고리에서 태그만 바꿀 때 재구독하지 않기 위함)
 let listCatId: string | null = null;
 let listNotesCache: NoteIndexItem[] = [];
+let pendingListCat: string | null = null; // 인증 완료 전 목록 요청 대기용
+let listLoadTimer: any = null; // 목록 로딩 타임아웃 타이머
 // 구버전 인덱스 자동 보정을 세션당 카테고리별 1회만 수행
 const rebuiltCats = new Set<string>();
 // 최근 카테고리 카운트 (인덱스 누락 감지용)
@@ -288,6 +291,13 @@ initAuthListener(
     showRootScreen('app');
     loadAllCounts();
 
+    // 사용자가 인증 완료 전에 이미 카테고리 목록을 열었거나 대기 중인 경우 즉시 실시간 동기화 시작
+    const targetCat = pendingListCat || (currentScreen() === 'list' ? appState.currentCat : null);
+    if (targetCat) {
+      pendingListCat = null;
+      loadList(targetCat, true);
+    }
+
     // 사용자가 이미 검색창을 열었거나 인덱스 요청이 대기 중이면 즉시 동기화,
     // 그렇지 않다면 첫 화면 부팅 속도와 반응성을 최우선으로 보장하기 위해
     // 첫 렌더링이 완전히 안정화된 후(1.2초) 백그라운드에서 부드럽게 동기화
@@ -473,24 +483,85 @@ if (listTagFilter) {
 }
 
 function stopListSubscription() {
+  if (listLoadTimer) { clearTimeout(listLoadTimer); listLoadTimer = null; }
   if (listUnsubscribe) { listUnsubscribe(); listUnsubscribe = null; }
   listCatId = null;
   listNotesCache = [];
 }
 
-function loadList(catId: string) {
-  // 같은 카테고리를 이미 구독 중이면 재구독 없이 캐시만 다시 필터링
-  if (listUnsubscribe && listCatId === catId) {
+function loadList(catId: string, force = false) {
+  // 같은 카테고리를 이미 정상 구독 중이고 강제 갱신이 아니면 캐시만 필터링 렌더링
+  if (!force && listUnsubscribe && listCatId === catId) {
     renderList();
     return;
   }
   stopListSubscription();
   listCatId = catId;
+
+  // 1단계: 로컬 캐시에서 해당 카테고리 메모가 있는지 즉시 확인하여 0ms 렌더링
+  ensureSearchIndexReady();
+  const cachedForCat = (appState.allNotesCache as NoteIndexItem[] || []).filter(n => n.category === catId);
   const content = $('list-content');
-  if (content) {
-    content.innerHTML = `<div style="color:var(--text-light);font-size:14px;padding:8px">불러오는 중...</div>`;
+
+  if (cachedForCat.length > 0) {
+    // 캐시가 있으면 즉시 목록을 보여주어 "불러오는 중..." 지연을 완전히 제거
+    listNotesCache = cachedForCat;
+    renderList();
+  } else if ((lastCounts[catId] || 0) === 0) {
+    // 등록된 메모가 0개임이 확실한 경우 빈 화면 즉시 표시
+    listNotesCache = [];
+    renderList();
+  } else {
+    // 캐시가 전혀 없거나 아직 로드되지 않은 경우에만 로딩 표시
+    if (content) {
+      content.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;gap:8px;color:var(--text-light);font-size:14px;padding:24px 0">
+        <div class="spinner" style="width:18px;height:18px;border-width:2px;margin:0"></div>
+        <span>불러오는 중...</span>
+      </div>`;
+    }
   }
+
+  // 2단계: 인증 정보가 아직 준비되지 않은 경우 대기 상태로 등록
+  if (!appState.currentUser) {
+    pendingListCat = catId;
+    if (listLoadTimer) clearTimeout(listLoadTimer);
+    listLoadTimer = setTimeout(() => {
+      if (listCatId === catId && listNotesCache.length === 0 && content) {
+        content.innerHTML = `
+          <div style="padding:32px 16px;text-align:center">
+            <div style="font-size:28px;margin-bottom:8px">⏳</div>
+            <div style="font-size:14px;color:var(--text-light);margin-bottom:14px;line-height:1.5">
+              로그인 상태를 확인하는 중입니다.<br>잠시만 기다리시거나 다시 시도해주세요.
+            </div>
+            <button id="btn-retry-list" style="padding:9px 18px;border-radius:10px;border:1.5px solid var(--sky-dark);background:white;color:var(--sky-dark);font-weight:600;font-size:13px;cursor:pointer">🔄 다시 불러오기</button>
+          </div>`;
+        const retryBtn = $('btn-retry-list');
+        if (retryBtn) retryBtn.onclick = () => loadList(catId, true);
+      }
+    }, 4000);
+    return;
+  }
+
+  // 3단계: 로딩 타임아웃 안전 타이머 (4.5초)
+  if (listLoadTimer) clearTimeout(listLoadTimer);
+  listLoadTimer = setTimeout(() => {
+    if (listCatId === catId && listNotesCache.length === 0 && content && content.innerHTML.includes('불러오는 중')) {
+      content.innerHTML = `
+        <div style="padding:32px 16px;text-align:center">
+          <div style="font-size:28px;margin-bottom:8px">📡</div>
+          <div style="font-size:14px;color:var(--text-light);margin-bottom:14px;line-height:1.5">
+            메모를 불러오는 데 지연되고 있어요.<br>네트워크 연결을 확인하거나 다시 시도해주세요.
+          </div>
+          <button id="btn-retry-list" style="padding:9px 18px;border-radius:10px;border:1.5px solid var(--sky-dark);background:white;color:var(--sky-dark);font-weight:600;font-size:13px;cursor:pointer">🔄 다시 불러오기</button>
+        </div>`;
+      const retryBtn = $('btn-retry-list');
+      if (retryBtn) retryBtn.onclick = () => loadList(catId, true);
+    }
+  }, 4500);
+
+  // 4단계: 실시간 Firestore 인덱스 구독
   listUnsubscribe = subscribeCategoryIndex(catId, (notes) => {
+    if (listLoadTimer) { clearTimeout(listLoadTimer); listLoadTimer = null; }
     listNotesCache = notes;
     renderList();
 
@@ -503,11 +574,21 @@ function loadList(catId: string) {
       rebuildCategoryIndex(catId).catch(err => console.error('인덱스 보정 오류:', err));
     }
   }, (err) => {
-    if (content) content.innerHTML = `<div style="color:var(--danger);font-size:13px">${escHtml(err.message)}</div>`;
+    if (listLoadTimer) { clearTimeout(listLoadTimer); listLoadTimer = null; }
+    if (content) {
+      content.innerHTML = `
+        <div style="padding:24px 16px;text-align:center">
+          <div style="color:var(--danger);font-size:13px;margin-bottom:12px">${escHtml(err.message)}</div>
+          <button id="btn-retry-list" style="padding:8px 16px;border-radius:8px;border:1px solid var(--sky-dark);background:white;color:var(--sky-dark);font-weight:600;font-size:12px;cursor:pointer">🔄 다시 시도</button>
+        </div>`;
+      const retryBtn = $('btn-retry-list');
+      if (retryBtn) retryBtn.onclick = () => loadList(catId, true);
+    }
   });
 }
 
 function renderList() {
+  if (listLoadTimer) { clearTimeout(listLoadTimer); listLoadTimer = null; }
   const content = $('list-content');
   if (!content) return;
   const notes = appState.currentTag
@@ -1319,5 +1400,25 @@ initPwaNavigation((screen) => {
     showAppScreen('home');
     history.pushState(null, '', location.href);
     return;
+  }
+});
+
+// ─────────────────────────────────────────────
+// 모바일 백그라운드 복귀 & 네트워크 재연결 리스너
+// ─────────────────────────────────────────────
+const handleForegroundResume = () => {
+  if (document.visibilityState === 'visible' && appState.currentUser) {
+    if (currentScreen() === 'list' && appState.currentCat) {
+      if (listNotesCache.length === 0 || !listUnsubscribe) {
+        loadList(appState.currentCat, true);
+      }
+    }
+  }
+};
+document.addEventListener('visibilitychange', handleForegroundResume);
+window.addEventListener('pageshow', handleForegroundResume);
+window.addEventListener('online', () => {
+  if (appState.currentUser && currentScreen() === 'list' && appState.currentCat) {
+    loadList(appState.currentCat, true);
   }
 });

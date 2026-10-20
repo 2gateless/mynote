@@ -396,7 +396,10 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
 // 단일 카테고리 인덱스 구독 (목록 화면용 — 본문 전체 문서를 읽지 않음)
 // 같은 문서를 subscribeAllNotes도 구독 중이면 SDK가 리스너를 공유하므로 추가 읽기 비용이 거의 없다.
 export function subscribeCategoryIndex(catId: string, onChange: (notes: NoteIndexItem[]) => void, onError: (err: Error) => void) {
-  if (!appState.currentUser) return () => {};
+  if (!appState.currentUser) {
+    console.warn(`subscribeCategoryIndex: 사용자 인증 완료 전 호출됨 (catId: ${catId})`);
+    return () => {};
+  }
   return onSnapshot(catIndexRef(appState.currentUser.uid, catId), snap => {
     onChange(snap.exists() ? (snap.data().notes || []) : []);
   }, onError);
