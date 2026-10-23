@@ -371,19 +371,46 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
   const uid = appState.currentUser.uid;
   const categoryKeys = Object.keys(CATEGORIES);
   const perCategory: Record<string, NoteIndexItem[]> = {};
+  const initialLoaded = new Set<string>();
   let updateTimer: any = null;
+
+  // 기존 로컬 캐시가 있다면 카테고리별 초기값으로 채워 두어 일부 샤드만 먼저 도착했을 때 누락 방지
+  for (const cat of categoryKeys) {
+    perCategory[cat] = [];
+  }
+  if (Array.isArray(appState.allNotesCache) && appState.allNotesCache.length > 0) {
+    for (const n of appState.allNotesCache as NoteIndexItem[]) {
+      if (n.category && perCategory[n.category]) {
+        perCategory[n.category].push(n);
+      }
+    }
+  }
 
   const notifyMerged = () => {
     onIndexChange(categoryKeys.flatMap(c => perCategory[c] || []));
   };
 
+  const scheduleNotifyIfReady = () => {
+    // 9개 카테고리의 초기 스냅샷이 모두 도착한 뒤에만 병합 알림 (부분 도착으로 인한 검색 결과 위치 점프 방지)
+    if (initialLoaded.size < categoryKeys.length) return;
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = setTimeout(notifyMerged, 20);
+  };
+
   const unsubs = categoryKeys.map(cat =>
-    onSnapshot(catIndexRef(uid, cat), snap => {
-      perCategory[cat] = snap.exists() ? (snap.data().notes || []) : [];
-      // 9개 카테고리 스냅샷이 연속으로 도착할 때 한 번에 묶어서 병합 처리 (부하 감소)
-      if (updateTimer) clearTimeout(updateTimer);
-      updateTimer = setTimeout(notifyMerged, 20);
-    })
+    onSnapshot(
+      catIndexRef(uid, cat),
+      snap => {
+        perCategory[cat] = snap.exists() ? (snap.data().notes || []) : [];
+        initialLoaded.add(cat);
+        scheduleNotifyIfReady();
+      },
+      err => {
+        console.warn(`카테고리 인덱스 구독 오류 (${cat}):`, err);
+        initialLoaded.add(cat);
+        scheduleNotifyIfReady();
+      }
+    )
   );
 
   // 구독 해제 시 9개 리스너 전부 해제

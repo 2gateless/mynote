@@ -53,6 +53,10 @@ let metaUnsubscribe: (() => void) | null = null;
 let listUnsubscribe: (() => void) | null = null;
 let notesUnsubscribe: (() => void) | null = null;
 let searchTimeout: any = null;
+let lastSearchedQuery = '';
+let lastRenderedSearchSignature = '';
+let isSelectingSearchResult = false;
+let isPointerDownOnSearchResults = false;
 let detailFrom = 'list'; // 'list' or 'search'
 let detailRenderToken = 0;
 
@@ -252,9 +256,17 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
     }
   }
 
-  // 사용자가 이미 검색어를 입력해 둔 상태라면 최신 인덱스로 자동 재검색
-  if (searchInput && searchInput.value.trim() && searchWrap && searchWrap.style.display !== 'none') {
-    doSearch(searchInput.value.trim());
+  // 사용자가 이미 검색어를 입력해 둔 상태이고 터치/클릭 중이 아니라면 변경 시에만 검색 결과 갱신
+  if (
+    searchInput &&
+    searchInput.value.trim() &&
+    searchWrap &&
+    searchWrap.style.display !== 'none' &&
+    !isSelectingSearchResult &&
+    !isPointerDownOnSearchResults &&
+    currentScreen() === 'home'
+  ) {
+    doSearch(searchInput.value.trim(), true);
   }
 }
 
@@ -368,17 +380,22 @@ function loadAllCounts() {
 
 // ── 메모 ID로 전체 메모를 불러와 상세 화면 열기 (목록·검색·메모 링크 공통)
 async function openNoteById(noteId: string, from: string) {
+  const reqToken = ++detailRenderToken;
   try {
     const note = await getSingleNote(noteId);
+    // 네트워크 응답 대기 중 다른 메모 요청이 들어왔다면 이전 결과는 무시
+    if (reqToken !== detailRenderToken) return;
     if (!note) { showToast('해당 메모를 찾을 수 없어요'); return; }
     appState.currentCat = note.category;
     const listTitle = $('list-title');
     if (listTitle) {
       listTitle.textContent = (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
     }
-    openDetail(note, from);
+    await openDetail(note, from, reqToken);
   } catch (e) {
-    showToast('메모를 불러오는 중 오류가 발생했어요');
+    if (reqToken === detailRenderToken) {
+      showToast('메모를 불러오는 중 오류가 발생했어요');
+    }
   }
 }
 
@@ -413,6 +430,10 @@ function setHomeListVisible(visible: boolean) {
 // 검색 상태 초기화 + 폴더 목록 복원 (여러 곳에서 공통 사용)
 function resetSearchUI() {
   clearTimeout(searchTimeout);
+  lastSearchedQuery = '';
+  lastRenderedSearchSignature = '';
+  isSelectingSearchResult = false;
+  isPointerDownOnSearchResults = false;
   if (searchInput) searchInput.value = '';
   if (searchClear) searchClear.style.display = 'none';
   if (searchResults) {
@@ -647,9 +668,9 @@ if (listBack) {
 // ─────────────────────────────────────────────
 // DETAIL
 // ─────────────────────────────────────────────
-async function openDetail(note: any, from?: string) {
+async function openDetail(note: any, from?: string, existingToken?: number) {
   ensureAllNotesCache();
-  const token = ++detailRenderToken;
+  const token = existingToken !== undefined ? existingToken : ++detailRenderToken;
   appState.currentNote = note;
   detailFrom = from || 'list';
   const detailHeaderTitle = $('detail-header-title');
@@ -727,14 +748,32 @@ if (searchInput) {
     searchClear.style.display = v ? 'block' : 'none';
     clearTimeout(searchTimeout);
     if (!v) {
+      lastSearchedQuery = '';
+      lastRenderedSearchSignature = '';
       searchResults.style.display = 'none';
       searchResults.innerHTML = '';
       setHomeListVisible(true);
       return;
     }
+    // 한글 IME 조합 완료/blur 등으로 동일한 검색어의 input 이벤트가 중복 발생할 때 재렌더링 차단
+    if (v === lastSearchedQuery && searchResults.style.display !== 'none') {
+      return;
+    }
     ensureSearchIndexReady();
     ensureAllNotesCache();
-    searchTimeout = setTimeout(() => doSearch(v), 200);
+    // 지연(setTimeout) 없이 즉시 검색하여 클릭/터치 직전에 목록이 뒤늦게 바뀌는 현상 원천 차단
+    doSearch(v);
+  });
+
+  searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const v = searchInput.value.trim();
+      if (v && v !== lastSearchedQuery) {
+        doSearch(v);
+      }
+      searchInput.blur();
+    }
   });
 }
 
@@ -742,16 +781,18 @@ if (searchClear) {
   searchClear.onclick = () => resetSearchUI();
 }
 
-function doSearch(keyword: string) {
+function doSearch(keyword: string, fromCacheSync = false) {
   setHomeListVisible(false);
   searchResults.style.display = 'block';
   ensureSearchIndexReady();
   try {
+    lastSearchedQuery = keyword;
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
     const searchIdx = (appState.searchIndex as { note: NoteIndexItem; text: string }[]) || [];
 
     // 아직 인덱스 로딩 전이고 로컬 캐시도 없는 극초기 상태인 경우
     if (searchIdx.length === 0 && !hasNotesLoaded) {
+      lastRenderedSearchSignature = '';
       searchResults.innerHTML = `<div class="search-no-result" style="color:var(--text-light);font-size:14px;padding:24px 0">🔍 메모 색인을 불러오는 중입니다...</div>`;
       ensureAllNotesCache();
       return;
@@ -762,79 +803,199 @@ function doSearch(keyword: string) {
       .filter(entry => keywords.every(kw => entry.text.includes(kw)))
       .map(entry => entry.note);
 
+    // 백그라운드 캐시 동기화로 호출되었을 때 현재 화면에 표시된 결과 목록과 동일하면 DOM 재생성 생략 (클릭 위치 어긋남 방지)
+    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${n.category || ''}|${n.tag || ''}|${n.snippet || ''}`).join(';;')}`;
+    if (fromCacheSync && signature === lastRenderedSearchSignature) {
+      return;
+    }
+    lastRenderedSearchSignature = signature;
+
     if (results.length === 0) {
       searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
       return;
     }
+    const prevScrollY = window.scrollY;
     const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
       <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
       <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
     </div>`;
+    // 검색 결과 카드 내부의 카테고리/태그 배지는 클릭을 가로채지 않도록 순수 표시용으로 렌더링
     const items = results.map(note => {
       const cat = CATEGORIES[note.category];
       return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
         <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
         <span class="search-result-cat">${cat?.icon || ''} ${cat?.name || ''}</span>
-        ${note.tag ? tagChipHtml(note.category, note.tag, 'search-result-cat', 'background:var(--sky-dark);color:white;margin-left:4px;cursor:pointer') : ''}
+        ${note.tag ? `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${escHtml(note.snippet || '')}</div>
       </div>`;
     }).join('');
-    // 한 번의 innerHTML 대입 + 컨테이너 이벤트 위임 (항목당 리스너 4개 → 0개)
+    // 한 번의 innerHTML 대입 + 컨테이너 이벤트 위임
     searchResults.innerHTML = header + items;
+    if (fromCacheSync && prevScrollY > 0) {
+      window.scrollTo(0, prevScrollY);
+    }
   } catch(e: any) {
     searchResults.innerHTML = `<div style="color:var(--danger);font-size:13px">${escHtml(e.message)}</div>`;
   }
 }
 
-function goToSearchDetail(item: HTMLElement) {
-  const id = item.dataset.id;
-  if (!id) return;
+async function goToSearchDetailById(id: string, itemEl?: HTMLElement | null) {
+  if (!id || isSelectingSearchResult) return;
+  isSelectingSearchResult = true;
   clearTimeout(searchTimeout);
-  searchInput?.blur();
-  openNoteById(id, 'search');
+
+  if (itemEl) {
+    searchResults?.querySelectorAll('.search-result-item.selected').forEach(el => el.classList.remove('selected'));
+    itemEl.classList.add('selected');
+  }
+
+  // blur 호출 시 한글 IME 조합 완료로 인한 input 이벤트가 재검색을 유발하지 않도록 사전 차단
+  if (searchInput) {
+    lastSearchedQuery = searchInput.value.trim();
+    searchInput.blur();
+  }
+  clearTimeout(searchTimeout);
+
+  try {
+    await openNoteById(id, 'search');
+  } finally {
+    isSelectingSearchResult = false;
+  }
 }
 
 if (searchResults) {
-  let startX = 0, startY = 0;
+  let startScreenX = 0, startScreenY = 0;
+  let startScrollY = 0;
   let isMoving = false;
+  let touchStartId: string | null = null;
+  let touchStartItem: HTMLElement | null = null;
+  let lastTouchEndTime = 0;
+
+  let mouseDownId: string | null = null;
+  let mouseDownItem: HTMLElement | null = null;
+  let mouseDownX = 0, mouseDownY = 0;
+  let mouseDownScrollY = 0;
 
   const itemOf = (e: Event) => (e.target as HTMLElement).closest('.search-result-item') as HTMLElement | null;
-  const onCatChip = (e: Event) => !!(e.target as HTMLElement).closest('.search-result-cat');
 
   searchResults.addEventListener('touchstart', (e: TouchEvent) => {
+    if (e.touches.length !== 1) {
+      isMoving = true;
+      touchStartId = null;
+      touchStartItem = null;
+      return;
+    }
+    isPointerDownOnSearchResults = true;
     const touch = e.touches[0];
-    startX = touch.clientX;
-    startY = touch.clientY;
+    // 뷰포트 크기 변화(가상 키보드 닫힘 등)에 영향받지 않는 물리 화면 좌표(screenX/Y)와 시작 시점의 항목 ID를 즉시 고정
+    startScreenX = touch.screenX;
+    startScreenY = touch.screenY;
+    startScrollY = window.scrollY;
     isMoving = false;
+    touchStartItem = itemOf(e);
+    touchStartId = touchStartItem?.dataset.id || null;
   }, { passive: true });
 
   searchResults.addEventListener('touchmove', (e: TouchEvent) => {
-    if (isMoving) return;
+    if (isMoving || !e.touches[0]) return;
     const touch = e.touches[0];
-    if (Math.abs(touch.clientX - startX) > 8 || Math.abs(touch.clientY - startY) > 8) {
+    const dx = Math.abs(touch.screenX - startScreenX);
+    const dy = Math.abs(touch.screenY - startScreenY);
+    const scrollDiff = Math.abs(window.scrollY - startScrollY);
+    if (dx > 12 || dy > 12 || scrollDiff > 8) {
       isMoving = true;
+      touchStartId = null;
+      touchStartItem = null;
     }
   }, { passive: true });
 
   searchResults.addEventListener('touchend', (e: TouchEvent) => {
-    const item = itemOf(e);
-    if (!item || onCatChip(e) || isMoving) return;
-    e.preventDefault();
-    goToSearchDetail(item);
-  }, { passive: false });
+    isPointerDownOnSearchResults = false;
+    // 터치 직후 브라우저가 발생시키는 합성 mousedown/click 이벤트를 차단하기 위해 타임스탬프 기록
+    lastTouchEndTime = Date.now();
 
-  searchResults.addEventListener('mousedown', (e: MouseEvent) => {
-    if (e.button !== 0) return;
-    const item = itemOf(e);
-    if (!item || onCatChip(e)) return;
-    goToSearchDetail(item);
-  });
-
-  searchResults.addEventListener('click', e => {
-    if (handleTagLink(e)) return;
-    if ((e.target as HTMLElement).closest('#search-home-btn')) {
+    if (!isMoving && (e.target as HTMLElement).closest('#search-home-btn')) {
+      if (e.cancelable) e.preventDefault();
+      touchStartId = null;
+      touchStartItem = null;
       resetSearchUI();
       showAppScreen('home');
+      return;
+    }
+
+    const targetId = touchStartId;
+    const targetItem = touchStartItem;
+    touchStartId = null;
+    touchStartItem = null;
+
+    if (!targetId || isMoving) return;
+    if (e.cancelable) e.preventDefault();
+    goToSearchDetailById(targetId, targetItem);
+  }, { passive: false });
+
+  searchResults.addEventListener('touchcancel', () => {
+    isPointerDownOnSearchResults = false;
+    lastTouchEndTime = Date.now();
+    isMoving = true;
+    touchStartId = null;
+    touchStartItem = null;
+  }, { passive: true });
+
+  searchResults.addEventListener('mousedown', (e: MouseEvent) => {
+    // 터치 이벤트 직후 발생하는 합성 mousedown 무시
+    if (Date.now() - lastTouchEndTime < 700) return;
+    if (e.button !== 0) return;
+    const item = itemOf(e);
+    if (!item || !item.dataset.id) {
+      mouseDownId = null;
+      mouseDownItem = null;
+      return;
+    }
+    // mousedown 시점에 searchInput 포커스 해제 및 한글 IME 조합 완료로 인해
+    // 브라우저가 화면 상단(searchInput 위치)으로 강제 스크롤하는 현상을 원천 방지
+    e.preventDefault();
+    isPointerDownOnSearchResults = true;
+    mouseDownItem = item;
+    mouseDownId = item.dataset.id;
+    mouseDownX = e.clientX;
+    mouseDownY = e.clientY;
+    mouseDownScrollY = window.scrollY;
+  });
+
+  searchResults.addEventListener('mouseup', () => {
+    isPointerDownOnSearchResults = false;
+  });
+
+  searchResults.addEventListener('click', (e: MouseEvent) => {
+    isPointerDownOnSearchResults = false;
+    // 터치 이벤트에서 이미 처리된 경우 합성 click 무시
+    if (Date.now() - lastTouchEndTime < 700) return;
+
+    if ((e.target as HTMLElement).closest('#search-home-btn')) {
+      mouseDownId = null;
+      mouseDownItem = null;
+      resetSearchUI();
+      showAppScreen('home');
+      return;
+    }
+
+    const targetId = mouseDownId;
+    const targetItem = mouseDownItem;
+    mouseDownId = null;
+    mouseDownItem = null;
+
+    if (targetId) {
+      const moved = Math.abs(e.clientX - mouseDownX) > 20 || Math.abs(e.clientY - mouseDownY) > 20;
+      const scrolled = Math.abs(window.scrollY - mouseDownScrollY) > 10;
+      if (!moved && !scrolled) {
+        goToSearchDetailById(targetId, targetItem);
+      }
+      return;
+    }
+
+    const clickedItem = itemOf(e);
+    if (clickedItem?.dataset.id) {
+      goToSearchDetailById(clickedItem.dataset.id, clickedItem);
     }
   });
 }
