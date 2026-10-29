@@ -35,6 +35,7 @@ export interface NoteIndexItem {
   pinned?: boolean;
   pinnedAt?: Timestamp | null;
   locked?: boolean;
+  embeddingUpdatedAt?: Timestamp | number | null;
 }
 
 export interface UserMeta {

@@ -11,14 +11,27 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { appState } from '../state';
-import { CATEGORIES, getNoteCategories, getNoteTags } from './database';
-import { Note } from '../types';
+import {
+  CATEGORIES,
+  getNoteCategories,
+  getNoteTags,
+   getSingleNote,
+  rebuildCategoryIndex
+} from './database';
+import { toMillis } from '../utils/formatter';
+import { Note, NoteIndexItem } from '../types';
 
 // ─────────────────────────────────────────────
 // 상수 및 스토리지 키 정의
 // ─────────────────────────────────────────────
 const STORAGE_KEY_API = 'mynote_gemini_api_key';
 const STORAGE_KEY_PROXY = 'mynote_ai_proxy_url';
+const BOOTSTRAP_FLAG_PREFIX = 'mynote_ai_vec_init_v1_';
+
+// IndexedDB 설정 (영구 로컬 벡터 & 본문 캐시 — 새로고침/재실행 시에도 Firestore 재조회 0회 보장)
+const IDB_NAME = 'mynote_ai_vector_cache_db';
+const IDB_VERSION = 1;
+const IDB_STORE = 'note_vectors';
 
 // 요구사항 1: Google Gemini text-embedding-004 기본 사용 (신규 키 호환용 폴백 포함)
 const PRIMARY_EMBEDDING_MODEL = 'text-embedding-004';
@@ -37,18 +50,111 @@ export interface SemanticSearchResult {
   hasEmbedding: boolean;
 }
 
-// 세션 내 고속 벡터 검색을 위한 인메모리 캐시 (Firestore 중복 읽기 방지)
-let vectorNotesCache: Map<string, Note> | null = null;
-let vectorCacheUid: string | null = null;
+interface LocalVectorRecord {
+  id: string;
+  uid: string;
+  embedding: number[];
+  embeddingUpdatedMs: number;
+  body?: string; // 상위 매칭된 메모의 본문 캐시 (반복 조회 시 읽기 비용 0)
+}
+
+// 세션 인메모리 캐시 (IndexedDB와 1:1 동기화)
+let memoryVectorMap: Map<string, LocalVectorRecord> | null = null;
+let memoryVectorUid: string | null = null;
+let idbPromise: Promise<IDBDatabase | null> | null = null;
+
+// ─────────────────────────────────────────────
+// 0. IndexedDB 영구 로컬 벡터 캐시 레이어
+// ─────────────────────────────────────────────
+
+function openVectorIdb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  if (idbPromise) return idbPromise;
+
+  idbPromise = new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = () => {
+        const dbInst = req.result;
+        if (!dbInst.objectStoreNames.contains(IDB_STORE)) {
+          dbInst.createObjectStore(IDB_STORE, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  return idbPromise;
+}
+
+async function loadVectorsFromIdb(uid: string): Promise<Map<string, LocalVectorRecord>> {
+  const map = new Map<string, LocalVectorRecord>();
+  const idb = await openVectorIdb();
+  if (!idb) return map;
+
+  return new Promise((resolve) => {
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const rows = (req.result || []) as LocalVectorRecord[];
+        for (const r of rows) {
+          if (r && r.uid === uid && Array.isArray(r.embedding) && r.embedding.length > 0) {
+            map.set(r.id, r);
+          }
+        }
+        resolve(map);
+      };
+      req.onerror = () => resolve(map);
+    } catch {
+      resolve(map);
+    }
+  });
+}
+
+async function putVectorsToIdb(records: LocalVectorRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const idb = await openVectorIdb();
+  if (!idb) return;
+
+  return new Promise((resolve) => {
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      for (const r of records) {
+        store.put(r);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function deleteVectorFromIdb(noteId: string): Promise<void> {
+  const idb = await openVectorIdb();
+  if (!idb) return;
+
+  return new Promise((resolve) => {
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(noteId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
 
 // ─────────────────────────────────────────────
 // 1. 안전한 API 키 / 프록시 설정 관리
 // ─────────────────────────────────────────────
 
-/**
- * 현재 기기 또는 로컬 환경변수(.env.local)에 설정된 Gemini API 키를 반환합니다.
- * 공개 GitHub 저장소 노출을 막기 위해 코드에는 절대 키를 하드코딩하지 않습니다.
- */
 export function getGeminiApiKey(): string {
   try {
     const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
@@ -61,9 +167,6 @@ export function getGeminiApiKey(): string {
   }
 }
 
-/**
- * Cloud Functions / Cloudflare Worker 등 백엔드 프록시 URL이 설정된 경우 반환합니다.
- */
 export function getAiProxyUrl(): string {
   try {
     const envProxy = (import.meta as any).env?.VITE_AI_PROXY_URL;
@@ -80,10 +183,6 @@ export function hasAiCredentials(): boolean {
   return Boolean(getAiProxyUrl() || getGeminiApiKey());
 }
 
-/**
- * API 키 및 프록시 URL을 기기(localStorage)에 저장하고,
- * 선택 시 본인 전용 Firestore(user_meta/{uid})에도 동기화합니다.
- */
 export async function saveAiConfig(apiKey: string, proxyUrl = '', syncToCloud = true): Promise<void> {
   const cleanKey = apiKey.trim();
   const cleanProxy = proxyUrl.trim();
@@ -113,9 +212,6 @@ export async function saveAiConfig(apiKey: string, proxyUrl = '', syncToCloud = 
   }
 }
 
-/**
- * 로그인 직후 로컬에 API 키가 없으면 본인 user_meta 문서에서 복원합니다.
- */
 export async function syncAiConfigFromUserMeta(): Promise<void> {
   if (!appState.currentUser) return;
   if (getGeminiApiKey() || getAiProxyUrl()) return;
@@ -138,23 +234,16 @@ export async function syncAiConfigFromUserMeta(): Promise<void> {
 // 2. 텍스트 전처리 및 Gemini 임베딩 API 호출
 // ─────────────────────────────────────────────
 
-/**
- * 마크다운 이미지 링크 등 임베딩 품질을 떨어뜨리는 긴 URL을 정리하고
- * 핵심 텍스트만 추출합니다.
- */
 export function cleanTextForEmbedding(raw: string, maxChars = 6000): string {
   if (!raw) return '';
   return raw
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1') // 마크다운 이미지 URL 제거
-    .replace(/https?:\/\/\S+/g, '')            // 일반 긴 URL 제거
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxChars);
 }
 
-/**
- * 메모의 제목, 카테고리, 태그, 키워드, 본문을 결합하여 임베딩용 문서를 구성합니다.
- */
 export function buildNoteEmbeddingInput(noteData: Partial<Note>): string {
   const title = (noteData.title || '').trim();
   const cats = getNoteCategories(noteData)
@@ -175,10 +264,6 @@ export function buildNoteEmbeddingInput(noteData: Partial<Note>): string {
   return parts.join('\n').trim();
 }
 
-/**
- * Gemini API (또는 보안 프록시)를 호출하여 텍스트를 임베딩 벡터(number[])로 변환합니다.
- * 기본 모델: text-embedding-004
- */
 export async function generateTextEmbedding(
   text: string,
   taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY' = 'RETRIEVAL_DOCUMENT'
@@ -236,7 +321,6 @@ export async function generateTextEmbedding(
   };
 
   let res = await callEmbedModel(PRIMARY_EMBEDDING_MODEL);
-  // 만약 text-embedding-004 엔드포인트가 지원 중단/404인 경우 gemini-embedding-001로 자동 폴백
   if (res.status === 404) {
     res = await callEmbedModel(FALLBACK_EMBEDDING_MODEL);
   }
@@ -258,10 +342,6 @@ export async function generateTextEmbedding(
   return values as number[];
 }
 
-/**
- * 메모 저장/수정 시 호출되어 안전하게 임베딩 벡터를 생성합니다.
- * API 키 미설정이나 네트워크 오류 시에도 기존 메모 저장(CRUD)이 절대 중단되지 않도록 null을 반환합니다.
- */
 export async function tryGenerateNoteEmbedding(noteData: Partial<Note>): Promise<number[] | null> {
   if (!hasAiCredentials()) return null;
   try {
@@ -275,13 +355,9 @@ export async function tryGenerateNoteEmbedding(noteData: Partial<Note>): Promise
 }
 
 // ─────────────────────────────────────────────
-// 3. 코사인 유사도 계산 및 고속 시맨틱 검색
+// 3. 코사인 유사도 & 최소 읽기(Delta Sync + 로컬 캐시) 벡터 검색
 // ─────────────────────────────────────────────
 
-/**
- * 두 벡터 간의 코사인 유사도(Cosine Similarity)를 계산합니다. (-1.0 ~ 1.0)
- * 길이가 다른 벡터(모델 버전 차이 등)인 경우 0을 반환합니다.
- */
 export function cosineSimilarity(vecA?: number[] | null, vecB?: number[] | null): number {
   if (!Array.isArray(vecA) || !Array.isArray(vecB)) return 0;
   if (vecA.length === 0 || vecA.length !== vecB.length) return 0;
@@ -304,50 +380,137 @@ export function cosineSimilarity(vecA?: number[] | null, vecB?: number[] | null)
 }
 
 /**
- * 메모 생성/수정 시 인메모리 벡터 캐시를 즉시 갱신합니다.
+ * 메모 생성/수정 시 로컬 메모리 + IndexedDB 영구 캐시에 즉시 반영합니다.
+ * (다음 검색 시 Firestore를 다시 읽지 않도록 비용 절감)
  */
 export function upsertVectorNoteCache(note: Note) {
-  if (!note.id) return;
-  if (vectorNotesCache && vectorCacheUid === appState.currentUser?.uid) {
-    vectorNotesCache.set(note.id, note);
+  const uid = appState.currentUser?.uid || note.uid;
+  if (!note.id || !uid) return;
+  if (!Array.isArray(note.embedding) || note.embedding.length === 0) return;
+
+  const rec: LocalVectorRecord = {
+    id: note.id,
+    uid,
+    embedding: note.embedding,
+    embeddingUpdatedMs: toMillis(note.embeddingUpdatedAt) || Date.now(),
+    body: typeof note.body === 'string' ? note.body : undefined
+  };
+
+  if (memoryVectorMap && memoryVectorUid === uid) {
+    memoryVectorMap.set(note.id, rec);
   }
+  putVectorsToIdb([rec]).catch(() => {});
 }
 
 /**
- * 메모 삭제 시 인메모리 벡터 캐시에서 제거합니다.
+ * 메모 삭제 시 로컬 메모리 + IndexedDB 캐시에서 제거합니다.
  */
 export function removeVectorNoteCache(noteId: string) {
-  if (vectorNotesCache) {
-    vectorNotesCache.delete(noteId);
+  if (memoryVectorMap) {
+    memoryVectorMap.delete(noteId);
   }
+  deleteVectorFromIdb(noteId).catch(() => {});
 }
 
 /**
- * 사용자의 전체 메모(embedding 포함)를 로드하여 인메모리 캐시에 보관합니다.
+ * 전체 문서를 매번 Firestore에서 반복 조회하지 않도록:
+ * 1) IndexedDB에 영구 저장된 로컬 벡터 맵을 먼저 불러오고 (Firestore 읽기 0건),
+ * 2) 이미 메모리에 로드된 인덱스(appState.allNotesCache)의 embeddingUpdatedAt과 비교하여
+ *    다른 기기에서 새로 추가/수정되어 로컬 캐시에 없거나 구버전인 메모 ID만 단건 조회(Delta Fetch)합니다.
  */
-export async function ensureVectorNotesLoaded(forceRefresh = false): Promise<Note[]> {
+async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord>> {
   const uid = appState.currentUser?.uid;
   if (!uid) throw new Error('로그인이 필요합니다.');
 
-  if (!forceRefresh && vectorNotesCache && vectorCacheUid === uid) {
-    return Array.from(vectorNotesCache.values());
+  // 1) 인메모리 맵이 비어 있으면 먼저 로컬 IndexedDB에서 복원 (네트워크 읽기 0건)
+  if (!memoryVectorMap || memoryVectorUid !== uid) {
+    memoryVectorMap = await loadVectorsFromIdb(uid);
+    memoryVectorUid = uid;
   }
 
-  const q = query(collection(db, 'notes'), where('uid', '==', uid));
-  const snap = await getDocs(q);
-  const map = new Map<string, Note>();
-  snap.docs.forEach(d => {
-    map.set(d.id, { id: d.id, ...(d.data() as any) } as Note);
-  });
+  const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
+  const bootstrapKey = `${BOOTSTRAP_FLAG_PREFIX}${uid}`;
+  const isBootstrapped = localStorage.getItem(bootstrapKey) === '1';
 
-  vectorNotesCache = map;
-  vectorCacheUid = uid;
-  return Array.from(map.values());
+  // 기기 최초 1회: 로컬 IndexedDB가 완전히 비어 있고 아직 초기 동기화 이력이 없을 때만 1회 초기화
+  if (memoryVectorMap.size === 0 && !isBootstrapped) {
+    const q = query(collection(db, 'notes'), where('uid', '==', uid));
+    const snap = await getDocs(q);
+    const toSave: LocalVectorRecord[] = [];
+    snap.docs.forEach(d => {
+      const data = d.data();
+      if (Array.isArray(data.embedding) && data.embedding.length > 0) {
+        const rec: LocalVectorRecord = {
+          id: d.id,
+          uid,
+          embedding: data.embedding,
+          embeddingUpdatedMs: toMillis(data.embeddingUpdatedAt) || toMillis(data.updatedAt) || Date.now(),
+          body: typeof data.body === 'string' ? data.body : undefined
+        };
+        memoryVectorMap!.set(d.id, rec);
+        toSave.push(rec);
+      }
+    });
+    if (toSave.length > 0) {
+      await putVectorsToIdb(toSave);
+    }
+    try {
+      localStorage.setItem(bootstrapKey, '1');
+    } catch {}
+    return memoryVectorMap;
+  }
+
+  // 2) 증분 동기화(Delta Sync): 인덱스(allNotesCache)에서 embeddingUpdatedAt이 갱신된 문서만 선별하여 단건 조회
+  //    변경된 메모가 없으면 Firestore 읽기 횟수 = 0건!
+  const staleNoteIds: string[] = [];
+  for (const item of indexItems) {
+    const idxEmbMs = toMillis(item.embeddingUpdatedAt);
+    if (!idxEmbMs) continue; // 인덱스에 임베딩 타임스탬프가 없으면 불필요한 조회 생략
+    const localRec = memoryVectorMap.get(item.id);
+    if (!localRec || localRec.embeddingUpdatedMs < idxEmbMs) {
+      staleNoteIds.push(item.id);
+    }
+  }
+
+  if (staleNoteIds.length > 0) {
+    const fetchedRecords: LocalVectorRecord[] = [];
+    // 변경된 소수의 메모만 개별 문서 조회
+    await Promise.all(
+      staleNoteIds.map(async (noteId) => {
+        try {
+          const snap = await getDoc(doc(db, 'notes', noteId));
+          if (!snap.exists()) return;
+          const data = snap.data();
+          if (Array.isArray(data.embedding) && data.embedding.length > 0) {
+            const rec: LocalVectorRecord = {
+              id: snap.id,
+              uid,
+              embedding: data.embedding,
+              embeddingUpdatedMs: toMillis(data.embeddingUpdatedAt) || Date.now(),
+              body: typeof data.body === 'string' ? data.body : undefined
+            };
+            memoryVectorMap!.set(snap.id, rec);
+            fetchedRecords.push(rec);
+          }
+        } catch (e) {
+          console.warn(`벡터 증분 동기화 실패 (${noteId}):`, e);
+        }
+      })
+    );
+    if (fetchedRecords.length > 0) {
+      await putVectorsToIdb(fetchedRecords);
+    }
+  }
+
+  return memoryVectorMap;
 }
 
 /**
- * 요구사항 2: 자연어 질문을 임베딩하여 Firestore 내 메모 벡터들과 코사인 유사도를 비교하고
- * 연관도가 높은 상위 3~5개(기본 5개) 메모를 고속 추출합니다.
+ * 요구사항 2 (읽기 비용 극대화 절감 버전):
+ * - 전체 문서를 Firestore에서 읽지 않고 로컬 캐시(allNotesCache + IndexedDB 벡터)만으로
+ *   100% 로컬에서 코사인 유사도를 고속 계산하여 상위 topK(3~5개)를 추출합니다.
+ * - 추출된 상위 3~5개 메모에 한해서만(잠금 메모 제외, snippet이 짧은 메모 제외)
+ *   로컬에 본문이 없을 때 최소한으로 단건 조회하여 캐싱합니다.
  */
 export async function semanticSearchNotes(
   queryText: string,
@@ -362,12 +525,13 @@ export async function semanticSearchNotes(
     return { results: [], totalNotesCount: 0, embeddedNotesCount: 0 };
   }
 
-  // 1) 질문 임베딩(RETRIEVAL_QUERY)과 메모 로드를 병렬 수행하여 응답 속도 극대화
-  const [queryVector, allNotes] = await Promise.all([
+  // 1) 질문 임베딩 생성 + 로컬 벡터 캐시 증분 확인 (변경분 없으면 Firestore 읽기 0회)
+  const [queryVector, vectorMap] = await Promise.all([
     generateTextEmbedding(cleanQuery, 'RETRIEVAL_QUERY'),
-    ensureVectorNotesLoaded(false)
+    ensureLocalVectorsSynced()
   ]);
 
+  const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
   const queryTerms = cleanQuery
     .toLowerCase()
     .split(/\s+/)
@@ -376,44 +540,111 @@ export async function semanticSearchNotes(
 
   let embeddedNotesCount = 0;
 
-  const scored: SemanticSearchResult[] = allNotes.map(note => {
-    const hasEmb = Array.isArray(note.embedding) && note.embedding.length === queryVector.length;
+  // 2) 전체 메모 스코어링은 Firestore 조회 없이 100% 로컬 메모리에서 수행
+  const scored: SemanticSearchResult[] = indexItems.map(idxItem => {
+    const vecRec = vectorMap.get(idxItem.id);
+    const hasEmb = Boolean(vecRec && vecRec.embedding.length === queryVector.length);
     if (hasEmb) embeddedNotesCount++;
 
-    let score = hasEmb ? cosineSimilarity(queryVector, note.embedding) : 0;
+    let score = hasEmb ? cosineSimilarity(queryVector, vecRec!.embedding) : 0;
 
-    // 보조 가중치: 제목·태그·키워드에 질문 핵심 어절이 직접 포함되면 소폭 가산 (하이브리드 정밀도 향상)
     if (queryTerms.length > 0) {
-      const hayTitle = `${note.title || ''} ${getNoteTags(note).join(' ')} ${note.keywords || ''}`.toLowerCase();
-      const hayBody = (note.body || '').toLowerCase();
+      const hayTitle = `${idxItem.title || ''} ${getNoteTags(idxItem).join(' ')} ${idxItem.keywords || ''}`.toLowerCase();
+      const haySnippet = (vecRec?.body || idxItem.snippet || '').toLowerCase();
       let matchedTerms = 0;
       for (const term of queryTerms) {
         if (hayTitle.includes(term)) matchedTerms += 1.0;
-        else if (hayBody.includes(term)) matchedTerms += 0.4;
+        else if (haySnippet.includes(term)) matchedTerms += 0.4;
       }
       const lexicalBoost = Math.min(0.08, (matchedTerms / queryTerms.length) * 0.08);
       if (hasEmb) {
         score = Math.min(0.999, score + lexicalBoost);
       } else if (matchedTerms > 0) {
-        // 아직 임베딩이 생성되지 않은 구버전 메모도 키워드 일치 시 후보로 노출 가능하도록 보정
         score = Math.min(0.55, 0.35 + (matchedTerms / queryTerms.length) * 0.2);
       }
     }
 
+    const candidateNote: Note = {
+      id: idxItem.id,
+      uid: appState.currentUser?.uid || '',
+      title: idxItem.title || '',
+      category: idxItem.category || '',
+      categories: getNoteCategories(idxItem),
+      tag: idxItem.tag || '',
+      tags: getNoteTags(idxItem),
+      // 로컬 벡터 레코드에 이미 본문이 캐시되어 있으면 바로 사용, 없으면 우선 snippet(200자) 사용
+      body: vecRec?.body ?? (idxItem.snippet || ''),
+      keywords: idxItem.keywords || '',
+      locked: !!idxItem.locked,
+      pinned: !!idxItem.pinned,
+      createdAt: idxItem.createdAt || undefined
+    };
+
     return {
-      note,
+      note: candidateNote,
       score,
       hasEmbedding: hasEmb
     };
   });
 
-  // 연관도 높은 순으로 정렬 후 상위 topK(3~5개) 추출 (최소 유사도 임계값 0.25 이상)
+  // 3) 상위 topK(3~5개) 메모만 고속 추출
   scored.sort((a, b) => b.score - a.score);
-  const filtered = scored.filter(item => item.score >= 0.25).slice(0, topK);
+  const topResults = scored.filter(item => item.score >= 0.25).slice(0, topK);
+
+  // 4) 상위 일치 문서(최대 3~5개)만 본문 최소 조회 (On-Demand Top-K Hydration)
+  //    - 잠금 메모(locked)는 RAG에 본문을 보내지 않으므로 조회 생략 (0건)
+  //    - 이미 로컬 캐시에 본문이 있거나, snippet 길이가 200자 미만(즉 snippet이 곧 전문)이면 조회 생략 (0건)
+  const updatedForIdb: LocalVectorRecord[] = [];
+  await Promise.all(
+    topResults.map(async (resItem) => {
+      const n = resItem.note;
+      if (!n.id || n.locked) return;
+      const vecRec = vectorMap.get(n.id);
+      if (vecRec?.body !== undefined) {
+        n.body = vecRec.body;
+        return;
+      }
+      // 인덱스 스니펫이 200자 미만이면 잘린 부분이 없으므로 Firestore 조회 불필요
+      if ((n.body || '').length < 200) {
+        if (vecRec) {
+          vecRec.body = n.body;
+          updatedForIdb.push(vecRec);
+        }
+        return;
+      }
+      // 상위 매칭된 긴 메모만 단건 조회 (getSingleNote는 Firestore persistentLocalCache도 활용)
+      try {
+        const fullNote = await getSingleNote(n.id);
+        if (fullNote && typeof fullNote.body === 'string') {
+          n.body = fullNote.body;
+          if (vecRec) {
+            vecRec.body = fullNote.body;
+            updatedForIdb.push(vecRec);
+          } else if (Array.isArray(fullNote.embedding) && fullNote.embedding.length > 0) {
+            const newRec: LocalVectorRecord = {
+              id: n.id,
+              uid: fullNote.uid || appState.currentUser?.uid || '',
+              embedding: fullNote.embedding,
+              embeddingUpdatedMs: toMillis(fullNote.embeddingUpdatedAt) || Date.now(),
+              body: fullNote.body
+            };
+            vectorMap.set(n.id, newRec);
+            updatedForIdb.push(newRec);
+          }
+        }
+      } catch (e) {
+        console.warn(`상위 메모 본문 단건 조회 실패 (${n.id}):`, e);
+      }
+    })
+  );
+
+  if (updatedForIdb.length > 0) {
+    putVectorsToIdb(updatedForIdb).catch(() => {});
+  }
 
   return {
-    results: filtered,
-    totalNotesCount: allNotes.length,
+    results: topResults,
+    totalNotesCount: indexItems.length,
     embeddedNotesCount
   };
 }
@@ -422,10 +653,6 @@ export async function semanticSearchNotes(
 // 4. 요구사항 3: AI 종합 및 추론 모드 (RAG — Gemini Flash)
 // ─────────────────────────────────────────────
 
-/**
- * 상위 검색된 메모들의 본문을 컨텍스트로 묶어 Gemini Flash 모델에 전달하고,
- * 질문에 맞춰 요약·비교·추론한 답변을 생성합니다.
- */
 export async function generateRagAnswer(
   userQuery: string,
   topResults: SemanticSearchResult[]
@@ -434,7 +661,6 @@ export async function generateRagAnswer(
     return '연관된 메모를 찾지 못해 종합 답변을 생성할 수 없습니다.';
   }
 
-  // 잠금(locked) 메모는 사생활 보호를 위해 본문 대신 잠금 상태임을 표시하고, 열린 메모들의 본문을 컨텍스트로 구성
   const unlockedResults = topResults.filter(r => !r.note.locked);
   const lockedCount = topResults.length - unlockedResults.length;
 
@@ -555,24 +781,45 @@ export async function generateRagAnswer(
 }
 
 // ─────────────────────────────────────────────
-// 5. 기존 메모 일괄 임베딩 생성 (백필 유틸리티)
+// 5. 기존 메모 일괄 임베딩 생성 (로컬 캐시 활용으로 불필요한 조회 최소화)
 // ─────────────────────────────────────────────
 
-/**
- * 아직 embedding 필드가 없는 기존 메모들을 찾아 순차적으로 임베딩을 생성하고
- * Firestore notes/{noteId} 문서에 저장합니다.
- */
 export async function backfillMissingEmbeddings(
   onProgress?: (done: number, total: number, currentTitle: string) => void
 ): Promise<{ updated: number; skipped: number; failed: number }> {
-  const allNotes = await ensureVectorNotesLoaded(true);
-  const targets = allNotes.filter(
-    n => !Array.isArray(n.embedding) || n.embedding.length === 0
-  );
+  const uid = appState.currentUser?.uid;
+  if (!uid) throw new Error('로그인이 필요합니다.');
+
+  const vectorMap = await ensureLocalVectorsSynced();
+  const q = query(collection(db, 'notes'), where('uid', '==', uid));
+  const snap = await getDocs(q);
+
+  const allDocs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Note));
+  const targets = allDocs.filter(n => !Array.isArray(n.embedding) || n.embedding.length === 0);
+
+  // 이미 Firestore에 임베딩이 있던 문서들도 로컬 IndexedDB에 누락 없이 채워 넣음
+  const existingVecRecords: LocalVectorRecord[] = [];
+  for (const n of allDocs) {
+    if (n.id && Array.isArray(n.embedding) && n.embedding.length > 0 && !vectorMap.has(n.id)) {
+      const rec: LocalVectorRecord = {
+        id: n.id,
+        uid,
+        embedding: n.embedding,
+        embeddingUpdatedMs: toMillis(n.embeddingUpdatedAt) || Date.now(),
+        body: typeof n.body === 'string' ? n.body : undefined
+      };
+      vectorMap.set(n.id, rec);
+      existingVecRecords.push(rec);
+    }
+  }
+  if (existingVecRecords.length > 0) {
+    await putVectorsToIdb(existingVecRecords);
+  }
 
   let updated = 0;
   let failed = 0;
-  const skipped = allNotes.length - targets.length;
+  const skipped = allDocs.length - targets.length;
+  const touchedCategories = new Set<string>();
 
   for (let i = 0; i < targets.length; i++) {
     const note = targets[i];
@@ -590,14 +837,27 @@ export async function backfillMissingEmbeddings(
       note.embedding = embedding;
       note.embeddingUpdatedAt = now;
       upsertVectorNoteCache(note);
+      getNoteCategories(note).forEach(c => touchedCategories.add(c));
       updated++;
-      // 무료 등급 API Rate Limit(분당 요청 제한) 방지를 위한 짧은 간격 대기
       await new Promise(r => setTimeout(r, 250));
     } catch (e) {
       console.warn(`메모 임베딩 생성 실패 (${note.id}):`, e);
       failed++;
     }
   }
+
+  // 변경된 카테고리의 인덱스를 갱신하여 embeddingUpdatedAt 타임스탬프를 인덱스에 반영
+  for (const catId of touchedCategories) {
+    try {
+      await rebuildCategoryIndex(catId);
+    } catch (e) {
+      console.warn(`카테고리 인덱스 갱신 실패 (${catId}):`, e);
+    }
+  }
+
+  try {
+    localStorage.setItem(`${BOOTSTRAP_FLAG_PREFIX}${uid}`, '1');
+  } catch {}
 
   return { updated, skipped, failed };
 }

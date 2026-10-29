@@ -56,6 +56,19 @@ import {
   currentScreen 
 } from './pwa';
 import { NoteIndexItem } from './types';
+import {
+  tryGenerateNoteEmbedding,
+  semanticSearchNotes,
+  generateRagAnswer,
+  hasAiCredentials,
+  getGeminiApiKey,
+  getAiProxyUrl,
+  saveAiConfig,
+  syncAiConfigFromUserMeta,
+  backfillMissingEmbeddings,
+  upsertVectorNoteCache,
+  removeVectorNoteCache
+} from './services/ai';
 
 let recognition: any = null;
 let isRecording = false;
@@ -64,6 +77,7 @@ let listUnsubscribe: (() => void) | null = null;
 let notesUnsubscribe: (() => void) | null = null;
 let searchTimeout: any = null;
 let lastSearchedQuery = '';
+let isAiSearchActive = false;
 let lastRenderedSearchSignature = '';
 let isSelectingSearchResult = false;
 let isPointerDownOnSearchResults = false;
@@ -220,6 +234,7 @@ function applyEarlyCache() {
     if (rawUser) {
       renderUserBar(JSON.parse(rawUser));
       scheduleInitialPinSetupCheck();
+    syncAiConfigFromUserMeta().catch(() => {});
       showRootScreen('app');
     }
     const rawCounts = localStorage.getItem('mynote_counts_cache');
@@ -296,6 +311,7 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
     searchWrap.style.display !== 'none' &&
     !isSelectingSearchResult &&
     !isPointerDownOnSearchResults &&
+    !isAiSearchActive &&
     currentScreen() === 'home'
   ) {
     doSearch(searchInput.value.trim(), true);
@@ -335,6 +351,7 @@ initAuthListener(
     showRootScreen('app');
     loadAllCounts();
     scheduleInitialPinSetupCheck();
+    syncAiConfigFromUserMeta().catch(() => {});
 
     // 사용자가 인증 완료 전에 이미 카테고리 목록을 열었거나 대기 중인 경우 즉시 실시간 동기화 시작
     const targetCat = pendingListCat || (currentScreen() === 'list' ? appState.currentCat : null);
@@ -488,11 +505,17 @@ function setHomeListVisible(visible: boolean) {
 function resetSearchUI() {
   clearTimeout(searchTimeout);
   lastSearchedQuery = '';
+  isAiSearchActive = false;
   lastRenderedSearchSignature = '';
   isSelectingSearchResult = false;
   isPointerDownOnSearchResults = false;
   if (searchInput) searchInput.value = '';
   if (searchClear) searchClear.style.display = 'none';
+  const ragEl = $('ai-rag-container');
+  if (ragEl) {
+    ragEl.style.display = 'none';
+    ragEl.innerHTML = '';
+  }
   if (searchResults) {
     searchResults.style.display = 'none';
     searchResults.innerHTML = '';
@@ -819,6 +842,7 @@ if (searchInput) {
     clearTimeout(searchTimeout);
     if (!v) {
       lastSearchedQuery = '';
+  isAiSearchActive = false;
       lastRenderedSearchSignature = '';
       searchResults.style.display = 'none';
       searchResults.innerHTML = '';
@@ -851,7 +875,277 @@ if (searchClear) {
   searchClear.onclick = () => resetSearchUI();
 }
 
+// ─────────────────────────────────────────────
+// AI 시맨틱 검색 & 종합·추론 (RAG)
+// ─────────────────────────────────────────────
+const aiRagContainer = $('ai-rag-container') as HTMLElement | null;
+const btnAiSearch = $('btn-ai-search') as HTMLButtonElement | null;
+const btnOpenAiConfig = $('btn-open-ai-config') as HTMLButtonElement | null;
+const aiConfigModal = $('ai-config-modal') as HTMLElement | null;
+const aiApiKeyInput = $('ai-api-key-input') as HTMLInputElement | null;
+const aiProxyUrlInput = $('ai-proxy-url-input') as HTMLInputElement | null;
+const aiSyncCloudCb = $('ai-sync-cloud-cb') as HTMLInputElement | null;
+const btnBackfillEmbeddings = $('btn-backfill-embeddings') as HTMLButtonElement | null;
+const aiBackfillStatus = $('ai-backfill-status') as HTMLElement | null;
+let aiSearchSessionToken = 0;
+
+function openAiConfigModal() {
+  if (!aiConfigModal) return;
+  if (aiApiKeyInput) aiApiKeyInput.value = getGeminiApiKey();
+  if (aiProxyUrlInput) aiProxyUrlInput.value = getAiProxyUrl();
+  aiConfigModal.style.display = 'flex';
+}
+
+function closeAiConfigModal() {
+  if (aiConfigModal) aiConfigModal.style.display = 'none';
+}
+
+if (btnOpenAiConfig) {
+  btnOpenAiConfig.onclick = () => openAiConfigModal();
+}
+
+const aiConfigCancel = $('ai-config-cancel');
+if (aiConfigCancel) {
+  aiConfigCancel.onclick = () => closeAiConfigModal();
+}
+
+const aiConfigSave = $('ai-config-save') as HTMLButtonElement | null;
+if (aiConfigSave) {
+  aiConfigSave.onclick = async () => {
+    const key = aiApiKeyInput ? aiApiKeyInput.value.trim() : '';
+    const proxy = aiProxyUrlInput ? aiProxyUrlInput.value.trim() : '';
+    const syncCloud = aiSyncCloudCb ? aiSyncCloudCb.checked : true;
+    aiConfigSave.disabled = true;
+    try {
+      await saveAiConfig(key, proxy, syncCloud);
+      showToast(key || proxy ? 'AI 설정이 저장되었어요 ✨' : 'AI 설정이 초기화되었어요');
+      closeAiConfigModal();
+    } catch (e: any) {
+      showToast('설정 저장 실패: ' + (e?.message || '오류'));
+    } finally {
+      aiConfigSave.disabled = false;
+    }
+  };
+}
+
+if (aiConfigModal) {
+  aiConfigModal.addEventListener('click', e => {
+    if ((e.target as HTMLElement).id === 'ai-config-modal') closeAiConfigModal();
+  });
+}
+
+if (btnBackfillEmbeddings) {
+  btnBackfillEmbeddings.onclick = async () => {
+    if (!hasAiCredentials()) {
+      const tempKey = aiApiKeyInput?.value.trim() || '';
+      const tempProxy = aiProxyUrlInput?.value.trim() || '';
+      if (!tempKey && !tempProxy) {
+        showToast('먼저 Gemini API 키를 입력하고 저장해주세요');
+        return;
+      }
+      await saveAiConfig(tempKey, tempProxy, aiSyncCloudCb ? aiSyncCloudCb.checked : true);
+    }
+    btnBackfillEmbeddings.disabled = true;
+    btnBackfillEmbeddings.textContent = '⏳ 변환 중...';
+    try {
+      const res = await backfillMissingEmbeddings((done, total, title) => {
+        if (aiBackfillStatus) {
+          aiBackfillStatus.textContent = `진행 중 (${done}/${total}): "${title}" 임베딩 생성 중...`;
+        }
+      });
+      if (aiBackfillStatus) {
+        aiBackfillStatus.textContent = `완료! 신규 변환 ${res.updated}건 · 기존 보유 ${res.skipped}건${res.failed ? ` · 실패 ${res.failed}건` : ''}`;
+      }
+      showToast(`임베딩 일괄 생성 완료 (${res.updated}건 변환) ✨`);
+    } catch (e: any) {
+      if (aiBackfillStatus) {
+        aiBackfillStatus.textContent = '오류: ' + (e?.message || '일괄 변환 실패');
+      }
+      showToast('임베딩 변환 실패: ' + (e?.message || '오류'));
+    } finally {
+      btnBackfillEmbeddings.disabled = false;
+      btnBackfillEmbeddings.textContent = '일괄 변환 실행';
+    }
+  };
+}
+
+// RAG 답변 카드 내 [[메모 제목]] 링크 클릭 위임 처리
+if (aiRagContainer) {
+  aiRagContainer.addEventListener('click', (e: MouseEvent) => {
+    const linkEl = (e.target as HTMLElement).closest('.note-link') as HTMLElement | null;
+    if (linkEl && linkEl.dataset.noteId) {
+      e.preventDefault();
+      e.stopPropagation();
+      detailFrom = 'search';
+      openNoteById(linkEl.dataset.noteId, 'search');
+    }
+  });
+}
+
+async function runAiSemanticSearch(rawQuery: string) {
+  const queryText = rawQuery.trim();
+  if (!queryText) {
+    showToast('검색어나 질문을 입력해주세요');
+    searchInput?.focus();
+    return;
+  }
+  if (!hasAiCredentials()) {
+    showToast('AI 검색을 위해 먼저 Gemini API 키를 설정해주세요 ✨');
+    openAiConfigModal();
+    return;
+  }
+
+  const token = ++aiSearchSessionToken;
+  isAiSearchActive = true;
+  clearTimeout(searchTimeout);
+  setHomeListVisible(false);
+  ensureAllNotesCache();
+
+  if (btnAiSearch) {
+    btnAiSearch.disabled = true;
+    btnAiSearch.innerHTML = '<span>⏳</span><span>의미 분석 중...</span>';
+  }
+
+  if (aiRagContainer) {
+    aiRagContainer.style.display = 'block';
+    aiRagContainer.innerHTML = `
+      <div class="ai-rag-card">
+        <div class="ai-rag-header">
+          <div class="ai-rag-title"><span>✨</span><span>AI 시맨틱 검색 & 종합·추론</span></div>
+          <span class="ai-rag-badge">Gemini Flash</span>
+        </div>
+        <div class="ai-rag-body" style="color:var(--text-light)">
+          🧠 질문을 임베딩(<code>text-embedding-004</code>)하여 연관 메모를 탐색하고 있습니다...
+        </div>
+      </div>
+    `;
+  }
+
+  if (searchResults) {
+    searchResults.style.display = 'block';
+    searchResults.innerHTML = `<div class="search-no-result" style="color:var(--text-light);font-size:13.5px;padding:20px 0">🔍 코사인 유사도 기반으로 연관 메모를 추출하는 중...</div>`;
+  }
+
+  try {
+    // 1단계: 코사인 유사도 상위 5개 메모 고속 추출
+    const { results, embeddedNotesCount } = await semanticSearchNotes(queryText, 5);
+    if (token !== aiSearchSessionToken) return;
+
+    if (results.length === 0) {
+      if (aiRagContainer) {
+        aiRagContainer.innerHTML = `
+          <div class="ai-rag-card">
+            <div class="ai-rag-header">
+              <div class="ai-rag-title"><span>✨</span><span>AI 검색 결과 안내</span></div>
+            </div>
+            <div class="ai-rag-body">
+              ${embeddedNotesCount === 0
+                ? '아직 임베딩 벡터가 저장된 메모가 없습니다. <b>⚙️ AI 설정 → 기존 메모 일괄 임베딩 생성</b>을 먼저 실행하시거나 새 메모를 저장해 주세요.'
+                : `"<b>${escHtml(queryText)}</b>"와(과) 의미적으로 연관도가 높은 메모를 찾지 못했습니다.`}
+            </div>
+          </div>
+        `;
+      }
+      if (searchResults) {
+        searchResults.innerHTML = `<div class="search-no-result">🔍 연관된 메모가 없어요</div>`;
+      }
+      return;
+    }
+
+    // 상위 메모 목록 렌더링 (유사도 % 배지 표시)
+    const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
+      <span style="font-size:12px;color:#4338CA;font-weight:700">✨ 시맨틱 연관 상위 ${results.length}개 메모 (코사인 유사도순)</span>
+      <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
+    </div>`;
+
+    const items = results.map(({ note, score, hasEmbedding }) => {
+      const noteCats = getNoteCategories(note);
+      const catBadgesHtml = noteCats.map(cid => {
+        const c = CATEGORIES[cid];
+        return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
+      }).join('');
+      const simPct = Math.round(score * 100);
+      const simBadge = `<span class="ai-sim-badge">${hasEmbedding ? `🎯 유사도 ${simPct}%` : `키워드 매칭`}</span>`;
+      const snippet = (note.body || '').substring(0, 200);
+      return `<div class="search-result-item" data-id="${escHtml(note.id || '')}" data-cat="${escHtml(note.category)}">
+        <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}${simBadge}</div>
+        ${catBadgesHtml}
+        ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
+        <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml(snippet)}</div>
+      </div>`;
+    }).join('');
+
+    if (searchResults) {
+      searchResults.innerHTML = header + items;
+    }
+
+    // 2단계: 상위 메모 본문 컨텍스트를 묶어 Gemini Flash RAG 종합·추론 호출
+    if (aiRagContainer) {
+      aiRagContainer.innerHTML = `
+        <div class="ai-rag-card">
+          <div class="ai-rag-header">
+            <div class="ai-rag-title"><span>🤖</span><span>AI 종합 및 추론 답변</span></div>
+            <span class="ai-rag-badge">상위 ${results.length}개 메모 참조 중...</span>
+          </div>
+          <div class="ai-rag-body" style="color:var(--text-light)">
+            ✍️ 추출된 상위 ${results.length}개 메모의 본문을 바탕으로 요약·비교·추론 답변을 작성하고 있습니다...
+          </div>
+        </div>
+      `;
+    }
+
+    const answerMarkdown = await generateRagAnswer(queryText, results);
+    if (token !== aiSearchSessionToken) return;
+
+    const renderedHtml = await parseMarkdownBody(answerMarkdown);
+    if (token !== aiSearchSessionToken) return;
+
+    if (aiRagContainer) {
+      aiRagContainer.innerHTML = `
+        <div class="ai-rag-card">
+          <div class="ai-rag-header">
+            <div class="ai-rag-title"><span>✨</span><span>AI 종합 및 추론 답변</span></div>
+            <span class="ai-rag-badge">참조 메모 ${results.length}건 · Gemini Flash</span>
+          </div>
+          <div class="ai-rag-body">${renderedHtml}</div>
+        </div>
+      `;
+    }
+  } catch (e: any) {
+    if (token !== aiSearchSessionToken) return;
+    if (aiRagContainer) {
+      aiRagContainer.innerHTML = `
+        <div class="ai-rag-card" style="border-color:var(--danger)">
+          <div class="ai-rag-header">
+            <div class="ai-rag-title" style="color:var(--danger)"><span>⚠️</span><span>AI 검색 오류</span></div>
+          </div>
+          <div class="ai-rag-body" style="color:var(--danger)">${escHtml(e?.message || '알 수 없는 오류가 발생했습니다.')}</div>
+        </div>
+      `;
+    }
+  } finally {
+    if (token === aiSearchSessionToken && btnAiSearch) {
+      btnAiSearch.disabled = false;
+      btnAiSearch.innerHTML = '<span>✨</span><span>AI 의미 검색 · 추론</span>';
+    }
+  }
+}
+
+if (btnAiSearch) {
+  btnAiSearch.onclick = () => {
+    const q = searchInput ? searchInput.value.trim() : '';
+    runAiSemanticSearch(q);
+  };
+}
+
 function doSearch(keyword: string, fromCacheSync = false) {
+  if (!fromCacheSync) {
+    isAiSearchActive = false;
+    if (aiRagContainer) {
+      aiRagContainer.style.display = 'none';
+      aiRagContainer.innerHTML = '';
+    }
+  }
   setHomeListVisible(false);
   searchResults.style.display = 'block';
   ensureSearchIndexReady();
@@ -1591,9 +1885,23 @@ async function saveNote() {
       .filter(img => !body.includes(img.url))
       .map(img => img.path || img.url);
 
+    // 요구사항 1: 메모 본문/제목/태그를 Google Gemini text-embedding-004로 임베딩 변환
+    const embedding = await tryGenerateNoteEmbedding({
+      title,
+      body,
+      category,
+      categories,
+      tag: tag || '',
+      tags,
+      keywords
+    });
+    const embeddingFields = embedding
+      ? { embedding, embeddingUpdatedAt: Timestamp.now() }
+      : {};
+
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
-      const updateData = { category, categories, title, body, tag, tags, images: allImages, pinned, pinnedAt, locked, keywords };
+      const updateData = { category, categories, title, body, tag, tags, images: allImages, pinned, pinnedAt, locked, keywords, ...embeddingFields };
       // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장 (카테고리 변경 시 양쪽 인덱스·카운트 원자적 갱신)
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
@@ -1617,13 +1925,19 @@ async function saveNote() {
 
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       appState.currentNote = { ...appState.currentNote, ...updateData };
+      upsertVectorNoteCache(appState.currentNote);
       openDetail(appState.currentNote, detailFrom);
     } else {
-      await createNoteWithIndex({
+      // 신규 메모 생성 및 임베딩 저장
+      const newNotePayload = { category, categories, tag, tags, title, body, images: allImages, pinned, pinnedAt, locked, keywords, ...embeddingFields };
+      const newNoteId = await createNoteWithIndex(newNotePayload);
+      upsertVectorNoteCache({ id: newNoteId, uid: appState.currentUser?.uid || '', ...newNotePayload } as any);
+      /*
         category, categories,
         tag, tags, title, body, images: allImages,
         pinned, pinnedAt, locked, keywords
       });
+      */
       if (unusedSessionInlinePaths.length) {
         deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
       }
@@ -1670,6 +1984,7 @@ if (delConfirm) {
       } else {
         // 메모 문서 + 인덱스 + 카운트를 단일 트랜잭션으로 삭제
         await deleteNoteWithIndex(id, target);
+        removeVectorNoteCache(id);
         // 메모 삭제가 확정된 뒤 Storage 이미지를 병렬로 정리 (UI는 기다리지 않음)
         const paths = collectImagePaths(target);
         if (paths.length) deleteImagesFromStorage(paths).catch(console.error);
@@ -1814,6 +2129,11 @@ initPinModal();
 // PWA HISTORY & BACK BUTTON
 // ─────────────────────────────────────────────
 initPwaNavigation((screen) => {
+  if (screen === 'ai-config-modal') {
+    closeAiConfigModal();
+    history.pushState(null, '', location.href);
+    return;
+  }
   if (screen === 'pin-modal') {
     closePinModalByBack();
     history.pushState(null, '', location.href);

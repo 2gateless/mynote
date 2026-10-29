@@ -289,6 +289,7 @@ function toIndexItem(id: string, data: any, shardCategory?: string): NoteIndexIt
     pinned: !!data.pinned,
     pinnedAt: data.pinnedAt || null,
     locked: !!data.locked,
+    embeddingUpdatedAt: data.embeddingUpdatedAt || null,
   };
 }
 

@@ -7,6 +7,7 @@ export function currentScreen(): string {
     return !!el && el.style.display !== 'none';
   };
   if (isShown('pin-modal')) return 'pin-modal';
+  if (isShown('ai-config-modal')) return 'ai-config-modal';
   if (isShown('img-viewer')) return 'img-viewer';
   if (isShown('note-link-modal')) return 'note-link-modal';
   if (isShown('note-modal')) return 'modal';

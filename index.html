@@ -86,12 +86,23 @@
 
     <!-- 검색 바 (기본 숨김 또는 슬라이드 방식) -->
     <div class="search-wrap" id="search-wrap" style="display: none;">
+      <div class="ai-search-toolbar" id="ai-search-toolbar">
+        <button type="button" class="btn-ai-search" id="btn-ai-search" title="의미 기반 시맨틱 검색 및 AI 종합·추론 실행">
+          <span>✨</span>
+          <span>AI 의미 검색 · 추론</span>
+        </button>
+        <button type="button" class="btn-ai-config" id="btn-open-ai-config" title="Gemini API 및 임베딩 설정">
+          <span>⚙️</span>
+          <span>AI 설정</span>
+        </button>
+      </div>
       <div class="search-box">
         <span>🔍</span>
-        <input class="search-input" id="search-input" placeholder="메모에서 검색" autocomplete="off">
+        <input class="search-input" id="search-input" placeholder="키워드 검색 또는 AI에게 자연어로 질문하세요" autocomplete="off">
         <button class="search-clear" id="search-clear">✕</button>
       </div>
     </div>
+    <div id="ai-rag-container" style="display:none"></div>
     <div id="search-results"></div>
 
     <!-- 최상단 구분 바 위 메타 (총 메모 개수) -->
@@ -334,6 +345,45 @@
     </div>
     <div class="pin-modal-actions" id="pin-modal-actions">
       <button type="button" class="btn-secondary" id="pin-btn-cancel" style="width:100%">취소</button>
+    </div>
+  </div>
+</div>
+
+<!-- AI 설정 & 일괄 임베딩 모달 -->
+<div class="modal-overlay" id="ai-config-modal" style="display:none">
+  <div class="modal ai-config-modal-box">
+    <div class="modal-handle"></div>
+    <h2 style="font-size:19px;font-weight:800;margin-bottom:6px">✨ AI 시맨틱 검색 · 추론 설정</h2>
+    <p style="font-size:12.5px;color:var(--text-light);line-height:1.5;margin-bottom:14px">
+      Google Gemini(<code>text-embedding-004</code> 및 <code>Gemini Flash</code>)를 사용하여 메모의 의미를 벡터로 저장하고 자연어 질문에 종합·추론 답변을 제공합니다.<br>
+      <span style="color:var(--sky-dark);font-weight:600">🔒 입력한 API 키는 공개 코드(GitHub)에 절대 노출되지 않으며 본인 기기 및 본인 전용 계정에만 안전하게 보관됩니다.</span>
+    </p>
+    <div class="form-group">
+      <label class="form-label">Gemini API Key <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style="font-size:11.5px;color:var(--sky-dark);font-weight:700;margin-left:6px;text-decoration:underline">키 발급받기 ↗</a></label>
+      <input type="password" class="form-input" id="ai-api-key-input" placeholder="AIzaSy... (Google AI Studio API 키)" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label class="form-label">보안 프록시 URL (선택사항 · Cloud Functions 사용 시)</label>
+      <input type="url" class="form-input" id="ai-proxy-url-input" placeholder="예: https://us-central1-mynote.cloudfunctions.net/aiProxy" autocomplete="off">
+    </div>
+    <div class="form-group" style="margin-bottom:14px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;font-weight:600">
+        <input type="checkbox" id="ai-sync-cloud-cb" checked style="width:16px;height:16px;accent-color:var(--sky-dark)">
+        <span>내 계정에 동기화 (PC·휴대폰에서 한 번만 입력해도 함께 사용)</span>
+      </label>
+    </div>
+    <div class="ai-backfill-box">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:var(--text)">🔄 기존 메모 일괄 임베딩 생성</div>
+          <div style="font-size:11.5px;color:var(--text-light);margin-top:2px" id="ai-backfill-status">임베딩이 없는 기존 메모들을 변환하여 Firestore에 저장합니다.</div>
+        </div>
+        <button type="button" class="btn-ai-backfill" id="btn-backfill-embeddings">일괄 변환 실행</button>
+      </div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button type="button" class="btn-secondary" id="ai-config-cancel">닫기</button>
+      <button type="button" class="btn-primary" id="ai-config-save">💾 설정 저장</button>
     </div>
   </div>
 </div>
