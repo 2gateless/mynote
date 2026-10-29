@@ -13,6 +13,8 @@ export interface Note {
   pinned?: boolean;
   pinnedAt?: Timestamp | null;
   locked?: boolean;
+  embedding?: number[];
+  embeddingUpdatedAt?: Timestamp | null;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   [key: string]: any;
