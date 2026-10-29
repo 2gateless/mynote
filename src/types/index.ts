@@ -8,6 +8,9 @@ export interface Note {
   tag: string;
   body: string;
   keywords?: string;
+  pinned?: boolean;
+  pinnedAt?: Timestamp | null;
+  locked?: boolean;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   [key: string]: any;
@@ -25,8 +28,10 @@ export interface NoteIndexItem {
   createdAt?: Timestamp | null;
   pinned?: boolean;
   pinnedAt?: Timestamp | null;
+  locked?: boolean;
 }
 
 export interface UserMeta {
   categoryCount: Record<string, number>;
+  lockPin?: string;
 }

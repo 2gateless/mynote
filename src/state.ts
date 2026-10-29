@@ -9,6 +9,7 @@ export const appState: any = {
   pendingImages: [],
   existingImages: [],
   allNotesCache: [],
+  lockPin: null as string | null,
 
   // allNotesCache 갱신 시 한 번만 계산해 두는 파생 데이터 (검색/링크 성능용)
   searchIndex: [] as { note: any; text: string }[], // 소문자화된 검색용 텍스트

@@ -855,11 +855,70 @@
   .note-link-item-title { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .note-link-item-tag { font-size: 11px; color: var(--sky-dark); background: var(--sky-light); padding: 1px 7px; border-radius: 6px; flex-shrink: 0; }
 
+  /* ── PIN LOCK MODAL ── */
+  .pin-modal-box {
+    background: var(--white); border-radius: 24px 24px 0 0; padding: 28px 24px 36px;
+    width: 100%; max-width: 420px; text-align: center;
+    box-shadow: 0 -8px 40px rgba(90,144,176,0.25);
+    animation: slideUp 0.25s ease;
+    border-top: 2px solid var(--border-color);
+  }
+  .pin-modal-icon { font-size: 38px; margin-bottom: 8px; }
+  .pin-modal-title { font-size: 20px; font-weight: 800; margin-bottom: 6px; color: var(--text); }
+  .pin-modal-desc { font-size: 13px; color: var(--text-light); margin-bottom: 18px; line-height: 1.5; }
+  .pin-dots {
+    display: flex; justify-content: center; gap: 16px; margin-bottom: 10px;
+  }
+  .pin-dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid var(--border-color); background: transparent;
+    transition: all 0.15s ease;
+  }
+  .pin-dot.filled {
+    background: var(--text); transform: scale(1.1);
+  }
+  .pin-dots.shake {
+    animation: pinShake 0.35s ease;
+  }
+  @keyframes pinShake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-8px); }
+    40%, 80% { transform: translateX(8px); }
+  }
+  .pin-error-msg {
+    min-height: 20px; font-size: 13px; font-weight: 600; color: var(--danger);
+    margin-bottom: 12px;
+  }
+  .pin-keypad {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+    max-width: 280px; margin: 0 auto 18px;
+  }
+  .pin-key {
+    height: 54px; border-radius: 14px; border: 1.5px solid var(--border-color);
+    background: var(--bg-base); color: var(--text);
+    font-size: 20px; font-weight: 700; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    user-select: none; -webkit-tap-highlight-color: transparent;
+    transition: background 0.12s, transform 0.08s;
+    font-family: inherit;
+  }
+  .pin-key:hover { background: #EFECE1; }
+  .pin-key:active { background: var(--sky-light); transform: scale(0.95); }
+  .pin-key-action { font-size: 14px; font-weight: 600; color: var(--text-light); background: var(--white); }
+  .pin-modal-actions { max-width: 280px; margin: 0 auto; }
+  .detail-lock-badge {
+    background: #EFECE1; color: var(--text); border: 1px solid var(--border-color);
+    border-radius: 8px; padding: 3px 10px; font-size: 12px; font-weight: 700;
+  }
+
   /* PC */
   @media (min-width: 640px) {
-    .modal, .del-modal, .share-modal, .note-link-modal {
+    .pin-modal-box { border: 2px solid var(--border-color); }
+    .modal, .del-modal, .share-modal, .note-link-modal, .pin-modal-box {
       border-radius: 24px; margin: auto; max-height: 85vh;
       animation: fadeIn 0.2s ease;
+
+
     }
     .modal-overlay { align-items: center; }
     @keyframes fadeIn { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }

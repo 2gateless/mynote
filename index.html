@@ -208,6 +208,15 @@
       </div>
     </div>
     <div class="form-group">
+      <label class="form-label">Lock 설정</label>
+      <label class="pin-toggle-wrap" id="lock-toggle-wrap" for="note-locked">
+        <input type="checkbox" id="note-locked">
+        <span class="pin-toggle-icon" id="lock-toggle-icon">🔓</span>
+        <span class="pin-toggle-label">메모 열람 시 4자리 암호 필요</span>
+        <span class="pin-toggle-status" id="lock-toggle-status">잠금 안 됨</span>
+      </label>
+    </div>
+    <div class="form-group">
       <label class="form-label">핀 고정</label>
       <label class="pin-toggle-wrap" id="pin-toggle-wrap" for="note-pinned">
         <input type="checkbox" id="note-pinned">
@@ -276,6 +285,40 @@
     </div>
     <div class="note-link-list" id="note-link-list"></div>
     <button class="btn-secondary" id="note-link-cancel" style="margin-top:12px;width:100%">취소</button>
+  </div>
+</div>
+
+<!-- PIN Lock Modal (초기 4자리 암호 설정 & 잠금 메모 열람 인증) -->
+<div class="modal-overlay" id="pin-modal" style="display:none">
+  <div class="pin-modal-box">
+    <div class="modal-handle"></div>
+    <div class="pin-modal-icon" id="pin-modal-icon">🔒</div>
+    <h2 class="pin-modal-title" id="pin-modal-title">잠금 암호 입력</h2>
+    <p class="pin-modal-desc" id="pin-modal-desc">4자리 숫자 암호를 입력해주세요</p>
+    <div class="pin-dots" id="pin-dots">
+      <span class="pin-dot"></span>
+      <span class="pin-dot"></span>
+      <span class="pin-dot"></span>
+      <span class="pin-dot"></span>
+    </div>
+    <div class="pin-error-msg" id="pin-error-msg"></div>
+    <div class="pin-keypad" id="pin-keypad">
+      <button type="button" class="pin-key" data-digit="1">1</button>
+      <button type="button" class="pin-key" data-digit="2">2</button>
+      <button type="button" class="pin-key" data-digit="3">3</button>
+      <button type="button" class="pin-key" data-digit="4">4</button>
+      <button type="button" class="pin-key" data-digit="5">5</button>
+      <button type="button" class="pin-key" data-digit="6">6</button>
+      <button type="button" class="pin-key" data-digit="7">7</button>
+      <button type="button" class="pin-key" data-digit="8">8</button>
+      <button type="button" class="pin-key" data-digit="9">9</button>
+      <button type="button" class="pin-key pin-key-action" id="pin-key-reset" title="전체 지우기">초기화</button>
+      <button type="button" class="pin-key" data-digit="0">0</button>
+      <button type="button" class="pin-key pin-key-action" id="pin-key-back" title="한 글자 지우기">⌫</button>
+    </div>
+    <div class="pin-modal-actions" id="pin-modal-actions">
+      <button type="button" class="btn-secondary" id="pin-btn-cancel" style="width:100%">취소</button>
+    </div>
   </div>
 </div>
 

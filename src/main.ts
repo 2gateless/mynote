@@ -39,6 +39,16 @@ import {
 } from './utils/image';
 import { showToast } from './utils/toast';
 import { initImageViewer } from './ui/imageViewer';
+import {
+  initPinModal,
+  verifyLockPinForNote,
+  handleUserMetaPinSync,
+  scheduleInitialPinSetupCheck,
+  clearStoredLockPin,
+  getStoredLockPin,
+  openPinModal,
+  closePinModalByBack
+} from './ui/pinModal';
 import { 
   showAppScreen, 
   showRootScreen, 
@@ -94,6 +104,7 @@ function clearAuthCache() {
     localStorage.removeItem('mynote_user_cache');
     localStorage.removeItem('mynote_counts_cache');
     localStorage.removeItem('mynote_search_cache');
+    clearStoredLockPin();
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
 }
@@ -323,6 +334,7 @@ initAuthListener(
     renderUserBar(user);
     showRootScreen('app');
     loadAllCounts();
+    scheduleInitialPinSetupCheck();
 
     // 사용자가 인증 완료 전에 이미 카테고리 목록을 열었거나 대기 중인 경우 즉시 실시간 동기화 시작
     const targetCat = pendingListCat || (currentScreen() === 'list' ? appState.currentCat : null);
@@ -391,7 +403,8 @@ if (btnDeniedSignout) btnDeniedSignout.onclick = handleSignOut;
 // ── COUNTS
 function loadAllCounts() {
   if (metaUnsubscribe) metaUnsubscribe();
-  metaUnsubscribe = subscribeUserMeta((categoryCount) => {
+  metaUnsubscribe = subscribeUserMeta((categoryCount, lockPin, fromCache) => {
+    handleUserMetaPinSync(lockPin, fromCache);
     lastCounts = categoryCount;
     try {
       localStorage.setItem('mynote_counts_cache', JSON.stringify(categoryCount));
@@ -401,13 +414,33 @@ function loadAllCounts() {
 }
 
 // ── 메모 ID로 전체 메모를 불러와 상세 화면 열기 (목록·검색·메모 링크 공통)
+// 캐시된 인덱스에서 잠금 여부를 즉시 확인하는 헬퍼
+function isNoteLockedInCache(noteId: string): boolean {
+  const inList = listNotesCache.find(n => n.id === noteId);
+  if (inList && inList.locked !== undefined) return !!inList.locked;
+  const inAll = (appState.allNotesCache as NoteIndexItem[] || []).find(n => n.id === noteId);
+  if (inAll && inAll.locked !== undefined) return !!inAll.locked;
+  return false;
+}
+
+// ── 메모 ID로 전체 메모를 불러와 상세 화면 열기 (목록·검색·메모 링크 공통)
 async function openNoteById(noteId: string, from: string) {
+  let verified = false;
+  if (isNoteLockedInCache(noteId)) {
+    const ok = await verifyLockPinForNote();
+    if (!ok) return;
+    verified = true;
+  }
   const reqToken = ++detailRenderToken;
   try {
     const note = await getSingleNote(noteId);
     // 네트워크 응답 대기 중 다른 메모 요청이 들어왔다면 이전 결과는 무시
     if (reqToken !== detailRenderToken) return;
     if (!note) { showToast('해당 메모를 찾을 수 없어요'); return; }
+    if (note.locked && !verified) {
+      const ok = await verifyLockPinForNote();
+      if (!ok || reqToken !== detailRenderToken) return;
+    }
     appState.currentCat = note.category;
     const listTitle = $('list-title');
     if (listTitle) {
@@ -654,10 +687,10 @@ function renderList() {
     <div class="note-list-item${note.pinned ? ' pinned' : ''}" data-id="${escHtml(note.id)}">
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
-        <div class="note-list-title">${escHtml(note.title || '제목 없음')}</div>
+        <div class="note-list-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
         <div class="note-list-date">${note.tag ? tagChipHtml(note.category, note.tag, 'note-list-tag', 'color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer') : ''}${fmtDate(note.createdAt)}</div>
       </div>
-      ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : '<span class="note-list-arrow">›</span>'}
+      ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : (note.locked ? '<span class="pin-badge" title="잠금">🔒</span>' : '<span class="note-list-arrow">›</span>')}
     </div>`).join('');
 }
 
@@ -721,6 +754,7 @@ async function openDetail(note: any, from?: string, existingToken?: number) {
     <div class="detail-meta">
       <span class="detail-cat-badge">${cat?.icon || ''} ${cat?.name || ''}</span>
       ${note.tag ? tagChipHtml(note.category, note.tag, 'detail-tag-badge') : ''}
+      ${note.locked ? '<span class="detail-lock-badge">🔒 잠금</span>' : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
     <div class="detail-body" style="background: ${note.pinned ? '#F2EFE6' : 'var(--white)'}">${parsedBody}</div>
@@ -826,7 +860,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
       .map(entry => entry.note);
 
     // 백그라운드 캐시 동기화로 호출되었을 때 현재 화면에 표시된 결과 목록과 동일하면 DOM 재생성 생략 (클릭 위치 어긋남 방지)
-    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${n.category || ''}|${n.tag || ''}|${n.snippet || ''}`).join(';;')}`;
+    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${n.category || ''}|${n.tag || ''}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
     if (fromCacheSync && signature === lastRenderedSearchSignature) {
       return;
     }
@@ -845,10 +879,10 @@ function doSearch(keyword: string, fromCacheSync = false) {
     const items = results.map(note => {
       const cat = CATEGORIES[note.category];
       return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
-        <div class="search-result-title">${escHtml(note.title || '제목 없음')}</div>
+        <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
         <span class="search-result-cat">${cat?.icon || ''} ${cat?.name || ''}</span>
         ${note.tag ? `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(note.tag)}</span>` : ''}
-        <div class="search-result-body">${escHtml(note.snippet || '')}</div>
+        <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml(note.snippet || '')}</div>
       </div>`;
     }).join('');
     // 한 번의 innerHTML 대입 + 컨테이너 이벤트 위임
@@ -1176,6 +1210,19 @@ if (tagOptionsEl) {
   });
 }
 
+function setLockToggleUI(isLocked: boolean) {
+  const cb = $('note-locked') as HTMLInputElement;
+  const wrap = $('lock-toggle-wrap');
+  const icon = $('lock-toggle-icon');
+  const status = $('lock-toggle-status');
+  if (cb) cb.checked = isLocked;
+  if (icon) icon.textContent = isLocked ? '🔒' : '🔓';
+  if (wrap && status) {
+    wrap.classList.toggle('active', isLocked);
+    status.textContent = isLocked ? '🔒 잠금 설정됨' : '잠금 안 됨';
+  }
+}
+
 function setPinToggleUI(isPinned: boolean) {
   const cb = $('note-pinned') as HTMLInputElement;
   const wrap = $('pin-toggle-wrap');
@@ -1230,6 +1277,7 @@ function openAddModal() {
   renderCategorySelect(catId);
   renderTagOptions(catId, appState.currentTag || null);
   setPinToggleUI(false);
+  setLockToggleUI(false);
   setDisplay('note-modal', 'flex');
 }
 
@@ -1244,6 +1292,7 @@ function openEditModal(note: any) {
   renderCategorySelect(note.category);
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
+  setLockToggleUI(!!note.locked);
   setDisplay('note-modal', 'flex');
 }
 
@@ -1349,6 +1398,7 @@ async function saveNote() {
   const bodyEl = $('note-body') as HTMLTextAreaElement;
   const tagRadio = document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement;
   const pinnedEl = $('note-pinned') as HTMLInputElement;
+  const lockedEl = $('note-locked') as HTMLInputElement;
   const keywordsEl = $('note-keywords') as HTMLInputElement;
   
   const title = titleEl ? titleEl.value.trim() : '';
@@ -1356,6 +1406,7 @@ async function saveNote() {
   const category = noteCategoryEl?.value || appState.currentCat;
   const tag = tagRadio ? tagRadio.value : null;
   const pinned = pinnedEl ? pinnedEl.checked : false;
+  const locked = lockedEl ? lockedEl.checked : false;
   const keywords = keywordsEl ? keywordsEl.value.trim() : '';
   
   if (!title) { showToast('제목을 입력해주세요'); return; }
@@ -1394,7 +1445,7 @@ async function saveNote() {
 
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
-      const updateData = { category, title, body, tag, images: allImages, pinned, pinnedAt, keywords };
+      const updateData = { category, title, body, tag, images: allImages, pinned, pinnedAt, locked, keywords };
       // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장 (카테고리 변경 시 양쪽 인덱스·카운트 원자적 갱신)
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
@@ -1423,7 +1474,7 @@ async function saveNote() {
       await createNoteWithIndex({
         category,
         tag, title, body, images: allImages,
-        pinned, pinnedAt, keywords
+        pinned, pinnedAt, locked, keywords
       });
       if (unusedSessionInlinePaths.length) {
         deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
@@ -1568,6 +1619,21 @@ function stopRecording() {
   }
 }
 
+// Lock 토글 UI 바인딩 (암호가 아직 미설정된 경우 설정 모달 먼저 호출)
+const noteLockedCb = $('note-locked') as HTMLInputElement | null;
+if (noteLockedCb) {
+  noteLockedCb.addEventListener('change', async () => {
+    if (noteLockedCb.checked && !getStoredLockPin()) {
+      const ok = await openPinModal('setup', true);
+      if (!ok) {
+        setLockToggleUI(false);
+        return;
+      }
+    }
+    setLockToggleUI(noteLockedCb.checked);
+  });
+}
+
 // Pin 토글 UI 바인딩 (<label for="note-pinned">의 기본 동작과 중복 반전되지 않도록 change 이벤트 사용)
 const notePinnedCb = $('note-pinned') as HTMLInputElement | null;
 if (notePinnedCb) {
@@ -1594,11 +1660,17 @@ if (noteModal) {
 
 // ── 이미지 뷰어 / 컨텍스트 메뉴 초기화 (src/ui/imageViewer.ts)
 initImageViewer();
+initPinModal();
 
 // ─────────────────────────────────────────────
 // PWA HISTORY & BACK BUTTON
 // ─────────────────────────────────────────────
 initPwaNavigation((screen) => {
+  if (screen === 'pin-modal') {
+    closePinModalByBack();
+    history.pushState(null, '', location.href);
+    return;
+  }
   if (screen === 'img-viewer') {
     appState.closeImageViewer?.();
     history.pushState(null, '', location.href);
