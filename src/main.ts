@@ -1216,7 +1216,7 @@ function setLockToggleUI(isLocked: boolean) {
   if (icon) icon.textContent = isLocked ? '🔒' : '🔓';
   if (wrap && status) {
     wrap.classList.toggle('active', isLocked);
-    status.textContent = isLocked ? '🔒 잠금 설정됨' : '잠금 안 됨';
+    status.textContent = isLocked ? '🔒 잠금됨' : '해제';
   }
 }
 
@@ -1227,7 +1227,7 @@ function setPinToggleUI(isPinned: boolean) {
   if (cb) cb.checked = isPinned;
   if (wrap && status) {
     wrap.classList.toggle('active', isPinned);
-    status.textContent = isPinned ? '📌 고정됨' : '고정 안 됨';
+    status.textContent = isPinned ? '📌 고정됨' : '해제';
   }
 }
 

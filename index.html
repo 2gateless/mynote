@@ -203,27 +203,34 @@
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button class="voice-btn" id="voice-btn" style="flex:1;min-width:120px">🎤 음성 입력</button>
         <button class="voice-btn" id="inline-img-btn" style="flex:1;min-width:120px;white-space:nowrap">🖼️ 이미지 삽입</button>
-        <button class="voice-btn" id="note-link-btn" style="flex:1;min-width:120px;white-space:nowrap">📝 메모 링크</button>
+
         <input type="file" id="inline-img-input" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif" style="display:none">
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Lock 설정</label>
-      <label class="pin-toggle-wrap" id="lock-toggle-wrap" for="note-locked">
-        <input type="checkbox" id="note-locked">
-        <span class="pin-toggle-icon" id="lock-toggle-icon">🔓</span>
-        <span class="pin-toggle-label">메모 열람 시 4자리 암호 필요</span>
-        <span class="pin-toggle-status" id="lock-toggle-status">잠금 안 됨</span>
-      </label>
-    </div>
-    <div class="form-group">
-      <label class="form-label">핀 고정</label>
-      <label class="pin-toggle-wrap" id="pin-toggle-wrap" for="note-pinned">
-        <input type="checkbox" id="note-pinned">
-        <span class="pin-toggle-icon">📌</span>
-        <span class="pin-toggle-label">중요 메모로 최상단에 고정</span>
-        <span class="pin-toggle-status" id="pin-toggle-status">고정 안 됨</span>
-      </label>
+      <div class="note-tools-row2">
+        <button type="button" class="compact-tool-btn" id="note-link-btn">
+          <div class="compact-tool-top"><span>📝</span><span>메모링크</span></div>
+          <span class="compact-tool-sub">링크 삽입</span>
+        </button>
+        <label class="compact-tool-btn" id="lock-toggle-wrap" for="note-locked">
+          <input type="checkbox" id="note-locked">
+          <div class="compact-tool-top"><span id="lock-toggle-icon">🔓</span><span>Lock</span></div>
+          <span class="compact-tool-sub" id="lock-toggle-status">해제</span>
+        </label>
+        <label class="compact-tool-btn" id="pin-toggle-wrap" for="note-pinned">
+          <input type="checkbox" id="note-pinned">
+          <div class="compact-tool-top"><span>📌</span><span>핀고정</span></div>
+          <span class="compact-tool-sub" id="pin-toggle-status">해제</span>
+        </label>
+      </div>
+
+
+
+
+
+
+
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" id="btn-cancel">취소</button>
