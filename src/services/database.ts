@@ -358,24 +358,17 @@ export async function rebuildCategoryIndex(catId: string) {
   await setDoc(metaRefOf(uid), { categoryCount: { [catId]: snap.size } }, { merge: true });
 }
 
-export function subscribeUserMeta(
-  onMetaChange: (categoryCount: Record<string, number>, lockPin: string | null, fromCache: boolean) => void
-) {
+export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, number>) => void) {
   if (!appState.currentUser) return () => {};
-  return onSnapshot(metaRefOf(appState.currentUser.uid), { includeMetadataChanges: true }, snap => {
-    const data = snap.exists() ? snap.data() : {};
-    const categoryCount = data.categoryCount || {};
-    const lockPin = typeof data.lockPin === 'string' && /^\d{4}$/.test(data.lockPin) ? data.lockPin : null;
-    onMetaChange(categoryCount, lockPin, snap.metadata.fromCache);
+  return onSnapshot(metaRefOf(appState.currentUser.uid), snap => {
+    const categoryCount = snap.exists() ? (snap.data().categoryCount || {}) : {};
+    onMetaChange(categoryCount);
 
 
   });
 }
 
-export async function saveUserLockPin(pin: string) {
-  const uid = requireUid();
-  await setDoc(metaRefOf(uid), { lockPin: pin }, { merge: true });
-}
+
 
 // 9개 카테고리 인덱스를 모두 구독하여 병합 (검색·메모 링크용)
 export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => void) {

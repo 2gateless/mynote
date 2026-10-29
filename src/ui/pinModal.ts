@@ -1,6 +1,6 @@
 // ── 4자리 숫자 Lock 암호 설정(최초 1회 입력 + 1회 확인) 및 잠금 메모 열람 인증 모달 모듈
+// ※ 암호(PIN)는 서버(Firestore)로 전송·저장하지 않고 오직 해당 기기(localStorage)에만 보관합니다.
 import { appState } from '../state';
-import { saveUserLockPin } from '../services/database';
 import { showToast } from '../utils/toast';
 
 const LOCK_PIN_STORAGE_KEY = 'mynote_lock_pin';
@@ -33,61 +33,19 @@ export function getStoredLockPin(): string | null {
   return null;
 }
 
-export function setStoredLockPin(pin: string, syncToRemote = true) {
+export function setStoredLockPin(pin: string) {
   if (!/^\d{4}$/.test(pin)) return;
   appState.lockPin = pin;
   try {
     localStorage.setItem(LOCK_PIN_STORAGE_KEY, pin);
   } catch (e) {}
-  if (syncToRemote && appState.currentUser) {
-    saveUserLockPin(pin).catch(err => console.warn('Lock 암호 서버 저장 실패:', err));
-  }
 }
 
-export function clearStoredLockPin() {
-  appState.lockPin = null;
-  hasTriggeredInitialSetup = false;
-  try {
-    localStorage.removeItem(LOCK_PIN_STORAGE_KEY);
-  } catch (e) {}
-}
-
-// Firestore user_meta 구독 결과와 로컬 Lock 암호를 동기화하고, 암호가 없으면 앱 초기 설정 모달을 띄움
-export function handleUserMetaPinSync(remotePin: string | null, fromCache: boolean) {
-  if (remotePin && /^\d{4}$/.test(remotePin)) {
-    setStoredLockPin(remotePin, false);
-    // 만약 초기 설정 모달이 떠 있는 상태에서 아직 입력 전이라면 자동으로 닫음
-    if (isOpen && currentMode === 'setup' && !allowCancel && currentInput.length === 0 && setupStep === 1) {
-      finishModal(true);
-    }
-    return;
-  }
-
-  const localPin = getStoredLockPin();
-  if (localPin) {
-    // 로컬에는 있으나 서버 메타에 아직 없는 경우 서버로 보정 저장
-    if (!fromCache && appState.currentUser) {
-      saveUserLockPin(localPin).catch(err => console.warn('Lock 암호 동기화 실패:', err));
-    }
-    return;
-  }
-
-  // 서버 스냅샷에서도 암호가 없는 것이 확인되면 앱 실행 초기 1회 암호 설정 모달 표시
-  if (!fromCache && !hasTriggeredInitialSetup) {
-    hasTriggeredInitialSetup = true;
-    openPinModal('setup', false);
-  }
-}
-
-// 로그인 직후 메타데이터 응답 지연/미존재 상황에서도 초기 암호 미설정 시 설정창이 뜨도록 보장
+// 이 기기(브라우저/앱)에 저장된 Lock 암호가 없으면 앱 실행 초기에 1회 설정 모달을 표시
 export function scheduleInitialPinSetupCheck() {
   if (getStoredLockPin() || hasTriggeredInitialSetup) return;
-  setTimeout(() => {
-    if (appState.currentUser && !getStoredLockPin() && !hasTriggeredInitialSetup) {
-      hasTriggeredInitialSetup = true;
-      openPinModal('setup', false);
-    }
-  }, 1200);
+  hasTriggeredInitialSetup = true;
+  openPinModal('setup', false);
 }
 
 function updateModalTexts() {
@@ -101,7 +59,7 @@ function updateModalTexts() {
     if (setupStep === 1) {
       if (iconEl) iconEl.textContent = '🔐';
       if (titleEl) titleEl.textContent = 'Lock 암호 초기 설정';
-      if (descEl) descEl.textContent = '잠금 메모에 사용할 4자리 숫자를 입력해주세요';
+      if (descEl) descEl.textContent = '이 기기에서 잠금 메모에 사용할 4자리 숫자를 입력해주세요';
       if (actionsWrap && cancelBtn) {
         if (allowCancel) {
           actionsWrap.style.display = 'block';
@@ -146,7 +104,7 @@ function setErrorMsg(msg: string, shake = false) {
     const dotsWrap = $('pin-dots');
     if (dotsWrap) {
       dotsWrap.classList.remove('shake');
-      void dotsWrap.offsetWidth; // 리플로우 강제 후 애니메이션 재시작
+      void dotsWrap.offsetWidth;
       dotsWrap.classList.add('shake');
     }
   }
@@ -170,7 +128,6 @@ function finishModal(result: boolean) {
 }
 
 export function openPinModal(mode: PinModalMode, canCancel = true): Promise<boolean> {
-  // 이미 열려있는 모달이 있다면 이전 요청을 취소 처리
   if (pendingResolve) {
     const prev = pendingResolve;
     pendingResolve = null;
@@ -197,11 +154,10 @@ export function openPinModal(mode: PinModalMode, canCancel = true): Promise<bool
   });
 }
 
-// 잠긴 메모를 열기 전에 호출: 저장된 4자리 암호와 일치하는지 확인
+// 잠긴 메모를 열기 전에 호출: 기기에 저장된 4자리 암호와 일치하는지 확인
 export async function verifyLockPinForNote(): Promise<boolean> {
   const savedPin = getStoredLockPin();
   if (!savedPin) {
-    // 만약 아직 암호가 설정되지 않은 상태라면 설정(입력+컨펌)을 먼저 진행
     return openPinModal('setup', true);
   }
   return openPinModal('verify', true);
@@ -211,7 +167,6 @@ export async function verifyLockPinForNote(): Promise<boolean> {
 export function closePinModalByBack() {
   if (!isOpen) return;
   if (currentMode === 'setup' && setupStep === 2) {
-    // 확인 단계에서 뒤로가기를 누르면 1단계(처음 입력)로 복귀
     setupStep = 1;
     firstPin = '';
     currentInput = '';
@@ -244,11 +199,10 @@ function handleFourDigitsEntered() {
         renderDots();
       } else {
         if (currentInput === firstPin) {
-          setStoredLockPin(currentInput, true);
-          showToast('4자리 잠금 암호가 저장되었어요 🔒');
+          setStoredLockPin(currentInput);
+          showToast('이 기기에 4자리 잠금 암호가 저장되었어요 🔒');
           finishModal(true);
         } else {
-          // 불일치 시 1단계로 초기화하여 다시 입력받음
           setupStep = 1;
           firstPin = '';
           currentInput = '';
@@ -261,7 +215,7 @@ function handleFourDigitsEntered() {
       return;
     }
 
-    // verify 모드: 저장된 4자리 암호와 비교
+    // verify 모드: 이 기기에 저장된 4자리 암호와 비교
     const savedPin = getStoredLockPin();
     if (savedPin && currentInput === savedPin) {
       finishModal(true);
@@ -300,7 +254,6 @@ function resetDigits() {
 }
 
 export function initPinModal() {
-  // 초기 부팅 시 로컬 스토리지 캐시 복원
   getStoredLockPin();
 
   const keypad = $('pin-keypad');
@@ -333,7 +286,6 @@ export function initPinModal() {
     });
   }
 
-  // 물리 키보드 숫자 입력 지원 (PC 및 외부 키보드)
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (!isOpen) return;
     if (e.key >= '0' && e.key <= '9') {

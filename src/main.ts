@@ -42,9 +42,7 @@ import { initImageViewer } from './ui/imageViewer';
 import {
   initPinModal,
   verifyLockPinForNote,
-  handleUserMetaPinSync,
   scheduleInitialPinSetupCheck,
-  clearStoredLockPin,
   getStoredLockPin,
   openPinModal,
   closePinModalByBack
@@ -104,7 +102,6 @@ function clearAuthCache() {
     localStorage.removeItem('mynote_user_cache');
     localStorage.removeItem('mynote_counts_cache');
     localStorage.removeItem('mynote_search_cache');
-    clearStoredLockPin();
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
 }
@@ -220,6 +217,7 @@ function applyEarlyCache() {
     const rawUser = localStorage.getItem('mynote_user_cache');
     if (rawUser) {
       renderUserBar(JSON.parse(rawUser));
+      scheduleInitialPinSetupCheck();
       showRootScreen('app');
     }
     const rawCounts = localStorage.getItem('mynote_counts_cache');
@@ -403,8 +401,7 @@ if (btnDeniedSignout) btnDeniedSignout.onclick = handleSignOut;
 // ── COUNTS
 function loadAllCounts() {
   if (metaUnsubscribe) metaUnsubscribe();
-  metaUnsubscribe = subscribeUserMeta((categoryCount, lockPin, fromCache) => {
-    handleUserMetaPinSync(lockPin, fromCache);
+  metaUnsubscribe = subscribeUserMeta((categoryCount) => {
     lastCounts = categoryCount;
     try {
       localStorage.setItem('mynote_counts_cache', JSON.stringify(categoryCount));
