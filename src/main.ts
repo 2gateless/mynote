@@ -771,7 +771,9 @@ async function openDetail(note: any, from?: string, existingToken?: number) {
 
   const content = $('detail-content');
   if (!content) return;
-  const imgs = note.images || [];
+  // 본문(note.body) 내에 이미 인라인 마크다운으로 포함된 이미지는 하단 작은 썸네일(detail-images)에 중복 표시하지 않음
+  const rawBodyText = note.body || '';
+  const imgs = (note.images || []).filter((i: any) => i?.url && !rawBodyText.includes(i.url));
   // 이미지 클릭은 imageViewer 모듈의 이벤트 위임에서 처리
   const imgHtml = imgs.length > 0
     ? `<div class="detail-images">${imgs.map((i: any) => `<img class="detail-img" src="${escHtml(i.url)}" alt="이미지">`).join('')}</div>`
@@ -1066,7 +1068,11 @@ async function runAiSemanticSearch(rawQuery: string) {
       }).join('');
       const simPct = Math.round(score * 100);
       const simBadge = `<span class="ai-sim-badge">${hasEmbedding ? `🎯 유사도 ${simPct}%` : `키워드 매칭`}</span>`;
-      const snippet = (note.body || '').substring(0, 200);
+      const snippet = (note.body || '')
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 120);
       return `<div class="search-result-item" data-id="${escHtml(note.id || '')}" data-cat="${escHtml(note.category)}">
         <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}${simBadge}</div>
         ${catBadgesHtml}
@@ -1097,7 +1103,8 @@ async function runAiSemanticSearch(rawQuery: string) {
     const answerMarkdown = await generateRagAnswer(queryText, results);
     if (token !== aiSearchSessionToken) return;
 
-    const renderedHtml = await parseMarkdownBody(answerMarkdown);
+    const cleanAnswer = answerMarkdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
+    const renderedHtml = await parseMarkdownBody(cleanAnswer);
     if (token !== aiSearchSessionToken) return;
 
     if (aiRagContainer) {
@@ -1195,7 +1202,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
         <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
         ${catBadgesHtml}
         ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
-        <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml(note.snippet || '')}</div>
+        <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml((note.snippet || '').replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ').replace(/\s+/g, ' ').trim())}</div>
       </div>`;
     }).join('');
     // 한 번의 innerHTML 대입 + 컨테이너 이벤트 위임
