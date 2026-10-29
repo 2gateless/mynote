@@ -86,6 +86,10 @@ function setDisplay(id: string, value: string) {
 }
 
 function clearAuthCache() {
+  if (persistCacheTimer) {
+    clearTimeout(persistCacheTimer);
+    persistCacheTimer = null;
+  }
   try {
     localStorage.removeItem('mynote_user_cache');
     localStorage.removeItem('mynote_counts_cache');
@@ -154,6 +158,27 @@ function renderUserBar(user: any) {
 // 로컬 스토리지 조기 캐시 복원 & 지능형 검색 인덱스 준비
 // ─────────────────────────────────────────────
 let isSearchIndexReady = false;
+let persistCacheTimer: any = null;
+
+// 검색 캐시 localStorage 직렬화를 유휴 시간으로 지연하여 메인 스레드 블로킹 방지
+function schedulePersistSearchCache(notes: NoteIndexItem[]) {
+  if (persistCacheTimer) clearTimeout(persistCacheTimer);
+  persistCacheTimer = setTimeout(() => {
+    persistCacheTimer = null;
+    const writeCache = () => {
+      try {
+        localStorage.setItem('mynote_search_cache', JSON.stringify(notes));
+      } catch (e) {
+        console.warn('검색 캐시 로컬 저장 실패:', e);
+      }
+    };
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(writeCache, { timeout: 2000 });
+    } else {
+      writeCache();
+    }
+  }, 400);
+}
 
 // 로컬 스토리지의 검색 캐시를 복원하는 함수 (필요 시 즉시 동기 실행 가능)
 function ensureSearchIndexReady(): boolean {
@@ -249,11 +274,7 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
   appState.sortedNotesByTitle = null; // 메모 링크 모달을 열 때 지연 계산
 
   if (persist) {
-    try {
-      localStorage.setItem('mynote_search_cache', JSON.stringify(notes));
-    } catch (e) {
-      console.warn('검색 캐시 로컬 저장 실패:', e);
-    }
+    schedulePersistSearchCache(notes);
   }
 
   // 사용자가 이미 검색어를 입력해 둔 상태이고 터치/클릭 중이 아니라면 변경 시에만 검색 결과 갱신
@@ -321,6 +342,7 @@ initAuthListener(
   },
   (email) => {
     clearAuthCache();
+    stopAllSubscriptions();
     const el = $('denied-email');
     if (el) el.textContent = email || '';
     showRootScreen('denied-screen');
@@ -1096,6 +1118,27 @@ if (noteLinkSearchInput) {
   });
 }
 
+const noteCategoryEl = $('note-category') as HTMLSelectElement | null;
+
+function renderCategorySelect(selectedCatId: string) {
+  if (!noteCategoryEl) return;
+  noteCategoryEl.innerHTML = Object.entries(CATEGORIES)
+    .map(([id, info]) => `<option value="${escHtml(id)}"${id === selectedCatId ? ' selected' : ''}>${info.icon} ${escHtml(info.name)}</option>`)
+    .join('');
+  noteCategoryEl.value = selectedCatId;
+}
+
+if (noteCategoryEl) {
+  noteCategoryEl.addEventListener('change', () => {
+    const newCat = noteCategoryEl.value;
+    renderTagOptions(newCat, null);
+    if (!appState.editingNoteId) {
+      const modalTitle = $('modal-title');
+      if (modalTitle) modalTitle.textContent = `새 메모 — ${CATEGORIES[newCat]?.name || ''}`;
+    }
+  });
+}
+
 function renderTagOptions(catId: string, selectedTag: string | null) {
   const tg = $('tag-group');
   const to = $('tag-options');
@@ -1104,7 +1147,7 @@ function renderTagOptions(catId: string, selectedTag: string | null) {
     tg.style.display = 'block';
     to.innerHTML = SUB_TAGS[catId].map((tag) => `
       <label style="display:inline-flex">
-        <input type="radio" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${tag === selectedTag ? 'checked' : ''}>
+        <input type="radio" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${tag === selectedTag ? 'checked data-was-checked="true"' : ''}>
         <span class="tag-label">${escHtml(tag)}</span>
       </label>
     `).join('');
@@ -1112,6 +1155,25 @@ function renderTagOptions(catId: string, selectedTag: string | null) {
     tg.style.display = 'none';
     to.innerHTML = '';
   }
+}
+
+// 이미 선택된 태그 라디오를 다시 클릭하면 선택 해제 허용
+const tagOptionsEl = $('tag-options');
+if (tagOptionsEl) {
+  tagOptionsEl.addEventListener('click', (e) => {
+    const radio = (e.target as HTMLElement).closest('label')?.querySelector('input.tag-radio') as HTMLInputElement | null;
+    if (!radio) return;
+    // label 클릭으로 인해 radio에 도달한 click 이벤트에서 토글 처리
+    if ((e.target as HTMLElement) !== radio) return;
+    if (radio.dataset.wasChecked === 'true') {
+      radio.checked = false;
+      radio.dataset.wasChecked = 'false';
+    } else {
+      tagOptionsEl.querySelectorAll<HTMLInputElement>('input.tag-radio').forEach(r => {
+        r.dataset.wasChecked = r === radio ? 'true' : 'false';
+      });
+    }
+  });
 }
 
 function setPinToggleUI(isPinned: boolean) {
@@ -1163,8 +1225,10 @@ function openAddModal() {
   appState.existingImages = [];
   sessionUploadedInlineImages = [];
   resetInlineImgBtn();
-  fillNoteForm('', '', '', `새 메모 — ${CATEGORIES[appState.currentCat]?.name || ''}`);
-  renderTagOptions(appState.currentCat, appState.currentTag || null);
+  const catId = appState.currentCat || Object.keys(CATEGORIES)[0];
+  fillNoteForm('', '', '', `새 메모 — ${CATEGORIES[catId]?.name || ''}`);
+  renderCategorySelect(catId);
+  renderTagOptions(catId, appState.currentTag || null);
   setPinToggleUI(false);
   setDisplay('note-modal', 'flex');
 }
@@ -1177,6 +1241,7 @@ function openEditModal(note: any) {
   sessionUploadedInlineImages = [];
   resetInlineImgBtn();
   fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
+  renderCategorySelect(note.category);
   renderTagOptions(note.category, note.tag || null);
   setPinToggleUI(!!note.pinned);
   setDisplay('note-modal', 'flex');
@@ -1288,6 +1353,7 @@ async function saveNote() {
   
   const title = titleEl ? titleEl.value.trim() : '';
   const body = bodyEl ? bodyEl.value.trim() : '';
+  const category = noteCategoryEl?.value || appState.currentCat;
   const tag = tagRadio ? tagRadio.value : null;
   const pinned = pinnedEl ? pinnedEl.checked : false;
   const keywords = keywordsEl ? keywordsEl.value.trim() : '';
@@ -1328,8 +1394,8 @@ async function saveNote() {
 
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
-      const updateData = { title, body, tag, images: allImages, pinned, pinnedAt, keywords };
-      // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장
+      const updateData = { category, title, body, tag, images: allImages, pinned, pinnedAt, keywords };
+      // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장 (카테고리 변경 시 양쪽 인덱스·카운트 원자적 갱신)
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
       // 기존 메모(첨부 + 본문 인라인)에 있었지만 수정 후 사라진 이미지 + 미사용 세션 이미지를 병렬 삭제
@@ -1341,17 +1407,29 @@ async function saveNote() {
       ];
       if (removed.length) deleteImagesFromStorage(removed).catch(console.error);
 
+      if (category !== oldNote.category) {
+        appState.currentCat = category;
+        appState.currentTag = null;
+        const listTitle = $('list-title');
+        if (listTitle) {
+          listTitle.textContent = (CATEGORIES[category]?.icon || '') + ' ' + (CATEGORIES[category]?.name || '');
+        }
+      }
+
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       appState.currentNote = { ...appState.currentNote, ...updateData };
       openDetail(appState.currentNote, detailFrom);
     } else {
       await createNoteWithIndex({
-        category: appState.currentCat,
+        category,
         tag, title, body, images: allImages,
         pinned, pinnedAt, keywords
       });
       if (unusedSessionInlinePaths.length) {
         deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
+      }
+      if (category !== appState.currentCat) {
+        openList(category, tag);
       }
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
@@ -1490,15 +1568,11 @@ function stopRecording() {
   }
 }
 
-// Pin 토글 UI 바인딩
-const pinToggleWrap = $('pin-toggle-wrap');
-if (pinToggleWrap) {
-  pinToggleWrap.addEventListener('click', () => {
-    const cb = $('note-pinned') as HTMLInputElement;
-    if (cb) {
-      cb.checked = !cb.checked;
-      setPinToggleUI(cb.checked);
-    }
+// Pin 토글 UI 바인딩 (<label for="note-pinned">의 기본 동작과 중복 반전되지 않도록 change 이벤트 사용)
+const notePinnedCb = $('note-pinned') as HTMLInputElement | null;
+if (notePinnedCb) {
+  notePinnedCb.addEventListener('change', () => {
+    setPinToggleUI(notePinnedCb.checked);
   });
 }
 

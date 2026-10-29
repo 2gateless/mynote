@@ -11,7 +11,7 @@ async function loadMarkdownModules() {
     import('marked'),
     import('dompurify')
   ]);
-  markedModule = m.marked || m.default || m;
+  markedModule = m.marked || (m as any).default || m;
   purifyModule = p.default || p;
 }
 
@@ -19,9 +19,10 @@ async function loadMarkdownModules() {
 let katexModule: any = null;
 async function loadKatex() {
   if (katexModule) return;
+  // @ts-ignore - Vite handles CSS imports at bundle time
   await import('katex/dist/katex.min.css');
   const mod = await import('katex');
-  katexModule = mod.default || mod;
+  katexModule = (mod as any).default || mod;
 }
 
 // HTML 텍스트·속성값 모두에 안전하도록 따옴표까지 이스케이프
@@ -97,7 +98,7 @@ export function buildVideoEmbed(url: string, index = 0) {
   if (gDrive) {
     const fileId = gDrive[1];
     const thumbUrl = `https://drive.google.com/thumbnail?id=${fileId}&sz=w640`;
-    const openUrl = url.replace(/"/g, '&quot;');
+    const openUrl = escHtml(url);
     return `<a class="video-drive-card" href="${openUrl}" target="_blank" rel="noopener noreferrer">
 <div class="video-drive-thumb">
   <img src="${thumbUrl}" alt="Google Drive 동영상" loading="lazy" onerror="this.style.display='none'">
@@ -115,17 +116,17 @@ export function buildVideoEmbed(url: string, index = 0) {
 </a>`;
   }
 
+  const safeUrl = escHtml(url);
   if (!embedUrl) {
-    const esc = url.replace(/"/g, '&quot;');
-    return `<a href="${esc}" target="_blank" rel="noopener noreferrer" style="color:var(--sky-deep);word-break:break-all;text-decoration:underline;">${esc}</a>`;
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--sky-deep);word-break:break-all;text-decoration:underline;">${safeUrl}</a>`;
   }
 
   return `<div class="video-embed-wrap">
 <div class="video-embed-label">${label}</div>
 <div class="video-embed-container">
-  <iframe src="${embedUrl}" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>
+  <iframe src="${escHtml(embedUrl)}" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>
 </div>
-<a class="video-embed-link" href="${url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener noreferrer">🔗 원본 링크로 열기</a>
+<a class="video-embed-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer">🔗 원본 링크로 열기</a>
 </div>`;
 }
 
@@ -140,82 +141,91 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     return linkify(rawBody);
   }
 
-  // ⓪ [[메모 제목]] 패턴을 임시 플레이스홀더로 치환
-  const noteLinkRefs: string[] = [];
-  let rawBodyProcessed = rawBody.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
-    const idx = noteLinkRefs.length;
-    noteLinkRefs.push(title);
-    return `NOTELINK_${idx}_END`;
+  // ⓪ 코드 블록(```...```) 및 인라인 코드(`...`) 보호
+  // 코드 내부의 [[...]], $...$, URL이 수식이나 링크로 변환되지 않도록 먼저 분리
+  const codeBlocks: string[] = [];
+  let processed = rawBody.replace(/```[\s\S]*?```|`[^`\n]+`/g, (match) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(match);
+    return `@@CODEBLOCK${idx}@@`;
   });
 
-  // ① 동영상 URL 임시 플레이스홀더 치환
+  // ① [[메모 제목]] 패턴을 임시 플레이스홀더로 치환 (밑줄 없는 토큰으로 마크다운 이탤릭 충돌 방지)
+  const noteLinkRefs: string[] = [];
+  processed = processed.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
+    const idx = noteLinkRefs.length;
+    noteLinkRefs.push(title);
+    return `@@NOTELINK${idx}@@`;
+  });
+
+  // ② 동영상 URL 임시 플레이스홀더 치환
   const videoEmbeds: string[] = [];
-  let processed = rawBodyProcessed.replace(
+  processed = processed.replace(
     /(^|\s)(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^\s<>"&]*&)*v=[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11}|youtube\.com\/shorts\/[A-Za-z0-9_-]{11}|vimeo\.com\/\d+|tv\.naver\.com\/v\/\d+|tv\.kakao\.com\/channel\/\d+\/cliplink\/\d+|www\.dailymotion\.com\/video\/[a-zA-Z0-9]+|drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/(?:view|preview))[^\s<>"]*)/g,
     (_, prefix, url) => {
       const idx = videoEmbeds.length;
       videoEmbeds.push(url.trim());
-      return `${prefix}VIDEO_EMBED_${idx}_END`;
+      return `${prefix}@@VIDEOEMBED${idx}@@`;
     }
   );
 
-  // ② 수식 블록 및 인라인 치환
+  // ③ 수식 블록 및 인라인 치환
   const mathBlocks: { type: 'block' | 'inline'; expr: string }[] = [];
   processed = processed
     .replace(/\$\$([\s\S]+?)\$\$/g, (_, expr) => {
       const idx = mathBlocks.length;
       mathBlocks.push({ type: 'block', expr: expr.trim() });
-      return `MATH_BLOCK_${idx}_END`;
+      return `@@MATHBLOCK${idx}@@`;
     })
     .replace(/\$([^$\n]+?)\$/g, (_, expr) => {
       const idx = mathBlocks.length;
       mathBlocks.push({ type: 'inline', expr: expr.trim() });
-      return `MATH_INLINE_${idx}_END`;
+      return `@@MATHINLINE${idx}@@`;
     });
 
-  // ③ marked 파싱
-  let html: any = markedModule.parse(processed, { breaks: true });
+  // ④ 보호했던 코드 블록 복원 후 marked 파싱
+  if (codeBlocks.length > 0) {
+    processed = processed.replace(/@@CODEBLOCK(\d+)@@/g, (_, i) => codeBlocks[parseInt(i, 10)]);
+  }
+  const rawHtml: string = markedModule.parse(processed, { breaks: true });
 
-  // ④ KaTeX 복원
+  // ⑤ DOMPurify 살균을 먼저 수행 (사용자 마크다운에서 악성 스크립트/style 속성 원천 제거)
+  let parsedBody: string = purifyModule.sanitize(rawHtml, {
+    ADD_ATTR: ['target', 'rel', 'loading', 'decoding']
+  });
+
+  // ⑥ KaTeX 수식 복원
   if (mathBlocks.length > 0) {
     try { await loadKatex(); } catch(e) { console.error('KaTeX load error', e); }
   }
   if (katexModule) {
-    html = html.replace(/MATH_BLOCK_(\d+)_END/g, (_: string, i: string) => {
+    parsedBody = parsedBody.replace(/@@MATHBLOCK(\d+)@@/g, (_: string, i: string) => {
+      const expr = mathBlocks[parseInt(i, 10)]?.expr || '';
       try {
-        return katexModule.renderToString(mathBlocks[parseInt(i)].expr, { displayMode: true, throwOnError: false });
-      } catch(e) { return `<code>$$${mathBlocks[parseInt(i)].expr}$$</code>`; }
+        return katexModule.renderToString(expr, { displayMode: true, throwOnError: false });
+      } catch(e) { return `<code>$$${escHtml(expr)}$$</code>`; }
     });
-    html = html.replace(/MATH_INLINE_(\d+)_END/g, (_: string, i: string) => {
+    parsedBody = parsedBody.replace(/@@MATHINLINE(\d+)@@/g, (_: string, i: string) => {
+      const expr = mathBlocks[parseInt(i, 10)]?.expr || '';
       try {
-        return katexModule.renderToString(mathBlocks[parseInt(i)].expr, { displayMode: false, throwOnError: false });
-      } catch(e) { return `<code>$${mathBlocks[parseInt(i)].expr}$</code>`; }
+        return katexModule.renderToString(expr, { displayMode: false, throwOnError: false });
+      } catch(e) { return `<code>$${escHtml(expr)}$</code>`; }
     });
+  } else if (mathBlocks.length > 0) {
+    parsedBody = parsedBody.replace(/@@MATHBLOCK(\d+)@@/g, (_: string, i: string) => `<code>$$${escHtml(mathBlocks[parseInt(i, 10)]?.expr || '')}$$</code>`);
+    parsedBody = parsedBody.replace(/@@MATHINLINE(\d+)@@/g, (_: string, i: string) => `<code>$${escHtml(mathBlocks[parseInt(i, 10)]?.expr || '')}$</code>`);
   }
 
-  // ⑤ DOMPurify 살균
-  let parsedBody = purifyModule.sanitize(html, {
-    ADD_TAGS: ['math', 'mrow', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac',
-               'msubsup', 'mover', 'munder', 'moverunder', 'menclose',
-               'msqrt', 'mroot', 'mtable', 'mtr', 'mtd', 'mtext',
-               'mspace', 'mphantom', 'semantics', 'annotation'],
-    ADD_ATTR: ['xmlns', 'display', 'class', 'style', 'aria-hidden',
-               'focusable', 'role', 'viewBox', 'width', 'height',
-               'preserveAspectRatio', 'fill', 'stroke', 'stroke-width',
-               'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r',
-               'rx', 'ry', 'transform', 'points', 'encoding',
-               'src', 'alt', 'loading', 'decoding']
+  // ⑦ 동영상 iframe 복원
+  parsedBody = parsedBody.replace(/@@VIDEOEMBED(\d+)@@/g, (_: string, i: string) => {
+    const idx = parseInt(i, 10);
+    return buildVideoEmbed(videoEmbeds[idx], idx);
   });
 
-  // ⑥ 동영상 iframe 복원
-  parsedBody = parsedBody.replace(/VIDEO_EMBED_(\d+)_END/g, (_: string, i: string) => {
-    return buildVideoEmbed(videoEmbeds[parseInt(i)], parseInt(i));
-  });
-
-  // ⑦ [[메모 제목]] 복원 (제목→메모 Map으로 O(1) 조회, 클릭은 detail-content 이벤트 위임에서 처리)
+  // ⑧ [[메모 제목]] 복원 (제목→메모 Map으로 O(1) 조회, 클릭은 detail-content 이벤트 위임에서 처리)
   const titleMap: Map<string, any> | undefined = appState.notesByTitle;
-  parsedBody = parsedBody.replace(/NOTELINK_(\d+)_END/g, (_: string, i: string) => {
-    const title = noteLinkRefs[parseInt(i)].trim();
+  parsedBody = parsedBody.replace(/@@NOTELINK(\d+)@@/g, (_: string, i: string) => {
+    const title = (noteLinkRefs[parseInt(i, 10)] || '').trim();
     const safeTitle = escHtml(title);
     const found = titleMap
       ? titleMap.get(title)
