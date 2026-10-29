@@ -82,6 +82,8 @@ let lastRenderedSearchSignature = '';
 let isSelectingSearchResult = false;
 let isPointerDownOnSearchResults = false;
 let detailFrom = 'list'; // 'list' or 'search'
+let savedSearchScrollY = 0;
+let detailHistoryStack: { note: any; from: string }[] = [];
 let detailRenderToken = 0;
 
 // 모달에서 새로 업로드한 인라인 이미지 경로 추적 (취소/수정 시 미사용 파일 정리용)
@@ -476,7 +478,12 @@ async function openNoteById(noteId: string, from: string) {
 // 메모 링크 클릭 핸들러
 appState.handleNoteLinkClick = function(el: HTMLElement) {
   const noteId = el.dataset.noteId;
-  if (noteId) openNoteById(noteId, detailFrom || 'list');
+  if (noteId) {
+    if (currentScreen() === 'detail' && appState.currentNote && appState.currentNote.id !== noteId) {
+      detailHistoryStack.push({ note: appState.currentNote, from: detailFrom || 'list' });
+    }
+    openNoteById(noteId, detailFrom || 'list');
+  }
 };
 
 // ─────────────────────────────────────────────
@@ -503,6 +510,8 @@ function setHomeListVisible(visible: boolean) {
 
 // 검색 상태 초기화 + 폴더 목록 복원 (여러 곳에서 공통 사용)
 function resetSearchUI() {
+  savedSearchScrollY = 0;
+  detailHistoryStack = [];
   clearTimeout(searchTimeout);
   lastSearchedQuery = '';
   isAiSearchActive = false;
@@ -765,8 +774,8 @@ async function openDetail(note: any, from?: string, existingToken?: number) {
 
   const backBtn = $('detail-back');
   if (backBtn) {
-    backBtn.textContent = detailFrom === 'search' ? '🏠' : '←';
-    backBtn.title = detailFrom === 'search' ? '홈으로' : '목록으로';
+    backBtn.textContent = '←';
+    backBtn.title = detailFrom === 'search' ? '검색 결과로 돌아가기' : '목록으로';
   }
 
   const content = $('detail-content');
@@ -811,11 +820,47 @@ if (detailContentEl) {
   });
 }
 
+// 상세 화면에서 이전 화면(검색·AI 추론 결과 또는 카테고리 목록 또는 이전 링크 메모)으로 복귀
+function goBackFromDetail() {
+  if (detailHistoryStack.length > 0) {
+    const prev = detailHistoryStack.pop()!;
+    openDetail(prev.note, prev.from);
+    return;
+  }
+  if (detailFrom === 'search') {
+    const hasSearchContent =
+      (searchResults && searchResults.innerHTML.trim() !== '') ||
+      (aiRagContainer && aiRagContainer.innerHTML.trim() !== '');
+    if (hasSearchContent) {
+      if (searchWrap) searchWrap.style.display = 'block';
+      if (searchResults && searchResults.innerHTML.trim() !== '') {
+        searchResults.style.display = 'block';
+      }
+      if (aiRagContainer && aiRagContainer.innerHTML.trim() !== '') {
+        aiRagContainer.style.display = 'block';
+      }
+      setHomeListVisible(false);
+      showAppScreen('home');
+      if (savedSearchScrollY > 0) {
+        requestAnimationFrame(() => window.scrollTo(0, savedSearchScrollY));
+      }
+      return;
+    }
+    resetSearchUI();
+    showAppScreen('home');
+  } else {
+    goBackToList();
+  }
+}
+
 const detailBack = $('detail-back');
 if (detailBack) {
-  detailBack.onclick = () => {
+  detailBack.onclick = () => goBackFromDetail();
+}
+/*
     if (detailFrom === 'search') {
-      // (버그 수정) 존재하지 않는 'cat-grid' 대신 폴더 목록·메타 헤더를 올바르게 복원
+      goBackFromDetail();
+      return;
       resetSearchUI();
       showAppScreen('home');
     } else {
@@ -824,6 +869,7 @@ if (detailBack) {
   };
 }
 
+*/
 const btnEditDetail = $('btn-edit-detail');
 if (btnEditDetail) {
   btnEditDetail.onclick = () => openEditModal(appState.currentNote);
@@ -978,6 +1024,8 @@ if (aiRagContainer) {
     if (linkEl && linkEl.dataset.noteId) {
       e.preventDefault();
       e.stopPropagation();
+      savedSearchScrollY = window.scrollY;
+      detailHistoryStack = [];
       detailFrom = 'search';
       openNoteById(linkEl.dataset.noteId, 'search');
     }
@@ -1233,6 +1281,8 @@ async function goToSearchDetailById(id: string, itemEl?: HTMLElement | null) {
   clearTimeout(searchTimeout);
 
   try {
+    savedSearchScrollY = window.scrollY;
+    detailHistoryStack = [];
     await openNoteById(id, 'search');
   } finally {
     isSelectingSearchResult = false;
@@ -2167,6 +2217,21 @@ initPwaNavigation((screen) => {
     return; 
   }
   if (screen === 'detail') {
+    goBackFromDetail();
+    history.pushState(null, '', location.href);
+    return;
+  }
+  if (screen === 'home') {
+    const isSearchVisible =
+      (searchResults && searchResults.style.display !== 'none' && searchResults.innerHTML.trim() !== '') ||
+      (aiRagContainer && aiRagContainer.style.display !== 'none' && aiRagContainer.innerHTML.trim() !== '');
+    if (isSearchVisible) {
+      resetSearchUI();
+      history.pushState(null, '', location.href);
+      return;
+    }
+  }
+  /*
     if (detailFrom === 'search') {
       resetSearchUI();
       showAppScreen('home');
@@ -2176,6 +2241,7 @@ initPwaNavigation((screen) => {
     history.pushState(null, '', location.href);
     return;
   }
+  */
   if (screen === 'list') {
     stopListSubscription();
     resetSearchUI();
