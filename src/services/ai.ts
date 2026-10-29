@@ -37,12 +37,18 @@ const IDB_STORE = 'note_vectors';
 const PRIMARY_EMBEDDING_MODEL = 'text-embedding-004';
 const FALLBACK_EMBEDDING_MODEL = 'gemini-embedding-001';
 
-// 요구사항 3: Gemini Flash 모델 (최신 Flash 모델 우선 + 자동 폴백)
+// 요구사항 3: Gemini Flash 모델 (최신 정식 식별자 및 -latest 별칭 우선 + 동적 ListModels 자동 탐색 지원)
 const FLASH_MODELS = [
   'gemini-2.5-flash',
+  'gemini-flash-latest',
   'gemini-2.0-flash',
-  'gemini-1.5-flash'
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash-latest'
 ];
+
+// 성공한 생성 모델을 세션 내 캐시하여 다음 호출 시 지연 없이 즉시 사용
+let cachedWorkingFlashModel: string | null = null;
 
 export interface SemanticSearchResult {
   note: Note;
@@ -730,54 +736,131 @@ export async function generateRagAnswer(
     throw new Error('Gemini API 키가 설정되지 않았습니다.');
   }
 
-  let lastError = '';
-  for (const model of FLASH_MODELS) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemInstruction }]
-          },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: promptText }]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 1500
+  // 단일 모델로 generateContent 호출하는 내부 헬퍼
+  const tryGenerateWithModel = async (
+    modelName: string
+  ): Promise<{ ok: boolean; status: number; answer?: string; errorMsg?: string }> => {
+    const cleanModel = modelName.replace(/^models\//, '');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: systemInstruction }]
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: promptText }]
           }
-        })
-      });
+        ],
+        generationConfig: {
+          temperature: 0.3,
+          // gemini-2.5-flash 등 최신 모델은 내부 추론(thinking) 토큰이 출력 한도에 포함되므로
+          // 1500으로 제한하면 추론 도중 토큰이 소진되어 빈 응답이 반환될 수 있음 → 충분한 한도(8192) 부여
+          maxOutputTokens: 8192
+        }
+      })
+    });
 
-      if (res.status === 404 || res.status === 400) {
-        const errJson = await res.json().catch(() => ({}));
-        lastError = errJson?.error?.message || `HTTP ${res.status}`;
-        continue;
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return {
+        ok: false,
+        status: res.status,
+        errorMsg: errJson?.error?.message || `HTTP ${res.status}`
+      };
+    }
+
+    const json = await res.json();
+    const parts = json?.candidates?.[0]?.content?.parts || [];
+    // thought(내부 추론) 파트를 제외하고 실제 텍스트 파트만 결합
+    const visibleText = parts
+      .filter((p: any) => !p?.thought && typeof p?.text === 'string')
+      .map((p: any) => p.text)
+      .join('')
+      .trim();
+    const fallbackText = parts
+      .map((p: any) => p?.text || '')
+      .join('')
+      .trim();
+    const answer = visibleText || fallbackText;
+
+    if (!answer) {
+      return {
+        ok: false,
+        status: 200,
+        errorMsg: `모델(${cleanModel})이 빈 응답을 반환했습니다.`
+      };
+    }
+
+    return { ok: true, status: 200, answer };
+  };
+
+  // 이전에 성공했던 모델이 있으면 최우선으로 시도
+  const candidateModels = cachedWorkingFlashModel
+    ? [cachedWorkingFlashModel, ...FLASH_MODELS.filter(m => m !== cachedWorkingFlashModel)]
+    : [...FLASH_MODELS];
+
+  const errors: string[] = [];
+
+  for (const model of candidateModels) {
+    try {
+      const result = await tryGenerateWithModel(model);
+      if (result.ok && result.answer) {
+        cachedWorkingFlashModel = model.replace(/^models\//, '');
+        return result.answer;
       }
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
+      if (result.errorMsg) {
+        errors.push(`${model}: ${result.errorMsg}`);
       }
-
-      const json = await res.json();
-      const answer = json?.candidates?.[0]?.content?.parts
-        ?.map((p: any) => p.text || '')
-        .join('')
-        .trim();
-
-      if (answer) return answer;
     } catch (e: any) {
-      lastError = e?.message || String(e);
+      errors.push(`${model}: ${e?.message || String(e)}`);
     }
   }
 
-  throw new Error(`AI 종합 답변 생성 실패: ${lastError}`);
+  // 정적 후보 모델들이 모두 실패한 경우: Google API의 ListModels를 직접 호출하여
+  // 현재 API 키에서 사용 가능한 generateContent 지원 모델을 동적으로 찾아 재시도
+  try {
+    const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+    const listRes = await fetch(listUrl);
+    if (listRes.ok) {
+      const listJson = await listRes.json();
+      const availableModels: string[] = (listJson?.models || [])
+        .filter((m: any) =>
+          Array.isArray(m?.supportedGenerationMethods) &&
+          m.supportedGenerationMethods.includes('generateContent') &&
+          typeof m?.name === 'string' &&
+          !m.name.includes('embedding') &&
+          !m.name.includes('imagen') &&
+          !m.name.includes('veo') &&
+          !m.name.includes('tts') &&
+          !m.name.includes('audio')
+        )
+        .map((m: any) => (m.name as string).replace(/^models\//, ''));
+
+      // flash 모델을 우선 정렬
+      availableModels.sort((a, b) => {
+        const aFlash = a.includes('flash') ? 0 : 1;
+        const bFlash = b.includes('flash') ? 0 : 1;
+        return aFlash - bFlash;
+      });
+
+      for (const dynModel of availableModels) {
+        if (candidateModels.includes(dynModel)) continue;
+        const result = await tryGenerateWithModel(dynModel);
+        if (result.ok && result.answer) {
+          cachedWorkingFlashModel = dynModel;
+          return result.answer;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('동적 모델 목록 조회(ListModels) 실패:', e);
+  }
+
+  throw new Error(`AI 종합 답변 생성 실패: ${errors[0] || '사용 가능한 Gemini 모델을 찾지 못했습니다.'}`);
 }
 
 // ─────────────────────────────────────────────
