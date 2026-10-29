@@ -5,6 +5,7 @@ export interface Note {
   uid: string;
   title: string;
   category: string;
+  categories?: string[];
   tag: string;
   body: string;
   keywords?: string;
@@ -20,6 +21,7 @@ export interface NoteIndexItem {
   id: string;
   title: string;
   category: string;
+  categories?: string[];
   tag: string;
   snippet: string;
   keywords?: string;
@@ -33,5 +35,4 @@ export interface NoteIndexItem {
 
 export interface UserMeta {
   categoryCount: Record<string, number>;
-  lockPin?: string;
 }

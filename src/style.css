@@ -961,6 +961,94 @@
     font-weight: 700;
   }
 
+  /* ── 복수 카테고리 선택 드롭다운 ── */
+  .cat-multiselect {
+    position: relative;
+  }
+  .cat-multiselect-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+  }
+  .cat-multiselect-trigger.open {
+    border-color: var(--sky-dark);
+    background: var(--white);
+  }
+  .cat-multiselect-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14.5px;
+    color: var(--text);
+  }
+  .cat-multiselect-arrow {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--sky-deep);
+    background: var(--white);
+    padding: 3px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--sky-mid);
+    flex-shrink: 0;
+  }
+  .cat-multiselect-panel {
+    margin-top: 8px;
+    padding: 10px;
+    border-radius: 14px;
+    background: var(--white);
+    border: 1.5px solid var(--sky-dark);
+    box-shadow: 0 4px 16px rgba(90, 144, 176, 0.14);
+  }
+  .cat-multiselect-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+  @media (min-width: 440px) {
+    .cat-multiselect-grid {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+  .cat-option-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1.5px solid var(--sky-light);
+    background: var(--bg-base);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: all 0.15s;
+  }
+  .cat-option-chip input[type="checkbox"] {
+    display: none;
+  }
+  .cat-option-chip:hover {
+    border-color: var(--sky);
+  }
+  .cat-option-chip.selected {
+    background: var(--sky-dark);
+    color: var(--white);
+    border-color: var(--sky-deep);
+    font-weight: 700;
+  }
+  .cat-option-check {
+    margin-left: auto;
+    font-size: 12px;
+    opacity: 0.9;
+  }
+
   /* PC */
   @media (min-width: 640px) {
     .pin-modal-box { border: 2px solid var(--border-color); }

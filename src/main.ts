@@ -7,6 +7,7 @@ import {
 } from './services/auth';
 import { 
   CATEGORIES, 
+  getNoteCategories,
   SUB_TAGS, 
   subscribeUserMeta, 
   subscribeAllNotes, 
@@ -438,10 +439,13 @@ async function openNoteById(noteId: string, from: string) {
       const ok = await verifyLockPinForNote();
       if (!ok || reqToken !== detailRenderToken) return;
     }
-    appState.currentCat = note.category;
+    const noteCats = getNoteCategories(note);
+    if (!appState.currentCat || !noteCats.includes(appState.currentCat)) {
+      appState.currentCat = noteCats[0] || note.category;
+    }
     const listTitle = $('list-title');
     if (listTitle) {
-      listTitle.textContent = (CATEGORIES[note.category]?.icon || '') + ' ' + (CATEGORIES[note.category]?.name || '');
+      listTitle.textContent = (CATEGORIES[appState.currentCat]?.icon || '') + ' ' + (CATEGORIES[appState.currentCat]?.name || '');
     }
     await openDetail(note, from, reqToken);
   } catch (e) {
@@ -573,7 +577,7 @@ function loadList(catId: string, force = false) {
 
   // 1단계: 로컬 캐시에서 해당 카테고리 메모가 있는지 즉시 확인하여 0ms 렌더링
   ensureSearchIndexReady();
-  const cachedForCat = (appState.allNotesCache as NoteIndexItem[] || []).filter(n => n.category === catId);
+  const cachedForCat = (appState.allNotesCache as NoteIndexItem[] || []).filter(n => getNoteCategories(n).includes(catId));
   const content = $('list-content');
 
   if (cachedForCat.length > 0) {
@@ -746,11 +750,16 @@ async function openDetail(note: any, from?: string, existingToken?: number) {
   // 파싱 도중 다른 메모가 열렸다면 이전 결과는 버림 (경쟁 상태 방지)
   if (token !== detailRenderToken) return;
 
-  const cat = CATEGORIES[note.category];
+  const noteCats = getNoteCategories(note);
+  const catBadgesHtml = noteCats.map(cid => {
+    const c = CATEGORIES[cid];
+    return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
+  }).join('');
+  const tagTargetCat = appState.currentCat && noteCats.includes(appState.currentCat) ? appState.currentCat : (noteCats[0] || note.category);
   content.innerHTML = `
     <div class="detail-meta">
-      <span class="detail-cat-badge">${cat?.icon || ''} ${cat?.name || ''}</span>
-      ${note.tag ? tagChipHtml(note.category, note.tag, 'detail-tag-badge') : ''}
+      ${catBadgesHtml}
+      ${note.tag ? tagChipHtml(tagTargetCat, note.tag, 'detail-tag-badge') : ''}
       ${note.locked ? '<span class="detail-lock-badge">🔒 잠금</span>' : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
@@ -857,7 +866,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
       .map(entry => entry.note);
 
     // 백그라운드 캐시 동기화로 호출되었을 때 현재 화면에 표시된 결과 목록과 동일하면 DOM 재생성 생략 (클릭 위치 어긋남 방지)
-    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${n.category || ''}|${n.tag || ''}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
+    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${n.tag || ''}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
     if (fromCacheSync && signature === lastRenderedSearchSignature) {
       return;
     }
@@ -874,10 +883,15 @@ function doSearch(keyword: string, fromCacheSync = false) {
     </div>`;
     // 검색 결과 카드 내부의 카테고리/태그 배지는 클릭을 가로채지 않도록 순수 표시용으로 렌더링
     const items = results.map(note => {
-      const cat = CATEGORIES[note.category];
+      const noteCats = getNoteCategories(note);
+  const catBadgesHtml = noteCats.map(cid => {
+    const c = CATEGORIES[cid];
+    return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
+  }).join('');
+  const tagTargetCat = appState.currentCat && noteCats.includes(appState.currentCat) ? appState.currentCat : (noteCats[0] || note.category);
       return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
         <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
-        <span class="search-result-cat">${cat?.icon || ''} ${cat?.name || ''}</span>
+        ${catBadgesHtml}
         ${note.tag ? `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(note.tag)}</span>` : ''}
         <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml(note.snippet || '')}</div>
       </div>`;
@@ -1118,9 +1132,14 @@ function renderNoteLinkList(keyword: string) {
     return;
   }
   noteLinkList.innerHTML = filtered.map(note => {
-    const cat = CATEGORIES[note.category];
+    const noteCats = getNoteCategories(note);
+  const catBadgesHtml = noteCats.map(cid => {
+    const c = CATEGORIES[cid];
+    return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
+  }).join('');
+  const tagTargetCat = appState.currentCat && noteCats.includes(appState.currentCat) ? appState.currentCat : (noteCats[0] || note.category);
     return `<div class="note-link-item" data-title="${escHtml(note.title)}">`
-      + `<span class="note-link-item-cat">${cat ? cat.icon : '📝'}</span>`
+      + `<span class="note-link-item-cat">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
       + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
       + (note.tag ? `<span class="note-link-item-tag">#${escHtml(note.tag)}</span>` : '')
       + `</div>`;
@@ -1149,7 +1168,113 @@ if (noteLinkSearchInput) {
   });
 }
 
-const noteCategoryEl = $('note-category') as HTMLSelectElement | null;
+const noteCategoryOptionsEl = $('note-category-options') as HTMLElement | null;
+const catMultiselectTrigger = $('cat-multiselect-trigger') as HTMLButtonElement | null;
+const catMultiselectLabel = $('cat-multiselect-label') as HTMLElement | null;
+const catMultiselectArrow = $('cat-multiselect-arrow') as HTMLElement | null;
+const catMultiselectPanel = $('cat-multiselect-panel') as HTMLElement | null;
+
+function getSelectedCategoriesFromUI(): string[] {
+  if (!noteCategoryOptionsEl) return appState.currentCat ? [appState.currentCat] : [Object.keys(CATEGORIES)[0]];
+  const checked = Array.from(noteCategoryOptionsEl.querySelectorAll<HTMLInputElement>('input.cat-option-cb:checked'))
+    .map(cb => cb.value)
+    .filter(v => v in CATEGORIES);
+  return checked;
+}
+
+function setCategoryPanelOpen(open: boolean) {
+  if (!catMultiselectPanel || !catMultiselectTrigger || !catMultiselectArrow) return;
+  catMultiselectPanel.style.display = open ? 'block' : 'none';
+  catMultiselectTrigger.classList.toggle('open', open);
+  catMultiselectArrow.textContent = open ? '▲ 닫기' : '▾ 선택';
+}
+
+function updateCategoryMultiselectLabel(selectedCats: string[]) {
+  const names = selectedCats
+    .map(id => CATEGORIES[id] ? `${CATEGORIES[id].icon} ${CATEGORIES[id].name}` : '')
+    .filter(Boolean);
+  if (catMultiselectLabel) {
+    catMultiselectLabel.textContent = names.length > 0
+      ? (names.length > 1 ? `${names.join(' · ')} (${names.length}개)` : names[0])
+      : '카테고리를 선택하세요';
+  }
+  if (!appState.editingNoteId && selectedCats.length > 0) {
+    const modalTitle = $('modal-title');
+    const titleSuffix = selectedCats.map(id => CATEGORIES[id]?.name || '').filter(Boolean).join(', ');
+    if (modalTitle) modalTitle.textContent = `새 메모 — ${titleSuffix}`;
+  }
+}
+
+function renderCategorySelect(selectedCatIds: string | string[]) {
+  const arr = Array.isArray(selectedCatIds) ? selectedCatIds : [selectedCatIds];
+  const valid = arr.filter(id => id && id in CATEGORIES);
+  const selectedSet = new Set(valid.length > 0 ? valid : [Object.keys(CATEGORIES)[0]]);
+  setCategoryPanelOpen(false);
+  if (noteCategoryOptionsEl) {
+    noteCategoryOptionsEl.innerHTML = Object.entries(CATEGORIES)
+      .map(([id, info]) => {
+        const isSel = selectedSet.has(id);
+        return `<label class="cat-option-chip${isSel ? ' selected' : ''}" data-cat-id="${escHtml(id)}">
+          <input type="checkbox" class="cat-option-cb" value="${escHtml(id)}"${isSel ? ' checked' : ''}>
+          <span>${info.icon} ${escHtml(info.name)}</span>
+          <span class="cat-option-check">${isSel ? '✓' : ''}</span>
+        </label>`;
+      })
+      .join('');
+  }
+  updateCategoryMultiselectLabel(Array.from(selectedSet));
+}
+
+if (catMultiselectTrigger) {
+  catMultiselectTrigger.onclick = () => {
+    const isHidden = !catMultiselectPanel || catMultiselectPanel.style.display === 'none';
+    setCategoryPanelOpen(isHidden);
+  };
+}
+
+if (noteCategoryOptionsEl) {
+  noteCategoryOptionsEl.addEventListener('change', (e) => {
+    const cb = (e.target as HTMLElement).closest('input.cat-option-cb') as HTMLInputElement | null;
+    if (!cb) return;
+    let selected = getSelectedCategoriesFromUI();
+    if (selected.length === 0) {
+      // 최소 1개 카테고리는 유지
+      cb.checked = true;
+      showToast('최소 1개 이상의 카테고리를 선택해주세요');
+      selected = getSelectedCategoriesFromUI();
+    }
+    const chip = cb.closest('.cat-option-chip');
+    const checkMark = chip?.querySelector('.cat-option-check');
+    if (chip) chip.classList.toggle('selected', cb.checked);
+    if (checkMark) checkMark.textContent = cb.checked ? '✓' : '';
+
+    updateCategoryMultiselectLabel(selected);
+    const currentCheckedTag = (document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement | null)?.value || null;
+    renderTagOptions(selected, currentCheckedTag);
+  });
+}
+
+function renderTagOptions(catIds: string | string[], selectedTag: string | null) {
+  const tg = $('tag-group');
+  const to = $('tag-options');
+  if (!tg || !to) return;
+  const cats = Array.isArray(catIds) ? catIds : [catIds];
+  const mergedTags = Array.from(new Set(cats.flatMap(cid => SUB_TAGS[cid] || [])));
+  if (mergedTags.length > 0) {
+    tg.style.display = 'block';
+    to.innerHTML = mergedTags.map((tag) => `
+      <label style="display:inline-flex">
+        <input type="radio" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${tag === selectedTag ? 'checked data-was-checked="true"' : ''}>
+        <span class="tag-label">${escHtml(tag)}</span>
+      </label>
+    `).join('');
+  } else {
+    tg.style.display = 'none';
+    to.innerHTML = '';
+  }
+}
+
+/*
 
 function renderCategorySelect(selectedCatId: string) {
   if (!noteCategoryEl) return;
@@ -1188,6 +1313,7 @@ function renderTagOptions(catId: string, selectedTag: string | null) {
   }
 }
 
+*/
 // 이미 선택된 태그 라디오를 다시 클릭하면 선택 해제 허용
 const tagOptionsEl = $('tag-options');
 if (tagOptionsEl) {
@@ -1286,8 +1412,10 @@ function openEditModal(note: any) {
   sessionUploadedInlineImages = [];
   resetInlineImgBtn();
   fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
-  renderCategorySelect(note.category);
-  renderTagOptions(note.category, note.tag || null);
+  const editCats = getNoteCategories(note);
+  renderCategorySelect(editCats);
+  renderTagOptions(editCats, note.tag || null);
+
   setPinToggleUI(!!note.pinned);
   setLockToggleUI(!!note.locked);
   setDisplay('note-modal', 'flex');
@@ -1400,7 +1528,8 @@ async function saveNote() {
   
   const title = titleEl ? titleEl.value.trim() : '';
   const body = bodyEl ? bodyEl.value.trim() : '';
-  const category = noteCategoryEl?.value || appState.currentCat;
+  const categories = getSelectedCategoriesFromUI();
+  const category = categories[0] || appState.currentCat || Object.keys(CATEGORIES)[0];
   const tag = tagRadio ? tagRadio.value : null;
   const pinned = pinnedEl ? pinnedEl.checked : false;
   const locked = lockedEl ? lockedEl.checked : false;
@@ -1442,7 +1571,7 @@ async function saveNote() {
 
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
-      const updateData = { category, title, body, tag, images: allImages, pinned, pinnedAt, locked, keywords };
+      const updateData = { category, categories, title, body, tag, images: allImages, pinned, pinnedAt, locked, keywords };
       // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장 (카테고리 변경 시 양쪽 인덱스·카운트 원자적 갱신)
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
@@ -1455,7 +1584,7 @@ async function saveNote() {
       ];
       if (removed.length) deleteImagesFromStorage(removed).catch(console.error);
 
-      if (category !== oldNote.category) {
+      if (!appState.currentCat || !categories.includes(appState.currentCat)) {
         appState.currentCat = category;
         appState.currentTag = null;
         const listTitle = $('list-title');
@@ -1469,14 +1598,14 @@ async function saveNote() {
       openDetail(appState.currentNote, detailFrom);
     } else {
       await createNoteWithIndex({
-        category,
+        category, categories,
         tag, title, body, images: allImages,
         pinned, pinnedAt, locked, keywords
       });
       if (unusedSessionInlinePaths.length) {
         deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
       }
-      if (category !== appState.currentCat) {
+      if (!appState.currentCat || !categories.includes(appState.currentCat)) {
         openList(category, tag);
       }
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');

@@ -39,6 +39,19 @@ export const SUB_TAGS: Record<string, string[]> = {
   family: ['가족', 'private']
 };
 
+// 메모 객체에서 복수 카테고리 배열을 안전하게 추출 (구버전 단일 category 호환)
+export function getNoteCategories(data: any): string[] {
+  if (!data) return [];
+  if (Array.isArray(data.categories) && data.categories.length > 0) {
+    const valid = Array.from(new Set(data.categories.filter((c: any) => typeof c === 'string' && c in CATEGORIES))) as string[];
+    if (valid.length > 0) return valid;
+  }
+  if (typeof data.category === 'string' && data.category) {
+    return [data.category];
+  }
+  return [];
+}
+
 // ※ 아래 마이그레이션 함수들은 과거 1회성 작업용으로, 현재 앱에서는 호출하지 않습니다. (기록 보존용)
 export async function migrateCategories() {
   if (!appState.currentUser) return;
@@ -196,7 +209,6 @@ function catIndexRef(uid: string, category: string) {
 }
 
 // 1회성 마이그레이션: note_index/{uid} 단일 문서 → note_index/{uid}_{category} 9개 문서로 분할
-// 실행 후 콘솔에 "분할 마이그레이션 완료!"가 뜨면 성공. main.ts에서 이 함수 호출을 다시 주석 처리할 것.
 export async function migrateNoteIndexToShards() {
   if (!appState.currentUser) return;
   try {
@@ -233,7 +245,7 @@ export async function migrateNoteIndexToShards() {
 }
 
 // ─────────────────────────────────────────────
-// 인덱스 / 메모 CRUD
+// 인덱스 / 메모 CRUD (복수 카테고리 지원)
 // ─────────────────────────────────────────────
 
 const SNIPPET_LEN = 200;
@@ -248,11 +260,14 @@ function metaRefOf(uid: string) {
 }
 
 // 메모 데이터 → 인덱스 항목 변환 (목록 표시에 필요한 필드 포함)
-function toIndexItem(id: string, data: any): NoteIndexItem {
+function toIndexItem(id: string, data: any, shardCategory?: string): NoteIndexItem {
+  const cats = getNoteCategories(data);
+  const primaryCat = shardCategory || data.category || cats[0] || '';
   return {
     id,
     title: data.title || '',
-    category: data.category || '',
+    category: primaryCat,
+    categories: cats.length > 0 ? cats : (primaryCat ? [primaryCat] : []),
     tag: data.tag || '',
     snippet: (data.body || '').substring(0, SNIPPET_LEN),
     keywords: data.keywords || '',
@@ -263,99 +278,129 @@ function toIndexItem(id: string, data: any): NoteIndexItem {
   };
 }
 
-// 새 메모 생성: 메모 문서 + 카테고리 인덱스 + 카운트를 하나의 트랜잭션으로 처리 (왕복 1회, 원자성 보장)
+// 새 메모 생성: 메모 문서 + 선택된 모든 카테고리 인덱스 + 카운트를 하나의 트랜잭션으로 처리
 export async function createNoteWithIndex(noteData: Partial<Note>): Promise<string> {
   const uid = requireUid();
-  const cat = noteData.category || '';
+  const cats = getNoteCategories(noteData);
+  const primaryCat = cats[0] || noteData.category || '';
+  const targetCats = cats.length > 0 ? cats : (primaryCat ? [primaryCat] : []);
   const noteRef = doc(collection(db, 'notes'));
-  const indexRef = catIndexRef(uid, cat);
-  const fullData = { uid, createdAt: Timestamp.now(), ...noteData };
+  const fullData = {
+    uid,
+    createdAt: Timestamp.now(),
+    ...noteData,
+    category: primaryCat,
+    categories: targetCats,
+  };
 
   await runTransaction(db, async (t) => {
-    const indexSnap = await t.get(indexRef);
-    const notesIndex: NoteIndexItem[] = indexSnap.exists() ? (indexSnap.data().notes || []) : [];
-    notesIndex.push(toIndexItem(noteRef.id, fullData));
+    const snaps = await Promise.all(targetCats.map(c => t.get(catIndexRef(uid, c))));
     t.set(noteRef, fullData);
-    t.set(indexRef, { notes: notesIndex }, { merge: true });
-    // 카운트는 읽지 않고 increment로 원자적 증가
-    t.set(metaRefOf(uid), { categoryCount: { [cat]: increment(1) } }, { merge: true });
+    const countIncrements: Record<string, any> = {};
+    targetCats.forEach((c, idx) => {
+      const snap = snaps[idx];
+      const notesIndex: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
+      notesIndex.push(toIndexItem(noteRef.id, fullData, c));
+      t.set(catIndexRef(uid, c), { notes: notesIndex }, { merge: true });
+      countIncrements[c] = increment(1);
+    });
+    if (Object.keys(countIncrements).length > 0) {
+      t.set(metaRefOf(uid), { categoryCount: countIncrements }, { merge: true });
+    }
   });
   return noteRef.id;
 }
 
-// 메모 수정: 메모 문서 + 인덱스(카테고리 변경 시 양쪽) + 카운트를 하나의 트랜잭션으로 처리
+// 메모 수정: 메모 문서 + 인덱스(복수 카테고리 추가·유지·제거 반영) + 카운트를 하나의 트랜잭션으로 처리
 export async function updateNoteWithIndex(noteId: string, updateData: Partial<Note>, oldNote: Partial<Note>) {
   const uid = requireUid();
-  const oldCat = oldNote.category || '';
-  const newCat = updateData.category !== undefined ? updateData.category : oldCat;
+  const oldCats = getNoteCategories(oldNote);
+  const newCatsRaw = getNoteCategories(updateData);
+  const newCats = newCatsRaw.length > 0 ? newCatsRaw : oldCats;
+  const primaryCat = newCats[0] || updateData.category || oldNote.category || '';
   const noteRef = doc(db, 'notes', noteId);
-  const data = { ...updateData, updatedAt: Timestamp.now() };
-  const merged = { ...oldNote, ...data, category: newCat };
+  const data = {
+    ...updateData,
+    category: primaryCat,
+    categories: newCats,
+    updatedAt: Timestamp.now()
+  };
+  const merged = { ...oldNote, ...data };
+  const allCats = Array.from(new Set([...oldCats, ...newCats]));
 
   await runTransaction(db, async (t) => {
-    if (newCat === oldCat) {
-      // 카테고리가 그대로면 해당 인덱스 문서 하나만 갱신 (가장 흔한 경우)
-      const indexRef = catIndexRef(uid, oldCat);
-      const indexSnap = await t.get(indexRef);
-      const notesIndex: NoteIndexItem[] = indexSnap.exists() ? (indexSnap.data().notes || []) : [];
-      const item = toIndexItem(noteId, merged);
-      const idx = notesIndex.findIndex(n => n.id === noteId);
-      if (idx !== -1) notesIndex[idx] = item; else notesIndex.push(item);
-      t.update(noteRef, data);
-      t.set(indexRef, { notes: notesIndex }, { merge: true });
-      return;
-    }
-
-    // 카테고리가 바뀌면 이전 인덱스에서 빼고 새 인덱스에 넣는다
-    const oldIndexRef = catIndexRef(uid, oldCat);
-    const newIndexRef = catIndexRef(uid, newCat);
-    const oldIndexSnap = await t.get(oldIndexRef);
-    const newIndexSnap = await t.get(newIndexRef);
-    const oldNotesIndex: NoteIndexItem[] = (oldIndexSnap.exists() ? (oldIndexSnap.data().notes || []) : [])
-      .filter((n: NoteIndexItem) => n.id !== noteId);
-    const newNotesIndex: NoteIndexItem[] = (newIndexSnap.exists() ? (newIndexSnap.data().notes || []) : [])
-      .filter((n: NoteIndexItem) => n.id !== noteId);
-    newNotesIndex.push(toIndexItem(noteId, merged));
-
+    const snaps = await Promise.all(allCats.map(c => t.get(catIndexRef(uid, c))));
     t.update(noteRef, data);
-    t.set(oldIndexRef, { notes: oldNotesIndex }, { merge: true });
-    t.set(newIndexRef, { notes: newNotesIndex }, { merge: true });
-    t.set(metaRefOf(uid), {
-      categoryCount: { [oldCat]: increment(-1), [newCat]: increment(1) }
-    }, { merge: true });
+    const countUpdates: Record<string, any> = {};
+
+    allCats.forEach((c, idx) => {
+      const snap = snaps[idx];
+      const existingList: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
+      const wasInCat = oldCats.includes(c);
+      const isInCat = newCats.includes(c);
+
+      if (isInCat) {
+        const item = toIndexItem(noteId, merged, c);
+        const pos = existingList.findIndex(n => n.id === noteId);
+        if (pos !== -1) existingList[pos] = item;
+        else existingList.push(item);
+        t.set(catIndexRef(uid, c), { notes: existingList }, { merge: true });
+        if (!wasInCat) countUpdates[c] = increment(1);
+      } else {
+        const filtered = existingList.filter(n => n.id !== noteId);
+        t.set(catIndexRef(uid, c), { notes: filtered }, { merge: true });
+        if (wasInCat) countUpdates[c] = increment(-1);
+      }
+    });
+
+    if (Object.keys(countUpdates).length > 0) {
+      t.set(metaRefOf(uid), { categoryCount: countUpdates }, { merge: true });
+    }
   });
 }
 
-// 메모 삭제: 메모 문서 + 인덱스 + 카운트를 하나의 트랜잭션으로 처리
+// 메모 삭제: 메모 문서 + 속해 있던 모든 카테고리 인덱스 + 카운트를 하나의 트랜잭션으로 처리
 export async function deleteNoteWithIndex(noteId: string, oldNote: Partial<Note>) {
   const uid = requireUid();
-  const cat = oldNote.category || '';
-  const indexRef = catIndexRef(uid, cat);
+  const oldCats = getNoteCategories(oldNote);
 
   await runTransaction(db, async (t) => {
-    const indexSnap = await t.get(indexRef);
-    const notesIndex: NoteIndexItem[] = indexSnap.exists() ? (indexSnap.data().notes || []) : [];
-    const filtered = notesIndex.filter(n => n.id !== noteId);
+    const snaps = await Promise.all(oldCats.map(c => t.get(catIndexRef(uid, c))));
     t.delete(doc(db, 'notes', noteId));
-    t.set(indexRef, { notes: filtered }, { merge: true });
-    // 인덱스에 실제로 있었던 경우에만 카운트 감소 (중복 감소 방지)
-    if (filtered.length !== notesIndex.length) {
-      t.set(metaRefOf(uid), { categoryCount: { [cat]: increment(-1) } }, { merge: true });
+    const countUpdates: Record<string, any> = {};
+
+    oldCats.forEach((c, idx) => {
+      const snap = snaps[idx];
+      const notesIndex: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
+      const filtered = notesIndex.filter(n => n.id !== noteId);
+      t.set(catIndexRef(uid, c), { notes: filtered }, { merge: true });
+      if (filtered.length !== notesIndex.length) {
+        countUpdates[c] = increment(-1);
+      }
+    });
+
+    if (Object.keys(countUpdates).length > 0) {
+      t.set(metaRefOf(uid), { categoryCount: countUpdates }, { merge: true });
     }
   });
 }
 
-// 카테고리 인덱스를 notes 컬렉션 기준으로 재구성 (구버전 인덱스 자동 보정 / 카운트 정정)
-// 카테고리당 최초 1회만 실행되며, 이후 목록 화면은 인덱스만 읽는다.
+// 카테고리 인덱스를 notes 컬렉션 기준으로 재구성 (단일 category + 복수 categories 모두 포함)
 export async function rebuildCategoryIndex(catId: string) {
   const uid = requireUid();
-  const q = query(collection(db, 'notes'),
+  const qSingle = query(collection(db, 'notes'),
     where('uid', '==', uid),
     where('category', '==', catId));
-  const snap = await getDocs(q);
-  const notesIndex = snap.docs.map(d => toIndexItem(d.id, d.data()));
+  const qMulti = query(collection(db, 'notes'),
+    where('uid', '==', uid),
+    where('categories', 'array-contains', catId));
+  const [snapSingle, snapMulti] = await Promise.all([getDocs(qSingle), getDocs(qMulti)]);
+  const map = new Map<string, NoteIndexItem>();
+  snapSingle.docs.forEach(d => map.set(d.id, toIndexItem(d.id, d.data(), catId)));
+  snapMulti.docs.forEach(d => map.set(d.id, toIndexItem(d.id, d.data(), catId)));
+  const notesIndex = Array.from(map.values());
   await setDoc(catIndexRef(uid, catId), { notes: notesIndex });
-  await setDoc(metaRefOf(uid), { categoryCount: { [catId]: snap.size } }, { merge: true });
+  await setDoc(metaRefOf(uid), { categoryCount: { [catId]: notesIndex.length } }, { merge: true });
 }
 
 export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, number>) => void) {
@@ -363,14 +408,10 @@ export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, n
   return onSnapshot(metaRefOf(appState.currentUser.uid), snap => {
     const categoryCount = snap.exists() ? (snap.data().categoryCount || {}) : {};
     onMetaChange(categoryCount);
-
-
   });
 }
 
-
-
-// 9개 카테고리 인덱스를 모두 구독하여 병합 (검색·메모 링크용)
+// 9개 카테고리 인덱스를 모두 구독하여 병합 (복수 카테고리 메모는 ID 기준으로 중복 제거 후 병합)
 export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => void) {
   if (!appState.currentUser) return () => {};
   const uid = appState.currentUser.uid;
@@ -379,24 +420,39 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
   const initialLoaded = new Set<string>();
   let updateTimer: any = null;
 
-  // 기존 로컬 캐시가 있다면 카테고리별 초기값으로 채워 두어 일부 샤드만 먼저 도착했을 때 누락 방지
   for (const cat of categoryKeys) {
     perCategory[cat] = [];
   }
   if (Array.isArray(appState.allNotesCache) && appState.allNotesCache.length > 0) {
     for (const n of appState.allNotesCache as NoteIndexItem[]) {
-      if (n.category && perCategory[n.category]) {
-        perCategory[n.category].push(n);
+      for (const cat of getNoteCategories(n)) {
+        if (perCategory[cat]) {
+          perCategory[cat].push(n);
+        }
       }
     }
   }
 
   const notifyMerged = () => {
-    onIndexChange(categoryKeys.flatMap(c => perCategory[c] || []));
+    const byId = new Map<string, NoteIndexItem>();
+    for (const c of categoryKeys) {
+      for (const item of perCategory[c] || []) {
+        const existing = byId.get(item.id);
+        if (!existing) {
+          const cats = getNoteCategories(item);
+          byId.set(item.id, {
+            ...item,
+            categories: cats.includes(c) ? cats : [...cats, c],
+          });
+        } else {
+          existing.categories = Array.from(new Set([...getNoteCategories(existing), ...getNoteCategories(item), c]));
+        }
+      }
+    }
+    onIndexChange(Array.from(byId.values()));
   };
 
   const scheduleNotifyIfReady = () => {
-    // 9개 카테고리의 초기 스냅샷이 모두 도착한 뒤에만 병합 알림 (부분 도착으로 인한 검색 결과 위치 점프 방지)
     if (initialLoaded.size < categoryKeys.length) return;
     if (updateTimer) clearTimeout(updateTimer);
     updateTimer = setTimeout(notifyMerged, 20);
@@ -418,7 +474,6 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
     )
   );
 
-  // 구독 해제 시 9개 리스너 전부 해제
   return () => {
     if (updateTimer) clearTimeout(updateTimer);
     unsubs.forEach(u => u());
@@ -426,7 +481,6 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
 }
 
 // 단일 카테고리 인덱스 구독 (목록 화면용 — 본문 전체 문서를 읽지 않음)
-// 같은 문서를 subscribeAllNotes도 구독 중이면 SDK가 리스너를 공유하므로 추가 읽기 비용이 거의 없다.
 export function subscribeCategoryIndex(catId: string, onChange: (notes: NoteIndexItem[]) => void, onError: (err: Error) => void) {
   if (!appState.currentUser) {
     console.warn(`subscribeCategoryIndex: 사용자 인증 완료 전 호출됨 (catId: ${catId})`);
