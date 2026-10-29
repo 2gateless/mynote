@@ -7,6 +7,7 @@ export interface Note {
   category: string;
   categories?: string[];
   tag: string;
+  tags?: string[];
   body: string;
   keywords?: string;
   pinned?: boolean;
@@ -23,6 +24,7 @@ export interface NoteIndexItem {
   category: string;
   categories?: string[];
   tag: string;
+  tags?: string[];
   snippet: string;
   keywords?: string;
   // 목록 화면을 notes 컬렉션 조회 없이 인덱스만으로 그리기 위한 필드

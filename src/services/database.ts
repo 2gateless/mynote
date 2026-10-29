@@ -52,6 +52,18 @@ export function getNoteCategories(data: any): string[] {
   return [];
 }
 
+// 메모 객체에서 복수 태그 배열을 안전하게 추출 (구버전 단일 tag 호환)
+export function getNoteTags(data: any): string[] {
+  if (!data) return [];
+  if (Array.isArray(data.tags)) {
+    return Array.from(new Set(data.tags.filter((t: any) => typeof t === 'string' && t.trim() !== ''))) as string[];
+  }
+  if (typeof data.tag === 'string' && data.tag.trim() !== '') {
+    return [data.tag.trim()];
+  }
+  return [];
+}
+
 // ※ 아래 마이그레이션 함수들은 과거 1회성 작업용으로, 현재 앱에서는 호출하지 않습니다. (기록 보존용)
 export async function migrateCategories() {
   if (!appState.currentUser) return;
@@ -263,12 +275,14 @@ function metaRefOf(uid: string) {
 function toIndexItem(id: string, data: any, shardCategory?: string): NoteIndexItem {
   const cats = getNoteCategories(data);
   const primaryCat = shardCategory || data.category || cats[0] || '';
+  const tags = getNoteTags(data);
   return {
     id,
     title: data.title || '',
     category: primaryCat,
     categories: cats.length > 0 ? cats : (primaryCat ? [primaryCat] : []),
-    tag: data.tag || '',
+    tag: tags[0] || '',
+    tags,
     snippet: (data.body || '').substring(0, SNIPPET_LEN),
     keywords: data.keywords || '',
     createdAt: data.createdAt || null,
@@ -291,6 +305,8 @@ export async function createNoteWithIndex(noteData: Partial<Note>): Promise<stri
     ...noteData,
     category: primaryCat,
     categories: targetCats,
+    tag: getNoteTags(noteData)[0] || null,
+    tags: getNoteTags(noteData),
   };
 
   await runTransaction(db, async (t) => {
@@ -319,10 +335,15 @@ export async function updateNoteWithIndex(noteId: string, updateData: Partial<No
   const newCats = newCatsRaw.length > 0 ? newCatsRaw : oldCats;
   const primaryCat = newCats[0] || updateData.category || oldNote.category || '';
   const noteRef = doc(db, 'notes', noteId);
+  const newTags = updateData.tags !== undefined || updateData.tag !== undefined
+    ? getNoteTags(updateData)
+    : getNoteTags(oldNote);
   const data = {
     ...updateData,
     category: primaryCat,
     categories: newCats,
+    tag: newTags[0] || null,
+    tags: newTags,
     updatedAt: Timestamp.now()
   };
   const merged = { ...oldNote, ...data };

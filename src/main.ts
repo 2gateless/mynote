@@ -8,6 +8,7 @@ import {
 import { 
   CATEGORIES, 
   getNoteCategories,
+  getNoteTags,
   SUB_TAGS, 
   subscribeUserMeta, 
   subscribeAllNotes, 
@@ -274,7 +275,7 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
   appState.allNotesCache = notes;
   appState.searchIndex = notes.map(n => ({
     note: n,
-    text: `${n.title || ''}\n${n.snippet || ''}\n${n.keywords || ''}`.toLowerCase()
+    text: `${n.title || ''}\n${n.snippet || ''}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
   }));
   const map = new Map<string, NoteIndexItem>();
   for (const n of notes) {
@@ -664,12 +665,19 @@ function loadList(catId: string, force = false) {
   });
 }
 
+function resolveCategoryForTag(note: any, tag: string, fallbackCat: string): string {
+  for (const cid of getNoteCategories(note)) {
+    if (SUB_TAGS[cid]?.includes(tag)) return cid;
+  }
+  return fallbackCat;
+}
+
 function renderList() {
   if (listLoadTimer) { clearTimeout(listLoadTimer); listLoadTimer = null; }
   const content = $('list-content');
   if (!content) return;
   const notes = appState.currentTag
-    ? listNotesCache.filter(n => n.tag === appState.currentTag)
+    ? listNotesCache.filter(n => getNoteTags(n).includes(appState.currentTag))
     : listNotesCache;
 
   if (notes.length === 0) {
@@ -689,7 +697,7 @@ function renderList() {
       <div class="note-list-bullet"></div>
       <div class="note-list-info">
         <div class="note-list-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
-        <div class="note-list-date">${note.tag ? tagChipHtml(note.category, note.tag, 'note-list-tag', 'color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer') : ''}${fmtDate(note.createdAt)}</div>
+        <div class="note-list-date">${getNoteTags(note).map(t => tagChipHtml(resolveCategoryForTag(note, t, note.category), t, 'note-list-tag', 'color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer')).join('')}${fmtDate(note.createdAt)}</div>
       </div>
       ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : (note.locked ? '<span class="pin-badge" title="잠금">🔒</span>' : '<span class="note-list-arrow">›</span>')}
     </div>`).join('');
@@ -759,7 +767,7 @@ async function openDetail(note: any, from?: string, existingToken?: number) {
   content.innerHTML = `
     <div class="detail-meta">
       ${catBadgesHtml}
-      ${note.tag ? tagChipHtml(tagTargetCat, note.tag, 'detail-tag-badge') : ''}
+      ${getNoteTags(note).map(t => tagChipHtml(resolveCategoryForTag(note, t, tagTargetCat), t, 'detail-tag-badge')).join('')}
       ${note.locked ? '<span class="detail-lock-badge">🔒 잠금</span>' : ''}
       <span class="detail-date">${fmtDate(note.createdAt)}</span>
     </div>
@@ -866,7 +874,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
       .map(entry => entry.note);
 
     // 백그라운드 캐시 동기화로 호출되었을 때 현재 화면에 표시된 결과 목록과 동일하면 DOM 재생성 생략 (클릭 위치 어긋남 방지)
-    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${n.tag || ''}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
+    const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${getNoteTags(n).join(',')}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
     if (fromCacheSync && signature === lastRenderedSearchSignature) {
       return;
     }
@@ -892,7 +900,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
       return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
         <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
         ${catBadgesHtml}
-        ${note.tag ? `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(note.tag)}</span>` : ''}
+        ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
         <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml(note.snippet || '')}</div>
       </div>`;
     }).join('');
@@ -1141,7 +1149,7 @@ function renderNoteLinkList(keyword: string) {
     return `<div class="note-link-item" data-title="${escHtml(note.title)}">`
       + `<span class="note-link-item-cat">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
       + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
-      + (note.tag ? `<span class="note-link-item-tag">#${escHtml(note.tag)}</span>` : '')
+      + getNoteTags(note).map(t => `<span class="note-link-item-tag">#${escHtml(t)}</span>`).join('')
       + `</div>`;
   }).join('');
 }
@@ -1249,22 +1257,35 @@ if (noteCategoryOptionsEl) {
     if (checkMark) checkMark.textContent = cb.checked ? '✓' : '';
 
     updateCategoryMultiselectLabel(selected);
-    const currentCheckedTag = (document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement | null)?.value || null;
-    renderTagOptions(selected, currentCheckedTag);
+    const currentSelectedTags = getSelectedTagsFromUI();
+    renderTagOptions(selected, currentSelectedTags);
   });
 }
 
-function renderTagOptions(catIds: string | string[], selectedTag: string | null) {
+function getSelectedTagsFromUI(): string[] {
+  const to = $('tag-options');
+  if (!to) return [];
+  return Array.from(to.querySelectorAll<HTMLInputElement>('input[name="note-tag"]:checked'))
+    .map(el => el.value)
+    .filter(Boolean);
+}
+
+function renderTagOptions(catIds: string | string[], selectedTagsInput: string | string[] | null) {
   const tg = $('tag-group');
   const to = $('tag-options');
   if (!tg || !to) return;
   const cats = Array.isArray(catIds) ? catIds : [catIds];
   const mergedTags = Array.from(new Set(cats.flatMap(cid => SUB_TAGS[cid] || [])));
+  const selectedSet = new Set(
+    Array.isArray(selectedTagsInput)
+      ? selectedTagsInput.filter(Boolean)
+      : (selectedTagsInput ? [selectedTagsInput] : [])
+  );
   if (mergedTags.length > 0) {
     tg.style.display = 'block';
     to.innerHTML = mergedTags.map((tag) => `
       <label style="display:inline-flex">
-        <input type="radio" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${tag === selectedTag ? 'checked data-was-checked="true"' : ''}>
+        <input type="checkbox" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${selectedSet.has(tag) ? 'checked' : ''}>
         <span class="tag-label">${escHtml(tag)}</span>
       </label>
     `).join('');
@@ -1313,8 +1334,7 @@ function renderTagOptions(catId: string, selectedTag: string | null) {
   }
 }
 
-*/
-// 이미 선택된 태그 라디오를 다시 클릭하면 선택 해제 허용
+// (체크박스 복수 선택으로 전환되어 기존 라디오 단일 토글 리스너는 비활성화)
 const tagOptionsEl = $('tag-options');
 if (tagOptionsEl) {
   tagOptionsEl.addEventListener('click', (e) => {
@@ -1333,6 +1353,7 @@ if (tagOptionsEl) {
   });
 }
 
+*/
 function setLockToggleUI(isLocked: boolean) {
   const cb = $('note-locked') as HTMLInputElement;
   const wrap = $('lock-toggle-wrap');
@@ -1414,7 +1435,7 @@ function openEditModal(note: any) {
   fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
   const editCats = getNoteCategories(note);
   renderCategorySelect(editCats);
-  renderTagOptions(editCats, note.tag || null);
+  renderTagOptions(editCats, getNoteTags(note));
 
   setPinToggleUI(!!note.pinned);
   setLockToggleUI(!!note.locked);
@@ -1530,7 +1551,8 @@ async function saveNote() {
   const body = bodyEl ? bodyEl.value.trim() : '';
   const categories = getSelectedCategoriesFromUI();
   const category = categories[0] || appState.currentCat || Object.keys(CATEGORIES)[0];
-  const tag = tagRadio ? tagRadio.value : null;
+  const tags = getSelectedTagsFromUI();
+  const tag = tags[0] || null;
   const pinned = pinnedEl ? pinnedEl.checked : false;
   const locked = lockedEl ? lockedEl.checked : false;
   const keywords = keywordsEl ? keywordsEl.value.trim() : '';
@@ -1571,7 +1593,7 @@ async function saveNote() {
 
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
-      const updateData = { category, categories, title, body, tag, images: allImages, pinned, pinnedAt, locked, keywords };
+      const updateData = { category, categories, title, body, tag, tags, images: allImages, pinned, pinnedAt, locked, keywords };
       // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장 (카테고리 변경 시 양쪽 인덱스·카운트 원자적 갱신)
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
@@ -1599,7 +1621,7 @@ async function saveNote() {
     } else {
       await createNoteWithIndex({
         category, categories,
-        tag, title, body, images: allImages,
+        tag, tags, title, body, images: allImages,
         pinned, pinnedAt, locked, keywords
       });
       if (unusedSessionInlinePaths.length) {
