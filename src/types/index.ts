@@ -15,6 +15,7 @@ export interface Note {
   locked?: boolean;
   embedding?: number[];
   embeddingUpdatedAt?: Timestamp | null;
+  embeddingModel?: string; // 예: 'gemini-embedding-001@768' (모델·차원이 다른 벡터는 혼용 불가)
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   [key: string]: any;
@@ -36,6 +37,7 @@ export interface NoteIndexItem {
   pinnedAt?: Timestamp | null;
   locked?: boolean;
   embeddingUpdatedAt?: Timestamp | number | null;
+  embeddingModel?: string | null;
 }
 
 export interface UserMeta {

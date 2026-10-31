@@ -67,7 +67,8 @@ import {
   syncAiConfigFromUserMeta,
   backfillMissingEmbeddings,
   upsertVectorNoteCache,
-  removeVectorNoteCache
+  removeVectorNoteCache,
+  EMBEDDING_VERSION
 } from './services/ai';
 
 let recognition: any = null;
@@ -83,7 +84,7 @@ let isSelectingSearchResult = false;
 let isPointerDownOnSearchResults = false;
 let detailFrom = 'list'; // 'list' or 'search'
 let savedSearchScrollY = 0;
-let detailHistoryStack: { note: any; from: string }[] = [];
+let detailHistoryStack: { noteId: string; from: string }[] = [];
 let detailRenderToken = 0;
 
 // 모달에서 새로 업로드한 인라인 이미지 경로 추적 (취소/수정 시 미사용 파일 정리용)
@@ -479,8 +480,8 @@ async function openNoteById(noteId: string, from: string) {
 appState.handleNoteLinkClick = function(el: HTMLElement) {
   const noteId = el.dataset.noteId;
   if (noteId) {
-    if (currentScreen() === 'detail' && appState.currentNote && appState.currentNote.id !== noteId) {
-      detailHistoryStack.push({ note: appState.currentNote, from: detailFrom || 'list' });
+    if (currentScreen() === 'detail' && appState.currentNote && appState.currentNote.id && appState.currentNote.id !== noteId) {
+      detailHistoryStack.push({ noteId: appState.currentNote.id, from: detailFrom || 'list' });
     }
     openNoteById(noteId, detailFrom || 'list');
   }
@@ -821,10 +822,10 @@ if (detailContentEl) {
 }
 
 // 상세 화면에서 이전 화면(검색·AI 추론 결과 또는 카테고리 목록 또는 이전 링크 메모)으로 복귀
-function goBackFromDetail() {
+async function goBackFromDetail() {
   if (detailHistoryStack.length > 0) {
     const prev = detailHistoryStack.pop()!;
-    openDetail(prev.note, prev.from);
+    await openNoteById(prev.noteId, prev.from);
     return;
   }
   if (detailFrom === 'search') {
@@ -941,6 +942,7 @@ function openAiConfigModal() {
   if (!aiConfigModal) return;
   if (aiApiKeyInput) aiApiKeyInput.value = getGeminiApiKey();
   if (aiProxyUrlInput) aiProxyUrlInput.value = getAiProxyUrl();
+  if (aiSyncCloudCb) aiSyncCloudCb.checked = false; // 기본값은 로컬 기기 보관 (보안 권장)
   aiConfigModal.style.display = 'flex';
 }
 
@@ -962,7 +964,7 @@ if (aiConfigSave) {
   aiConfigSave.onclick = async () => {
     const key = aiApiKeyInput ? aiApiKeyInput.value.trim() : '';
     const proxy = aiProxyUrlInput ? aiProxyUrlInput.value.trim() : '';
-    const syncCloud = aiSyncCloudCb ? aiSyncCloudCb.checked : true;
+    const syncCloud = aiSyncCloudCb ? aiSyncCloudCb.checked : false;
     aiConfigSave.disabled = true;
     try {
       await saveAiConfig(key, proxy, syncCloud);
@@ -991,7 +993,7 @@ if (btnBackfillEmbeddings) {
         showToast('먼저 Gemini API 키를 입력하고 저장해주세요');
         return;
       }
-      await saveAiConfig(tempKey, tempProxy, aiSyncCloudCb ? aiSyncCloudCb.checked : true);
+      await saveAiConfig(tempKey, tempProxy, aiSyncCloudCb ? aiSyncCloudCb.checked : false);
     }
     btnBackfillEmbeddings.disabled = true;
     btnBackfillEmbeddings.textContent = '⏳ 변환 중...';
@@ -1065,7 +1067,7 @@ async function runAiSemanticSearch(rawQuery: string) {
           <span class="ai-rag-badge">Gemini Flash</span>
         </div>
         <div class="ai-rag-body" style="color:var(--text-light)">
-          🧠 질문을 임베딩(<code>text-embedding-004</code>)하여 연관 메모를 탐색하고 있습니다...
+          🧠 질문을 임베딩(<code>gemini-embedding-001</code>)하여 연관 메모를 탐색하고 있습니다...
         </div>
       </div>
     `;
@@ -1433,7 +1435,7 @@ const btnAddNote = $('btn-add-note');
 if (btnAddNote) btnAddNote.onclick = openAddModal;
 
 const btnCancel = $('btn-cancel');
-if (btnCancel) btnCancel.onclick = () => closeModal(false);
+if (btnCancel) btnCancel.onclick = () => requestCloseModal(false);
 
 const btnSave = $('btn-save');
 if (btnSave) btnSave.onclick = saveNote;
@@ -1610,6 +1612,7 @@ if (noteCategoryOptionsEl) {
     updateCategoryMultiselectLabel(selected);
     const currentSelectedTags = getSelectedTagsFromUI();
     renderTagOptions(selected, currentSelectedTags);
+    scheduleSaveDraft();
   });
 }
 
@@ -1644,6 +1647,11 @@ function renderTagOptions(catIds: string | string[], selectedTagsInput: string |
     tg.style.display = 'none';
     to.innerHTML = '';
   }
+}
+
+const tagOptionsEl = $('tag-options');
+if (tagOptionsEl) {
+  tagOptionsEl.addEventListener('change', () => scheduleSaveDraft());
 }
 
 /*
@@ -1743,6 +1751,96 @@ function fillNoteForm(title: string, body: string, keywords: string, modalTitleT
 // 모달 세션 토큰 (모달을 닫거나 새로 열 때 이전 업로드 작업 무효화용)
 let modalSessionToken = 0;
 
+// 작성 중인 메모 실수 방지 및 드래프트 자동 저장
+const NOTE_DRAFT_KEY = 'mynote_new_note_draft_v1';
+let draftSaveTimer: any = null;
+
+interface NoteFormSnapshot {
+  title: string;
+  body: string;
+  keywords: string;
+  pinned: boolean;
+  locked: boolean;
+  categories: string[];
+  tags: string[];
+}
+
+let initialNoteFormSnapshot: NoteFormSnapshot | null = null;
+
+function takeCurrentFormSnapshot(): NoteFormSnapshot {
+  const titleEl = $('note-title') as HTMLInputElement | null;
+  const bodyEl = $('note-body') as HTMLTextAreaElement | null;
+  const keywordsEl = $('note-keywords') as HTMLInputElement | null;
+  const pinnedEl = $('note-pinned') as HTMLInputElement | null;
+  const lockedEl = $('note-locked') as HTMLInputElement | null;
+  return {
+    title: (titleEl?.value || '').trim(),
+    body: (bodyEl?.value || '').trim(),
+    keywords: (keywordsEl?.value || '').trim(),
+    pinned: !!pinnedEl?.checked,
+    locked: !!lockedEl?.checked,
+    categories: getSelectedCategoriesFromUI(),
+    tags: getSelectedTagsFromUI()
+  };
+}
+
+function isNoteFormDirty(): boolean {
+  const modal = $('note-modal');
+  if (!modal || modal.style.display === 'none' || !initialNoteFormSnapshot) return false;
+  if (sessionUploadedInlineImages.length > 0) return true;
+
+  const current = takeCurrentFormSnapshot();
+  const init = initialNoteFormSnapshot;
+
+  if (current.title !== init.title) return true;
+  if (current.body !== init.body) return true;
+  if (current.keywords !== init.keywords) return true;
+  if (current.pinned !== init.pinned) return true;
+  if (current.locked !== init.locked) return true;
+
+  const initCats = init.categories.slice().sort().join(',');
+  const curCats = current.categories.slice().sort().join(',');
+  if (initCats !== curCats) return true;
+
+  const initTags = init.tags.slice().sort().join(',');
+  const curTags = current.tags.slice().sort().join(',');
+  if (initTags !== curTags) return true;
+
+  return false;
+}
+
+function clearDraft() {
+  clearTimeout(draftSaveTimer);
+  try {
+    localStorage.removeItem(NOTE_DRAFT_KEY);
+  } catch {}
+}
+
+function scheduleSaveDraft() {
+  if (appState.editingNoteId) return;
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => {
+    try {
+      const snap = takeCurrentFormSnapshot();
+      if (snap.title || snap.body || snap.keywords) {
+        localStorage.setItem(NOTE_DRAFT_KEY, JSON.stringify(snap));
+      } else {
+        localStorage.removeItem(NOTE_DRAFT_KEY);
+      }
+    } catch {}
+  }, 400);
+}
+
+function requestCloseModal(saved = false): boolean {
+  if (!saved && isNoteFormDirty()) {
+    const leave = confirm('작성 중인 내용이 저장되지 않았습니다. 닫으시겠습니까?');
+    if (!leave) return false;
+  }
+  clearDraft();
+  closeModal(saved);
+  return true;
+}
+
 const inlineImgBtn = $('inline-img-btn') as HTMLButtonElement;
 const inlineImgInput = $('inline-img-input') as HTMLInputElement;
 
@@ -1768,11 +1866,38 @@ function openAddModal() {
   sessionUploadedInlineImages = [];
   resetInlineImgBtn();
   const catId = appState.currentCat || Object.keys(CATEGORIES)[0];
+
+  // 이전에 저장되지 못한 임시 작성본(드래프트)이 있는지 확인하여 복구 제안
+  try {
+    const rawDraft = localStorage.getItem(NOTE_DRAFT_KEY);
+    if (rawDraft) {
+      const draft = JSON.parse(rawDraft);
+      if (draft && (draft.title || draft.body || draft.keywords)) {
+        if (confirm('이전에 작성 중이던 임시 저장 메모가 있습니다. 복구할까요?')) {
+          fillNoteForm(draft.title || '', draft.body || '', draft.keywords || '', '새 메모 (임시저장 복구)');
+          const draftCats = Array.isArray(draft.categories) && draft.categories.length > 0 ? draft.categories : [catId];
+          renderCategorySelect(draftCats);
+          renderTagOptions(draftCats, draft.tags || []);
+          setPinToggleUI(!!draft.pinned);
+          setLockToggleUI(!!draft.locked);
+          initialNoteFormSnapshot = takeCurrentFormSnapshot();
+          setDisplay('note-modal', 'flex');
+          return;
+        } else {
+          clearDraft();
+        }
+      }
+    }
+  } catch (e) {
+    clearDraft();
+  }
+
   fillNoteForm('', '', '', `새 메모 — ${CATEGORIES[catId]?.name || ''}`);
   renderCategorySelect(catId);
   renderTagOptions(catId, appState.currentTag || null);
   setPinToggleUI(false);
   setLockToggleUI(false);
+  initialNoteFormSnapshot = takeCurrentFormSnapshot();
   setDisplay('note-modal', 'flex');
 }
 
@@ -1790,11 +1915,13 @@ function openEditModal(note: any) {
 
   setPinToggleUI(!!note.pinned);
   setLockToggleUI(!!note.locked);
+  initialNoteFormSnapshot = takeCurrentFormSnapshot();
   setDisplay('note-modal', 'flex');
 }
 
 function closeModal(saved = false) {
   modalSessionToken++;
+  initialNoteFormSnapshot = null;
   setDisplay('note-modal', 'none');
   stopRecording();
   resetInlineImgBtn();
@@ -1810,6 +1937,12 @@ function closeModal(saved = false) {
 // IMAGE UPLOADS (본문 인라인 이미지)
 // ─────────────────────────────────────────────
 const noteBodyEl = $('note-body') as HTMLTextAreaElement;
+
+// 폼 입력 시 새 메모 임시 저장(드래프트) 자동 스케줄링
+['note-title', 'note-body', 'note-keywords'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('input', () => scheduleSaveDraft());
+});
 
 // 이미지 압축(Blob) → Storage 업로드 → 본문 커서 위치에 마크다운 삽입
 async function uploadAndInsertImage(file: File, prefix: string, token: number): Promise<boolean> {
@@ -1942,7 +2075,7 @@ async function saveNote() {
       .filter(img => !body.includes(img.url))
       .map(img => img.path || img.url);
 
-    // 요구사항 1: 메모 본문/제목/태그를 Google Gemini text-embedding-004로 임베딩 변환
+    // 요구사항 1: 메모 본문/제목/태그를 Google Gemini gemini-embedding-001(768차원)로 임베딩 변환
     const embedding = await tryGenerateNoteEmbedding({
       title,
       body,
@@ -1953,7 +2086,7 @@ async function saveNote() {
       keywords
     });
     const embeddingFields = embedding
-      ? { embedding, embeddingUpdatedAt: Timestamp.now() }
+      ? { embedding, embeddingModel: EMBEDDING_VERSION, embeddingUpdatedAt: Timestamp.now() }
       : {};
 
     if (isEdit) {
@@ -2004,7 +2137,7 @@ async function saveNote() {
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
     }
     sessionUploadedInlineImages = [];
-    closeModal(true);
+    requestCloseModal(true);
   } catch(e: any) { 
     showToast('저장 실패: ' + e.message); 
   } finally { 
@@ -2042,6 +2175,8 @@ if (delConfirm) {
         // 메모 문서 + 인덱스 + 카운트를 단일 트랜잭션으로 삭제
         await deleteNoteWithIndex(id, target);
         removeVectorNoteCache(id);
+        // 히스토리 스택에 해당 메모가 있다면 제거
+        detailHistoryStack = detailHistoryStack.filter(item => item.noteId !== id);
         // 메모 삭제가 확정된 뒤 Storage 이미지를 병렬로 정리 (UI는 기다리지 않음)
         const paths = collectImagePaths(target);
         if (paths.length) deleteImagesFromStorage(paths).catch(console.error);
@@ -2049,7 +2184,7 @@ if (delConfirm) {
       }
       setDisplay('del-modal', 'none');
       appState.deleteTargetId = null;
-      goBackToList();
+      goBackFromDetail();
     } catch(e: any) {
       showToast('삭제 실패: ' + e.message);
     } finally {
@@ -2166,7 +2301,7 @@ if (notePinnedCb) {
 const noteModal = $('note-modal');
 if (noteModal) {
   noteModal.addEventListener('click', e => { 
-    if ((e.target as HTMLElement).id === 'note-modal') closeModal(); 
+    if ((e.target as HTMLElement).id === 'note-modal') requestCloseModal(false); 
   });
 }
 ['del-modal', 'share-modal'].forEach(id => {
@@ -2207,7 +2342,11 @@ initPwaNavigation((screen) => {
     return;
   }
   if (screen === 'modal') { 
-    closeModal(); 
+    const closed = requestCloseModal(false); 
+    if (!closed) {
+      history.pushState(null, '', location.href);
+      return;
+    }
     history.pushState(null, '', location.href); 
     return; 
   }

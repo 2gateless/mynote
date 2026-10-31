@@ -26,16 +26,31 @@ import { Note, NoteIndexItem } from '../types';
 // ─────────────────────────────────────────────
 const STORAGE_KEY_API = 'mynote_gemini_api_key';
 const STORAGE_KEY_PROXY = 'mynote_ai_proxy_url';
-const BOOTSTRAP_FLAG_PREFIX = 'mynote_ai_vec_init_v1_';
+// v2: 임베딩 모델 교체(gemini-embedding-001@768)에 따라 기기별 초기 동기화를 1회 다시 수행
+const BOOTSTRAP_FLAG_PREFIX = 'mynote_ai_vec_init_v2_';
 
 // IndexedDB 설정 (영구 로컬 벡터 & 본문 캐시 — 새로고침/재실행 시에도 Firestore 재조회 0회 보장)
 const IDB_NAME = 'mynote_ai_vector_cache_db';
 const IDB_VERSION = 1;
 const IDB_STORE = 'note_vectors';
 
-// 요구사항 1: Google Gemini text-embedding-004 기본 사용 (신규 키 호환용 폴백 포함)
-const PRIMARY_EMBEDDING_MODEL = 'text-embedding-004';
-const FALLBACK_EMBEDDING_MODEL = 'gemini-embedding-001';
+// 임베딩 모델: text-embedding-004는 2026-01-14 서비스 종료되어 gemini-embedding-001로 교체.
+// gemini-embedding-001의 기본 차원은 3072이므로 outputDimensionality로 768차원에 고정한다.
+// ※ 모델이 다르면 차원이 같아도 벡터 공간이 달라 서로 비교할 수 없으므로,
+//    메모마다 embeddingModel(= EMBEDDING_VERSION)을 저장하고 버전이 다른 벡터는 검색에서 제외한다.
+export const EMBEDDING_MODEL = 'gemini-embedding-001';
+export const EMBEDDING_DIM = 768;
+export const EMBEDDING_VERSION = `${EMBEDDING_MODEL}@${EMBEDDING_DIM}`;
+
+// 일괄 변환 시 한 번의 batchEmbedContents 요청에 담을 메모 수 (무료 등급 TPM 한도를 고려해 작게 유지)
+const EMBED_BATCH_SIZE = 10;
+// 429(할당량 초과) 응답 시 재시도 횟수
+const EMBED_MAX_RETRIES = 4;
+
+/** 현재 앱이 사용하는 모델·차원으로 생성된 벡터인지 확인 */
+export function isCurrentEmbedding(model: unknown, embedding: unknown): embedding is number[] {
+  return model === EMBEDDING_VERSION && Array.isArray(embedding) && embedding.length === EMBEDDING_DIM;
+}
 
 // 요구사항 3: Gemini Flash 모델 (최신 정식 식별자 및 -latest 별칭 우선 + 동적 ListModels 자동 탐색 지원)
 const FLASH_MODELS = [
@@ -61,7 +76,21 @@ interface LocalVectorRecord {
   uid: string;
   embedding: number[];
   embeddingUpdatedMs: number;
-  body?: string; // 상위 매칭된 메모의 본문 캐시 (반복 조회 시 읽기 비용 0)
+  model?: string; // EMBEDDING_VERSION (구버전 레코드에는 없음 → 로드 시 폐기)
+  body?: string; // 상위 매칭된 메모의 본문 캐시 (반복 조회 시 읽기 비용 0, 잠금 메모는 저장하지 않음)
+}
+
+// Firestore 메모 데이터 → 로컬 벡터 레코드 (현재 버전 임베딩이 아니면 null, 잠금 메모는 본문 미보관)
+function toVectorRecord(id: string, uid: string, data: any): LocalVectorRecord | null {
+  if (!isCurrentEmbedding(data?.embeddingModel, data?.embedding)) return null;
+  return {
+    id,
+    uid,
+    embedding: data.embedding,
+    embeddingUpdatedMs: toMillis(data.embeddingUpdatedAt) || toMillis(data.updatedAt) || Date.now(),
+    model: EMBEDDING_VERSION,
+    body: !data.locked && typeof data.body === 'string' ? data.body : undefined
+  };
 }
 
 // 세션 인메모리 캐시 (IndexedDB와 1:1 동기화)
@@ -107,10 +136,18 @@ async function loadVectorsFromIdb(uid: string): Promise<Map<string, LocalVectorR
       const req = store.getAll();
       req.onsuccess = () => {
         const rows = (req.result || []) as LocalVectorRecord[];
+        const staleIds: string[] = [];
         for (const r of rows) {
-          if (r && r.uid === uid && Array.isArray(r.embedding) && r.embedding.length > 0) {
+          if (!r) continue;
+          if (r.uid === uid && isCurrentEmbedding(r.model, r.embedding)) {
             map.set(r.id, r);
+          } else if (r.uid === uid) {
+            // 구버전 모델(text-embedding-004 등) 벡터는 현재 질문 벡터와 비교할 수 없으므로 폐기
+            staleIds.push(r.id);
           }
+        }
+        if (staleIds.length > 0) {
+          deleteVectorsFromIdb(staleIds).catch(() => {});
         }
         resolve(map);
       };
@@ -142,13 +179,19 @@ async function putVectorsToIdb(records: LocalVectorRecord[]): Promise<void> {
 }
 
 async function deleteVectorFromIdb(noteId: string): Promise<void> {
+  return deleteVectorsFromIdb([noteId]);
+}
+
+async function deleteVectorsFromIdb(noteIds: string[]): Promise<void> {
+  if (noteIds.length === 0) return;
   const idb = await openVectorIdb();
   if (!idb) return;
 
   return new Promise((resolve) => {
     try {
       const tx = idb.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).delete(noteId);
+      const store = tx.objectStore(IDB_STORE);
+      for (const id of noteIds) store.delete(id);
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
     } catch {
@@ -189,7 +232,7 @@ export function hasAiCredentials(): boolean {
   return Boolean(getAiProxyUrl() || getGeminiApiKey());
 }
 
-export async function saveAiConfig(apiKey: string, proxyUrl = '', syncToCloud = true): Promise<void> {
+export async function saveAiConfig(apiKey: string, proxyUrl = '', syncToCloud = false): Promise<void> {
   const cleanKey = apiKey.trim();
   const cleanProxy = proxyUrl.trim();
   try {
@@ -202,16 +245,28 @@ export async function saveAiConfig(apiKey: string, proxyUrl = '', syncToCloud = 
     console.warn('로컬 스토리지 AI 설정 저장 오류:', e);
   }
 
-  if (syncToCloud && appState.currentUser) {
+  if (appState.currentUser) {
     try {
-      await setDoc(
-        doc(db, 'user_meta', appState.currentUser.uid),
-        {
-          geminiApiKey: cleanKey || null,
-          aiProxyUrl: cleanProxy || null
-        },
-        { merge: true }
-      );
+      if (syncToCloud) {
+        await setDoc(
+          doc(db, 'user_meta', appState.currentUser.uid),
+          {
+            geminiApiKey: cleanKey || null,
+            aiProxyUrl: cleanProxy || null
+          },
+          { merge: true }
+        );
+      } else {
+        // 보안: 클라우드 동기화를 끈 경우 user_meta에서 API 키 필드를 완전히 삭제(null 처리)
+        await setDoc(
+          doc(db, 'user_meta', appState.currentUser.uid),
+          {
+            geminiApiKey: null,
+            aiProxyUrl: null
+          },
+          { merge: true }
+        );
+      }
     } catch (e) {
       console.warn('Firestore AI 설정 동기화 오류:', e);
     }
@@ -240,7 +295,8 @@ export async function syncAiConfigFromUserMeta(): Promise<void> {
 // 2. 텍스트 전처리 및 Gemini 임베딩 API 호출
 // ─────────────────────────────────────────────
 
-export function cleanTextForEmbedding(raw: string, maxChars = 6000): string {
+// gemini-embedding-001의 입력 한도는 2,048 토큰이므로 한글 기준 여유 있게 3,000자로 자름
+export function cleanTextForEmbedding(raw: string, maxChars = 3000): string {
   if (!raw) return '';
   return raw
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
@@ -270,83 +326,157 @@ export function buildNoteEmbeddingInput(noteData: Partial<Note>): string {
   return parts.join('\n').trim();
 }
 
+type EmbedTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
+
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
+function sleep(ms: number) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// 429 응답의 RetryInfo(예: "retryDelay": "23s")에서 대기 시간을 읽어옴 (없으면 null)
+function parseRetryDelayMs(errJson: any): number | null {
+  const details = errJson?.error?.details;
+  if (!Array.isArray(details)) return null;
+  for (const d of details) {
+    const raw = d?.retryDelay;
+    if (typeof raw === 'string') {
+      const sec = parseFloat(raw);
+      if (!Number.isNaN(sec)) return Math.ceil(sec * 1000);
+    }
+  }
+  return null;
+}
+
+// 429(할당량 초과)/503(일시 과부하)에 한해 지수 백오프로 재시도. 그 외 오류는 즉시 throw
+async function postGeminiWithRetry(url: string, body: unknown, apiKey: string): Promise<any> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify(body)
+    });
+    if (res.ok) return res.json();
+
+    const errJson = await res.json().catch(() => ({}));
+    const errMsg = errJson?.error?.message || `HTTP ${res.status}`;
+    const retryable = res.status === 429 || res.status === 503;
+    if (!retryable || attempt >= EMBED_MAX_RETRIES) {
+      const err: any = new Error(`Gemini 임베딩 오류 (${res.status}): ${errMsg}`);
+      err.status = res.status;
+      throw err;
+    }
+    const waitMs = parseRetryDelayMs(errJson) ?? Math.min(60000, 5000 * 2 ** attempt);
+    console.warn(`임베딩 API ${res.status} — ${Math.round(waitMs / 1000)}초 후 재시도 (${attempt + 1}/${EMBED_MAX_RETRIES})`);
+    await sleep(waitMs);
+  }
+}
+
+function assertEmbeddingValues(values: unknown): number[] {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error('임베딩 결과가 비어 있습니다.');
+  }
+  if (values.length !== EMBEDDING_DIM) {
+    throw new Error(`임베딩 차원이 예상(${EMBEDDING_DIM})과 다릅니다: ${values.length}`);
+  }
+  return values as number[];
+}
+
+async function embedViaProxy(cleaned: string, taskType: EmbedTaskType): Promise<number[]> {
+  const proxyUrl = getAiProxyUrl();
+  const idToken = await auth.currentUser?.getIdToken();
+  const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/embed`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {})
+    },
+    body: JSON.stringify({
+      model: EMBEDDING_MODEL,
+      outputDimensionality: EMBEDDING_DIM,
+      text: cleaned,
+      taskType
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`임베딩 프록시 오류 (${res.status}): ${errText}`);
+  }
+  const data = await res.json();
+  return assertEmbeddingValues(data?.embedding?.values || data?.values);
+}
+
+function requireApiKey(): string {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    throw new Error('AI 기능을 사용하려면 먼저 Gemini API 키를 설정해주세요.');
+  }
+  return apiKey;
+}
+
 export async function generateTextEmbedding(
   text: string,
-  taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY' = 'RETRIEVAL_DOCUMENT'
+  taskType: EmbedTaskType = 'RETRIEVAL_DOCUMENT'
 ): Promise<number[]> {
   const cleaned = cleanTextForEmbedding(text);
   if (!cleaned) {
     throw new Error('임베딩할 텍스트가 비어 있습니다.');
   }
 
-  const proxyUrl = getAiProxyUrl();
-  if (proxyUrl) {
-    const idToken = await auth.currentUser?.getIdToken();
-    const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/embed`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(idToken ? { Authorization: `Bearer ${idToken}` } : {})
-      },
-      body: JSON.stringify({
-        model: PRIMARY_EMBEDDING_MODEL,
-        text: cleaned,
-        taskType
-      })
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`임베딩 프록시 오류 (${res.status}): ${errText}`);
-    }
-    const data = await res.json();
-    const values = data?.embedding?.values || data?.values;
-    if (!Array.isArray(values) || values.length === 0) {
-      throw new Error('프록시에서 유효한 임베딩 벡터를 받지 못했습니다.');
-    }
-    return values;
+  if (getAiProxyUrl()) {
+    return embedViaProxy(cleaned, taskType);
   }
 
-  const apiKey = getGeminiApiKey();
-  if (!apiKey) {
-    throw new Error('AI 기능을 사용하려면 먼저 Gemini API 키를 설정해주세요.');
-  }
-
-  const callEmbedModel = async (modelName: string): Promise<Response> => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:embedContent?key=${encodeURIComponent(apiKey)}`;
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: `models/${modelName}`,
-        content: {
-          parts: [{ text: cleaned }]
-        },
-        taskType
-      })
-    });
-  };
-
-  let res = await callEmbedModel(PRIMARY_EMBEDDING_MODEL);
-  if (res.status === 404) {
-    res = await callEmbedModel(FALLBACK_EMBEDDING_MODEL);
-  }
-
-  if (!res.ok) {
-    let errMsg = `HTTP ${res.status}`;
-    try {
-      const errJson = await res.json();
-      errMsg = errJson?.error?.message || errMsg;
-    } catch {}
-    throw new Error(`Gemini 임베딩 오류: ${errMsg}`);
-  }
-
-  const json = await res.json();
-  const values = json?.embedding?.values;
-  if (!Array.isArray(values) || values.length === 0) {
-    throw new Error('임베딩 결과가 비어 있습니다.');
-  }
-  return values as number[];
+  const apiKey = requireApiKey();
+  const json = await postGeminiWithRetry(
+    `${GEMINI_API_BASE}/models/${EMBEDDING_MODEL}:embedContent`,
+    {
+      model: `models/${EMBEDDING_MODEL}`,
+      content: { parts: [{ text: cleaned }] },
+      taskType,
+      outputDimensionality: EMBEDDING_DIM
+    },
+    apiKey
+  );
+  return assertEmbeddingValues(json?.embedding?.values);
 }
+
+/**
+ * 여러 문서를 한 번의 batchEmbedContents 요청으로 임베딩 (일괄 변환용).
+ * 프록시 사용 시에는 프록시가 배치를 지원하지 않을 수 있으므로 단건 호출을 순차 수행.
+ */
+export async function generateTextEmbeddingsBatch(texts: string[]): Promise<number[][]> {
+  const cleanedList = texts.map(t => cleanTextForEmbedding(t));
+  if (cleanedList.some(t => !t)) {
+    throw new Error('임베딩할 텍스트가 비어 있는 항목이 있습니다.');
+  }
+
+  if (getAiProxyUrl()) {
+    const out: number[][] = [];
+    for (const t of cleanedList) out.push(await embedViaProxy(t, 'RETRIEVAL_DOCUMENT'));
+    return out;
+  }
+
+  const apiKey = requireApiKey();
+  const json = await postGeminiWithRetry(
+    `${GEMINI_API_BASE}/models/${EMBEDDING_MODEL}:batchEmbedContents`,
+    {
+      requests: cleanedList.map(t => ({
+        model: `models/${EMBEDDING_MODEL}`,
+        content: { parts: [{ text: t }] },
+        taskType: 'RETRIEVAL_DOCUMENT',
+        outputDimensionality: EMBEDDING_DIM
+      }))
+    },
+    apiKey
+  );
+  const embeddings = json?.embeddings;
+  if (!Array.isArray(embeddings) || embeddings.length !== cleanedList.length) {
+    throw new Error('일괄 임베딩 응답 개수가 요청과 다릅니다.');
+  }
+  return embeddings.map((e: any) => assertEmbeddingValues(e?.values));
+}
+
 
 export async function tryGenerateNoteEmbedding(noteData: Partial<Note>): Promise<number[] | null> {
   if (!hasAiCredentials()) return null;
@@ -392,14 +522,17 @@ export function cosineSimilarity(vecA?: number[] | null, vecB?: number[] | null)
 export function upsertVectorNoteCache(note: Note) {
   const uid = appState.currentUser?.uid || note.uid;
   if (!note.id || !uid) return;
-  if (!Array.isArray(note.embedding) || note.embedding.length === 0) return;
+  const modelVer = note.embeddingModel || EMBEDDING_VERSION;
+  if (!isCurrentEmbedding(modelVer, note.embedding)) return;
 
   const rec: LocalVectorRecord = {
     id: note.id,
     uid,
     embedding: note.embedding,
     embeddingUpdatedMs: toMillis(note.embeddingUpdatedAt) || Date.now(),
-    body: typeof note.body === 'string' ? note.body : undefined
+    model: EMBEDDING_VERSION,
+    // 잠금 메모는 평문 본문이 IndexedDB에 남지 않도록 보관하지 않음
+    body: !note.locked && typeof note.body === 'string' ? note.body : undefined
   };
 
   if (memoryVectorMap && memoryVectorUid === uid) {
@@ -444,15 +577,8 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
     const snap = await getDocs(q);
     const toSave: LocalVectorRecord[] = [];
     snap.docs.forEach(d => {
-      const data = d.data();
-      if (Array.isArray(data.embedding) && data.embedding.length > 0) {
-        const rec: LocalVectorRecord = {
-          id: d.id,
-          uid,
-          embedding: data.embedding,
-          embeddingUpdatedMs: toMillis(data.embeddingUpdatedAt) || toMillis(data.updatedAt) || Date.now(),
-          body: typeof data.body === 'string' ? data.body : undefined
-        };
+      const rec = toVectorRecord(d.id, uid, d.data());
+      if (rec) {
         memoryVectorMap!.set(d.id, rec);
         toSave.push(rec);
       }
@@ -466,14 +592,15 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
     return memoryVectorMap;
   }
 
-  // 2) 증분 동기화(Delta Sync): 인덱스(allNotesCache)에서 embeddingUpdatedAt이 갱신된 문서만 선별하여 단건 조회
+  // 2) 증분 동기화(Delta Sync): 인덱스(allNotesCache)에서 embeddingUpdatedAt이 갱신되었거나
+  //    로컬 캐시 벡터의 모델 버전이 다른 문서만 선별하여 단건 조회
   //    변경된 메모가 없으면 Firestore 읽기 횟수 = 0건!
   const staleNoteIds: string[] = [];
   for (const item of indexItems) {
     const idxEmbMs = toMillis(item.embeddingUpdatedAt);
     if (!idxEmbMs) continue; // 인덱스에 임베딩 타임스탬프가 없으면 불필요한 조회 생략
     const localRec = memoryVectorMap.get(item.id);
-    if (!localRec || localRec.embeddingUpdatedMs < idxEmbMs) {
+    if (!localRec || localRec.embeddingUpdatedMs < idxEmbMs || localRec.model !== EMBEDDING_VERSION) {
       staleNoteIds.push(item.id);
     }
   }
@@ -486,15 +613,8 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
         try {
           const snap = await getDoc(doc(db, 'notes', noteId));
           if (!snap.exists()) return;
-          const data = snap.data();
-          if (Array.isArray(data.embedding) && data.embedding.length > 0) {
-            const rec: LocalVectorRecord = {
-              id: snap.id,
-              uid,
-              embedding: data.embedding,
-              embeddingUpdatedMs: toMillis(data.embeddingUpdatedAt) || Date.now(),
-              body: typeof data.body === 'string' ? data.body : undefined
-            };
+          const rec = toVectorRecord(snap.id, uid, snap.data());
+          if (rec) {
             memoryVectorMap!.set(snap.id, rec);
             fetchedRecords.push(rec);
           }
@@ -744,12 +864,15 @@ export async function generateRagAnswer(
   // 단일 모델로 generateContent 호출하는 내부 헬퍼
   const tryGenerateWithModel = async (
     modelName: string
-  ): Promise<{ ok: boolean; status: number; answer?: string; errorMsg?: string }> => {
+  ): Promise<{ ok: boolean; status: number; answer?: string; errorMsg?: string; fatal?: boolean }> => {
     const cleanModel = modelName.replace(/^models\//, '');
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const url = `${GEMINI_API_BASE}/models/${cleanModel}:generateContent`;
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
       body: JSON.stringify({
         systemInstruction: {
           parts: [{ text: systemInstruction }]
@@ -762,8 +885,6 @@ export async function generateRagAnswer(
         ],
         generationConfig: {
           temperature: 0.3,
-          // gemini-2.5-flash 등 최신 모델은 내부 추론(thinking) 토큰이 출력 한도에 포함되므로
-          // 1500으로 제한하면 추론 도중 토큰이 소진되어 빈 응답이 반환될 수 있음 → 충분한 한도(8192) 부여
           maxOutputTokens: 8192
         }
       })
@@ -771,10 +892,14 @@ export async function generateRagAnswer(
 
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}));
+      const errorMsg = errJson?.error?.message || `HTTP ${res.status}`;
+      // 401(잘못된 키) 또는 403(권한 없음)은 다른 모델을 시도해도 해결되지 않으므로 치명적 오류로 즉시 중단
+      const fatal = res.status === 401 || res.status === 403;
       return {
         ok: false,
         status: res.status,
-        errorMsg: errJson?.error?.message || `HTTP ${res.status}`
+        errorMsg,
+        fatal
       };
     }
 
@@ -820,7 +945,11 @@ export async function generateRagAnswer(
       if (result.errorMsg) {
         errors.push(`${model}: ${result.errorMsg}`);
       }
+      if (result.fatal) {
+        throw new Error(`Gemini API 인증 오류: ${result.errorMsg}`);
+      }
     } catch (e: any) {
+      if (e?.message?.includes('인증 오류')) throw e;
       errors.push(`${model}: ${e?.message || String(e)}`);
     }
   }
@@ -828,8 +957,10 @@ export async function generateRagAnswer(
   // 정적 후보 모델들이 모두 실패한 경우: Google API의 ListModels를 직접 호출하여
   // 현재 API 키에서 사용 가능한 generateContent 지원 모델을 동적으로 찾아 재시도
   try {
-    const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
-    const listRes = await fetch(listUrl);
+    const listUrl = `${GEMINI_API_BASE}/models`;
+    const listRes = await fetch(listUrl, {
+      headers: { 'x-goog-api-key': apiKey }
+    });
     if (listRes.ok) {
       const listJson = await listRes.json();
       const availableModels: string[] = (listJson?.models || [])
@@ -859,9 +990,13 @@ export async function generateRagAnswer(
           cachedWorkingFlashModel = dynModel;
           return result.answer;
         }
+        if (result.fatal) {
+          throw new Error(`Gemini API 인증 오류: ${result.errorMsg}`);
+        }
       }
     }
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.message?.includes('인증 오류')) throw e;
     console.warn('동적 모델 목록 조회(ListModels) 실패:', e);
   }
 
@@ -883,21 +1018,18 @@ export async function backfillMissingEmbeddings(
   const snap = await getDocs(q);
 
   const allDocs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Note));
-  const targets = allDocs.filter(n => !Array.isArray(n.embedding) || n.embedding.length === 0);
+  // 현재 모델·차원(gemini-embedding-001@768)과 일치하지 않는 모든 메모를 갱신 대상으로 선정
+  const targets = allDocs.filter(n => !isCurrentEmbedding(n.embeddingModel, n.embedding));
 
-  // 이미 Firestore에 임베딩이 있던 문서들도 로컬 IndexedDB에 누락 없이 채워 넣음
+  // 이미 현재 모델 임베딩을 보유한 문서는 로컬 IndexedDB에 채워 넣음
   const existingVecRecords: LocalVectorRecord[] = [];
   for (const n of allDocs) {
-    if (n.id && Array.isArray(n.embedding) && n.embedding.length > 0 && !vectorMap.has(n.id)) {
-      const rec: LocalVectorRecord = {
-        id: n.id,
-        uid,
-        embedding: n.embedding,
-        embeddingUpdatedMs: toMillis(n.embeddingUpdatedAt) || Date.now(),
-        body: typeof n.body === 'string' ? n.body : undefined
-      };
-      vectorMap.set(n.id, rec);
-      existingVecRecords.push(rec);
+    if (n.id && isCurrentEmbedding(n.embeddingModel, n.embedding) && !vectorMap.has(n.id)) {
+      const rec = toVectorRecord(n.id, uid, n);
+      if (rec) {
+        vectorMap.set(n.id, rec);
+        existingVecRecords.push(rec);
+      }
     }
   }
   if (existingVecRecords.length > 0) {
@@ -909,32 +1041,73 @@ export async function backfillMissingEmbeddings(
   const skipped = allDocs.length - targets.length;
   const touchedCategories = new Set<string>();
 
-  for (let i = 0; i < targets.length; i++) {
-    const note = targets[i];
-    if (!note.id) continue;
-    onProgress?.(i + 1, targets.length, note.title || '제목 없음');
+  // 배치 단위로 묶어서 일괄 임베딩 (API 왕복 횟수 및 소요 시간 1/10 절감)
+  for (let i = 0; i < targets.length; i += EMBED_BATCH_SIZE) {
+    const batch = targets.slice(i, i + EMBED_BATCH_SIZE);
+    const prepared: { note: Note; text: string }[] = [];
+    for (const note of batch) {
+      const text = buildNoteEmbeddingInput(note);
+      if (text) prepared.push({ note, text });
+      else failed++;
+    }
+    if (prepared.length === 0) continue;
+
+    onProgress?.(
+      Math.min(i + prepared.length, targets.length),
+      targets.length,
+      prepared[0].note.title || '제목 없음'
+    );
+
     try {
-      const input = buildNoteEmbeddingInput(note);
-      if (!input) continue;
-      const embedding = await generateTextEmbedding(input, 'RETRIEVAL_DOCUMENT');
+      const embeddings = await generateTextEmbeddingsBatch(prepared.map(p => p.text));
       const now = Timestamp.now();
-      await updateDoc(doc(db, 'notes', note.id), {
-        embedding,
-        embeddingUpdatedAt: now
-      });
-      note.embedding = embedding;
-      note.embeddingUpdatedAt = now;
-      upsertVectorNoteCache(note);
-      getNoteCategories(note).forEach(c => touchedCategories.add(c));
-      updated++;
-      await new Promise(r => setTimeout(r, 250));
+      for (let j = 0; j < prepared.length; j++) {
+        const { note } = prepared[j];
+        const embedding = embeddings[j];
+        if (!note.id || !embedding) continue;
+        await updateDoc(doc(db, 'notes', note.id), {
+          embedding,
+          embeddingModel: EMBEDDING_VERSION,
+          embeddingUpdatedAt: now
+        });
+        note.embedding = embedding;
+        note.embeddingModel = EMBEDDING_VERSION;
+        note.embeddingUpdatedAt = now;
+        upsertVectorNoteCache(note);
+        getNoteCategories(note).forEach(c => touchedCategories.add(c));
+        updated++;
+      }
+      // 할당량(TPM/RPM) 초과 방지를 위한 짧은 휴식
+      await sleep(350);
     } catch (e) {
-      console.warn(`메모 임베딩 생성 실패 (${note.id}):`, e);
-      failed++;
+      console.warn('배치 임베딩 실패, 단건으로 폴백 시도:', e);
+      // 배치가 실패하면 각 메모별로 단건 재시도
+      for (const { note, text } of prepared) {
+        if (!note.id) continue;
+        try {
+          const embedding = await generateTextEmbedding(text, 'RETRIEVAL_DOCUMENT');
+          const now = Timestamp.now();
+          await updateDoc(doc(db, 'notes', note.id), {
+            embedding,
+            embeddingModel: EMBEDDING_VERSION,
+            embeddingUpdatedAt: now
+          });
+          note.embedding = embedding;
+          note.embeddingModel = EMBEDDING_VERSION;
+          note.embeddingUpdatedAt = now;
+          upsertVectorNoteCache(note);
+          getNoteCategories(note).forEach(c => touchedCategories.add(c));
+          updated++;
+          await sleep(250);
+        } catch (singleErr) {
+          console.warn(`메모 임베딩 생성 실패 (${note.id}):`, singleErr);
+          failed++;
+        }
+      }
     }
   }
 
-  // 변경된 카테고리의 인덱스를 갱신하여 embeddingUpdatedAt 타임스탬프를 인덱스에 반영
+  // 변경된 카테고리의 인덱스를 갱신하여 embeddingModel 및 embeddingUpdatedAt을 인덱스에 반영
   for (const catId of touchedCategories) {
     try {
       await rebuildCategoryIndex(catId);

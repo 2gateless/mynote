@@ -12,26 +12,26 @@
 기존 버전 대비 아래 4가지 핵심 기능이 새롭게 추가 및 고도화되었습니다.
 
 ### 1. 🤖 Gemini AI 시맨틱 검색 및 종합·추론 (RAG) (`src/services/ai.ts`)
-- **메모 임베딩 자동 생성 (`text-embedding-004`)**:
-  - 메모 신규 저장·수정 시 `제목 + 카테고리 + 태그 + 키워드 + 본문`을 결합하여 Google Gemini `text-embedding-004` 벡터 배열로 변환 후 Firestore `notes/{noteId}` 문서의 `embedding` 필드에 자동 저장합니다.
-  - 기존에 작성해 둔 메모들도 **`⚙️ AI 설정 → 🔄 기존 메모 일괄 임베딩 생성`** 버튼 한 번으로 일괄 변환할 수 있습니다.
+- **메모 임베딩 자동 생성 (`gemini-embedding-001@768`)**:
+  - 메모 신규 저장·수정 시 `제목 + 카테고리 + 태그 + 키워드 + 본문`을 결합하여 Google Gemini 최신 임베딩 모델 `gemini-embedding-001`(768차원 고정) 벡터 배열로 변환 후 Firestore `notes/{noteId}` 문서의 `embedding` 및 `embeddingModel` 필드에 자동 저장합니다.
+  - 기존에 작성해 둔 메모들도 **`⚙️ AI 설정 → 🔄 기존 메모 일괄 임베딩 생성`** 버튼 한 번으로 배치(Batch) 처리되어 초고속 일괄 변환할 수 있습니다.
 - **자연어 의미 검색 (코사인 유사도 Top 3~5 추출)**:
   - 검색창에 찾고자 하는 의미나 자연어 질문을 입력하고 **`✨ AI 의미 검색 · 추론`**을 실행하면, 질문 벡터와 메모 벡터 간 코사인 유사도(Cosine Similarity)를 계산해 연관도 높은 상위 3~5개 메모를 유사도 점수(`🎯 유사도 89%`)와 함께 즉시 추출합니다.
 - **AI 종합 및 추론 답변 (Gemini Flash RAG)**:
   - 추출된 상위 메모들의 본문을 프롬프트 컨텍스트로 묶어 **Gemini Flash** 모델에 전달하고, 질문 의도에 맞춰 요약·비교·추론한 답변을 마크다운 카드로 보여줍니다.
-  - 답변 내에 인용된 `[[메모 제목]]` 링크를 클릭하면 즉시 원본 메모 상세 화면으로 이동하며, **잠금(`locked: true`) 메모의 본문은 프라이버시 보호를 위해 AI 프롬프트 컨텍스트에서 자동 제외**됩니다.
+  - 답변 내에 인용된 `[[메모 제목]]` 링크를 클릭하면 즉시 원본 메모 상세 화면으로 이동하며, **잠금(`locked: true`) 메모의 본문은 프라이버시 보호를 위해 AI 프롬프트 컨텍스트 및 로컬 벡터 캐시에서 자동 제외**됩니다.
 - **🔥 Firestore 읽기 비용 극대화 절감 설계 (Zero-Scan Local Vector Cache)**:
-  - 전체 문서를 매번 Firestore에서 반복 조회하지 않도록 브라우저 **`IndexedDB`(`mynote_ai_vector_cache_db`)에 벡터와 본문을 영구 캐싱**합니다.
-  - 카테고리 인덱스의 경량 타임스탬프(`embeddingUpdatedAt`)와 비교하여 **변경된 메모가 없으면 Firestore 읽기 0건**, 다른 기기에서 수정된 메모가 있으면 **해당 메모만 증분 단건 조회(Delta Sync)**합니다.
+  - 전체 문서를 매번 Firestore에서 반복 조회하지 않도록 브라우저 **`IndexedDB`(`mynote_ai_vector_cache_db`)에 벡터와 본문을 영구 캐싱**합니다. (잠금 메모는 본문 미보관)
+  - 카테고리 인덱스의 경량 타임스탬프(`embeddingUpdatedAt`) 및 모델 버전과 비교하여 **변경된 메모가 없으면 Firestore 읽기 0건**, 다른 기기에서 수정된 메모가 있으면 **해당 메모만 증분 단건 조회(Delta Sync)**합니다.
   - RAG 본문 역시 상위 3~5개 일치 문서 중 로컬에 전문이 없는 문서만 최소한으로 단건 조회 후 영구 캐싱합니다.
 - **🔒 안전한 API 키 관리 및 기기 간 자동 동기화**:
-  - 공개 GitHub 저장소에 API 키가 절대 노출되지 않도록 소스 코드에는 키를 일절 포함하지 않습니다.
+  - 공개 GitHub 저장소에 API 키가 절대 노출되지 않도록 소스 코드에는 키를 일절 포함하지 않으며, API 호출 시 URL 쿼리 대신 `x-goog-api-key` 헤더를 통해 안전하게 전달합니다.
   - 앱 내 `⚙️ AI 설정`에서 한 번만 API 키를 입력하면 기기 `localStorage`와 본인 전용 비공개 Firestore 문서(`user_meta/{uid}`)에 안전하게 저장되어, **PC에서 1회 입력 시 휴대폰 등 다른 기기에서도 재입력 없이 자동 동기화**됩니다.
 
 ### 2. 🔒 메모별 4자리 숫자 잠금 (PIN Lock) (`src/ui/pinModal.ts`)
 - 메모 작성·수정 화면에서 **Lock 토글(`🔓 해제` / `🔒 잠금됨`)**을 통해 특정 메모를 개별 잠금 설정할 수 있습니다.
-- 잠긴 메모는 목록 및 검색 결과에서 `🔒` 아이콘과 함께 본문 미리보기가 `🔒 잠긴 메모입니다`로 보호되며, 열람 시 4자리 숫자 암호가 일치해야만 열립니다.
-- 4자리 암호는 각 기기(PC·휴대폰)에서 앱 최초 실행 시 **1회 입력 + 1회 확인(컨펌)**을 거쳐 해당 기기의 `localStorage`(`mynote_lock_pin`)에만 독립적으로 저장됩니다.
+- **철저한 프라이버시 보호**: 잠긴 메모는 목록 인덱스 및 검색 인덱스에서 본문 미리보기(snippet)를 원천 비워두어 `localStorage`나 IndexedDB 캐시에 본문이 평문으로 남지 않으며, 검색 결과에서도 `🔒 잠긴 메모입니다`로 보호됩니다.
+- 4자리 암호는 Web Crypto SHA-256 + 기기 솔트(Salt)로 해시화되어 해당 기기의 `localStorage`(`mynote_lock_pin_hash_v1`)에만 안전하게 보관되며, 평문 암호나 전역 변수로 절대 노출되지 않습니다.
 
 ### 3. 📂 카테고리(폴더) 및 #태그 복수 선택 지원
 - **복수 카테고리 지정 (`categories: string[]`)**:
@@ -52,7 +52,7 @@
 |---|---|
 | 프론트엔드 | Vanilla TypeScript + Vite (프레임워크 없음, 벤더 청크 분할 적용) |
 | 데이터 | Firebase Firestore (`mynote-53a33`, `persistentLocalCache` 다중 탭 오프라인 캐시 적용) |
-| AI 검색 / RAG | Google Gemini API (`text-embedding-004` 임베딩 + `Gemini Flash` 종합·추론) |
+| AI 검색 / RAG | Google Gemini API (`gemini-embedding-001@768` 임베딩 + `Gemini Flash` 종합·추론) |
 | 로컬 캐시 | `localStorage` (인증·카운트·검색 인덱스·잠금 PIN) + `IndexedDB` (`mynote_ai_vector_cache_db` 영구 벡터·본문 캐시) |
 | 이미지 저장 | Firebase Storage (`notes/{uid}/` 경로, 최대 2560px / 품질 0.88 압축, 1.5MB 이하 및 GIF 원본 유지) |
 | 인증 | Firebase Auth — Google 로그인 |

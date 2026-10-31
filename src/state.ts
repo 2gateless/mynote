@@ -9,7 +9,7 @@ export const appState: any = {
   pendingImages: [],
   existingImages: [],
   allNotesCache: [],
-  lockPin: null as string | null,
+  // 보안: PIN은 평문으로 메모리에 보관하지 않으며, Web Crypto SHA-256 해시로만 검증합니다.
 
   // allNotesCache 갱신 시 한 번만 계산해 두는 파생 데이터 (검색/링크 성능용)
   searchIndex: [] as { note: any; text: string }[], // 소문자화된 검색용 텍스트
@@ -23,5 +23,7 @@ export const appState: any = {
   closeImageViewer: null,
 };
 
-// 디버깅 편의를 위해 window 객체에 상태 객체를 연결합니다. (인라인 onclick은 더 이상 사용하지 않음)
-(window as any).appState = appState;
+// 개발 모드 디버깅 편의를 위해 window 객체에 상태 객체를 연결합니다.
+if ((import.meta as any).env?.DEV) {
+  (window as any).appState = appState;
+}
