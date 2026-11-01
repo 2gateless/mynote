@@ -150,9 +150,9 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     return `@@CODEBLOCK${idx}@@`;
   });
 
-  // ① [[메모 제목]] 패턴을 임시 플레이스홀더로 치환 (밑줄 없는 토큰으로 마크다운 이탤릭 충돌 방지)
+  // ① [[메모 제목]] 패턴을 임시 플레이스홀더로 치환 (제목 내부에 대괄호 [말머리]가 포함된 경우도 안전하게 매칭)
   const noteLinkRefs: string[] = [];
-  processed = processed.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
+  processed = processed.replace(/\[\[([^\n]+?)\]\]/g, (_, title) => {
     const idx = noteLinkRefs.length;
     noteLinkRefs.push(title);
     return `@@NOTELINK${idx}@@`;
@@ -227,9 +227,15 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
   parsedBody = parsedBody.replace(/@@NOTELINK(\d+)@@/g, (_: string, i: string) => {
     const title = (noteLinkRefs[parseInt(i, 10)] || '').trim();
     const safeTitle = escHtml(title);
-    const found = titleMap
-      ? titleMap.get(title)
-      : appState.allNotesCache.find((n: any) => n.title === title);
+    const normTitle = title.replace(/\s+/g, ' ').toLowerCase();
+    let found = titleMap
+      ? (titleMap.get(title) || titleMap.get(normTitle))
+      : undefined;
+    if (!found && Array.isArray(appState.allNotesCache)) {
+      found = appState.allNotesCache.find(
+        (n: any) => (n.title || '').trim().replace(/\s+/g, ' ').toLowerCase() === normTitle
+      );
+    }
     if (found) {
       const cat = CATEGORIES[found.category];
       const icon = cat ? cat.icon : '📝';

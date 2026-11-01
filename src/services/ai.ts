@@ -18,7 +18,7 @@ import {
    getSingleNote,
   rebuildCategoryIndex
 } from './database';
-import { toMillis } from '../utils/formatter';
+import { fmtDate, toMillis } from '../utils/formatter';
 import { Note, NoteIndexItem } from '../types';
 
 // ─────────────────────────────────────────────
@@ -56,14 +56,17 @@ export function isCurrentEmbedding(model: unknown, embedding: unknown): embeddin
 const FLASH_MODELS = [
   'gemini-2.5-flash',
   'gemini-flash-latest',
-  'gemini-2.0-flash',
   'gemini-2.5-flash-lite',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash-latest'
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite'
 ];
 
 // 성공한 생성 모델을 세션 내 캐시하여 다음 호출 시 지연 없이 즉시 사용
 let cachedWorkingFlashModel: string | null = null;
+
+// 동일 질문 재검색 시 API 호출 및 지연을 0ms로 줄이기 위한 LRU 캐시 (최대 30개)
+const QUERY_EMBED_CACHE_MAX = 30;
+const queryEmbeddingCache = new Map<string, number[]>();
 
 export interface SemanticSearchResult {
   note: Note;
@@ -295,15 +298,56 @@ export async function syncAiConfigFromUserMeta(): Promise<void> {
 // 2. 텍스트 전처리 및 Gemini 임베딩 API 호출
 // ─────────────────────────────────────────────
 
-// gemini-embedding-001의 입력 한도는 2,048 토큰이므로 한글 기준 여유 있게 3,000자로 자름
-export function cleanTextForEmbedding(raw: string, maxChars = 3000): string {
+// gemini-embedding-001의 입력 한도(2,048 토큰)를 고려하여 4,200자까지 수용하되,
+// 긴 메모의 경우 앞부분(75%)과 뒷부분 결론/요약(25%)이 모두 반영되도록 축약
+export function cleanTextForEmbedding(raw: string, maxChars = 4200): string {
   if (!raw) return '';
-  return raw
+  const cleaned = raw
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
     .replace(/https?:\/\/\S+/g, '')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxChars);
+    .trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  const headLen = Math.floor(maxChars * 0.75);
+  const tailLen = maxChars - headLen - 5;
+  return `${cleaned.slice(0, headLen)} ... ${cleaned.slice(cleaned.length - tailLen)}`;
+}
+
+// 한국어 자연어 질문에서 문장부호를 제거하고 핵심 어근(조사/어미 제거본 포함) 그룹을 추출
+const KO_SUFFIX_RE =
+  /(?:이라서|이라고|이라는|이라도|이라며|인가요|할까요|일까요|였나요|였는지|인지요|에서부터|으로부터|에게서|한테서|에서는|으로는|에게는|한테는|이라도|이지만|이니까|이므로|이라|이란|이나|이며|이고|이야|이지|인가|인지|였지|였나|는데|은데|던데|나요|가요|까요|어요|아요|해요|세요|줘요|해줘|알려줘|찾아줘|정리해줘|비교해줘|요약해줘|에서|에게|한테|으로|부터|까지|처럼|같이|보다|마다|조차|마저|밖에|대로|만큼|은|는|이|가|을|를|의|에|로|와|과|도|만|란|나|며|고|야|지)$/;
+
+export function extractQueryTermGroups(query: string): string[][] {
+  const cleaned = query
+    .toLowerCase()
+    .replace(/[?!.,;:'"“”‘’()\[\]{}<>~`@#$%^&*+=|/\\]+/g, ' ')
+    .trim();
+  if (!cleaned) return [];
+
+  const rawWords = cleaned.split(/\s+/).filter(Boolean);
+  const groups: string[][] = [];
+  const seen = new Set<string>();
+
+  // 불용어(의문사/일반 서술어 등 단독 매칭 가치가 낮은 단어) 제외
+  const stopWords = new Set([
+    '뭐야', '뭔가', '무엇', '어디', '언제', '어떻게', '얼마', '누구',
+    '있나', '있어', '없는', '없어', '알려', '찾아', '정리', '메모', '내용', '관련', '대한', '대해'
+  ]);
+
+  for (const word of rawWords) {
+    if (word.length < 2) continue;
+    const stripped = word.replace(KO_SUFFIX_RE, '');
+    const stem = stripped.length >= 2 ? stripped : word;
+    if (stopWords.has(word) && stopWords.has(stem)) continue;
+
+    const key = stem;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const variants = stem !== word ? [stem, word] : [word];
+    groups.push(variants);
+  }
+  return groups;
 }
 
 export function buildNoteEmbeddingInput(noteData: Partial<Note>): string {
@@ -382,7 +426,7 @@ function assertEmbeddingValues(values: unknown): number[] {
   return values as number[];
 }
 
-async function embedViaProxy(cleaned: string, taskType: EmbedTaskType): Promise<number[]> {
+async function embedViaProxy(cleaned: string, taskType: EmbedTaskType, title?: string): Promise<number[]> {
   const proxyUrl = getAiProxyUrl();
   const idToken = await auth.currentUser?.getIdToken();
   const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/embed`, {
@@ -395,7 +439,8 @@ async function embedViaProxy(cleaned: string, taskType: EmbedTaskType): Promise<
       model: EMBEDDING_MODEL,
       outputDimensionality: EMBEDDING_DIM,
       text: cleaned,
-      taskType
+      taskType,
+      ...(taskType === 'RETRIEVAL_DOCUMENT' && title ? { title } : {})
     })
   });
   if (!res.ok) {
@@ -416,36 +461,64 @@ function requireApiKey(): string {
 
 export async function generateTextEmbedding(
   text: string,
-  taskType: EmbedTaskType = 'RETRIEVAL_DOCUMENT'
+  taskType: EmbedTaskType = 'RETRIEVAL_DOCUMENT',
+  title?: string
 ): Promise<number[]> {
   const cleaned = cleanTextForEmbedding(text);
   if (!cleaned) {
     throw new Error('임베딩할 텍스트가 비어 있습니다.');
   }
 
-  if (getAiProxyUrl()) {
-    return embedViaProxy(cleaned, taskType);
+  // 질문(RETRIEVAL_QUERY) 임베딩은 LRU 캐시에서 먼저 확인하여 중복 호출 차단
+  if (taskType === 'RETRIEVAL_QUERY') {
+    const cached = queryEmbeddingCache.get(cleaned);
+    if (cached) {
+      // 최근 사용 순으로 갱신
+      queryEmbeddingCache.delete(cleaned);
+      queryEmbeddingCache.set(cleaned, cached);
+      return cached;
+    }
   }
 
-  const apiKey = requireApiKey();
-  const json = await postGeminiWithRetry(
-    `${GEMINI_API_BASE}/models/${EMBEDDING_MODEL}:embedContent`,
-    {
-      model: `models/${EMBEDDING_MODEL}`,
-      content: { parts: [{ text: cleaned }] },
-      taskType,
-      outputDimensionality: EMBEDDING_DIM
-    },
-    apiKey
-  );
-  return assertEmbeddingValues(json?.embedding?.values);
+  let values: number[];
+  if (getAiProxyUrl()) {
+    values = await embedViaProxy(cleaned, taskType, title);
+  } else {
+    const apiKey = requireApiKey();
+    const cleanTitle = title?.trim();
+    const json = await postGeminiWithRetry(
+      `${GEMINI_API_BASE}/models/${EMBEDDING_MODEL}:embedContent`,
+      {
+        model: `models/${EMBEDDING_MODEL}`,
+        content: { parts: [{ text: cleaned }] },
+        taskType,
+        ...(taskType === 'RETRIEVAL_DOCUMENT' && cleanTitle ? { title: cleanTitle } : {}),
+        outputDimensionality: EMBEDDING_DIM
+      },
+      apiKey
+    );
+    values = assertEmbeddingValues(json?.embedding?.values);
+  }
+
+  if (taskType === 'RETRIEVAL_QUERY') {
+    if (queryEmbeddingCache.size >= QUERY_EMBED_CACHE_MAX) {
+      const oldestKey = queryEmbeddingCache.keys().next().value;
+      if (oldestKey !== undefined) queryEmbeddingCache.delete(oldestKey);
+    }
+    queryEmbeddingCache.set(cleaned, values);
+  }
+
+  return values;
 }
 
 /**
  * 여러 문서를 한 번의 batchEmbedContents 요청으로 임베딩 (일괄 변환용).
  * 프록시 사용 시에는 프록시가 배치를 지원하지 않을 수 있으므로 단건 호출을 순차 수행.
  */
-export async function generateTextEmbeddingsBatch(texts: string[]): Promise<number[][]> {
+export async function generateTextEmbeddingsBatch(
+  texts: string[],
+  titles?: (string | undefined)[]
+): Promise<number[][]> {
   const cleanedList = texts.map(t => cleanTextForEmbedding(t));
   if (cleanedList.some(t => !t)) {
     throw new Error('임베딩할 텍스트가 비어 있는 항목이 있습니다.');
@@ -453,7 +526,9 @@ export async function generateTextEmbeddingsBatch(texts: string[]): Promise<numb
 
   if (getAiProxyUrl()) {
     const out: number[][] = [];
-    for (const t of cleanedList) out.push(await embedViaProxy(t, 'RETRIEVAL_DOCUMENT'));
+    for (let i = 0; i < cleanedList.length; i++) {
+      out.push(await embedViaProxy(cleanedList[i], 'RETRIEVAL_DOCUMENT', titles?.[i]));
+    }
     return out;
   }
 
@@ -461,12 +536,16 @@ export async function generateTextEmbeddingsBatch(texts: string[]): Promise<numb
   const json = await postGeminiWithRetry(
     `${GEMINI_API_BASE}/models/${EMBEDDING_MODEL}:batchEmbedContents`,
     {
-      requests: cleanedList.map(t => ({
-        model: `models/${EMBEDDING_MODEL}`,
-        content: { parts: [{ text: t }] },
-        taskType: 'RETRIEVAL_DOCUMENT',
-        outputDimensionality: EMBEDDING_DIM
-      }))
+      requests: cleanedList.map((t, idx) => {
+        const cleanTitle = titles?.[idx]?.trim();
+        return {
+          model: `models/${EMBEDDING_MODEL}`,
+          content: { parts: [{ text: t }] },
+          taskType: 'RETRIEVAL_DOCUMENT',
+          ...(cleanTitle ? { title: cleanTitle } : {}),
+          outputDimensionality: EMBEDDING_DIM
+        };
+      })
     },
     apiKey
   );
@@ -483,7 +562,7 @@ export async function tryGenerateNoteEmbedding(noteData: Partial<Note>): Promise
   try {
     const input = buildNoteEmbeddingInput(noteData);
     if (!input) return null;
-    return await generateTextEmbedding(input, 'RETRIEVAL_DOCUMENT');
+    return await generateTextEmbedding(input, 'RETRIEVAL_DOCUMENT', noteData.title);
   } catch (e) {
     console.warn('메모 저장 중 임베딩 생성 건너뜀 (메모 본문은 정상 저장됩니다):', e);
     return null;
@@ -592,37 +671,71 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
     return memoryVectorMap;
   }
 
-  // 2) 증분 동기화(Delta Sync): 인덱스(allNotesCache)에서 embeddingUpdatedAt이 갱신되었거나
-  //    로컬 캐시 벡터의 모델 버전이 다른 문서만 선별하여 단건 조회
-  //    변경된 메모가 없으면 Firestore 읽기 횟수 = 0건!
+  // 2) 증분 동기화(Delta Sync) 및 고아/잠금 레코드 정리:
+  //    - 다른 기기에서 삭제된 메모의 로컬 벡터 캐시 제거
+  //    - 다른 기기에서 잠금(locked) 처리된 메모의 로컬 평문 본문 즉시 파기
+  //    - embeddingUpdatedAt이 갱신되었거나 모델 버전이 다른 문서만 선별하여 조회
   const staleNoteIds: string[] = [];
-  for (const item of indexItems) {
-    const idxEmbMs = toMillis(item.embeddingUpdatedAt);
-    if (!idxEmbMs) continue; // 인덱스에 임베딩 타임스탬프가 없으면 불필요한 조회 생략
-    const localRec = memoryVectorMap.get(item.id);
-    if (!localRec || localRec.embeddingUpdatedMs < idxEmbMs || localRec.model !== EMBEDDING_VERSION) {
-      staleNoteIds.push(item.id);
+  const lockedSanitizedRecords: LocalVectorRecord[] = [];
+
+  if (indexItems.length > 0) {
+    const validIds = new Set<string>();
+    for (const item of indexItems) {
+      validIds.add(item.id);
+      const localRec = memoryVectorMap.get(item.id);
+
+      // 잠금 메모에 평문 본문이 남아 있으면 즉시 제거 (보안 강화)
+      if (localRec && item.locked && localRec.body !== undefined) {
+        delete localRec.body;
+        lockedSanitizedRecords.push(localRec);
+      }
+
+      const idxEmbMs = toMillis(item.embeddingUpdatedAt);
+      if (!idxEmbMs) continue; // 인덱스에 임베딩 타임스탬프가 없으면 불필요한 조회 생략
+      if (!localRec || localRec.embeddingUpdatedMs < idxEmbMs || localRec.model !== EMBEDDING_VERSION) {
+        staleNoteIds.push(item.id);
+      }
     }
+
+    // 인덱스에 더 이상 존재하지 않는(삭제된) 메모 벡터 정리
+    const orphanIds: string[] = [];
+    for (const cachedId of memoryVectorMap.keys()) {
+      if (!validIds.has(cachedId)) {
+        orphanIds.push(cachedId);
+      }
+    }
+    if (orphanIds.length > 0) {
+      for (const id of orphanIds) memoryVectorMap.delete(id);
+      deleteVectorsFromIdb(orphanIds).catch(() => {});
+    }
+  }
+
+  if (lockedSanitizedRecords.length > 0) {
+    putVectorsToIdb(lockedSanitizedRecords).catch(() => {});
   }
 
   if (staleNoteIds.length > 0) {
     const fetchedRecords: LocalVectorRecord[] = [];
-    // 변경된 소수의 메모만 개별 문서 조회
-    await Promise.all(
-      staleNoteIds.map(async (noteId) => {
-        try {
-          const snap = await getDoc(doc(db, 'notes', noteId));
-          if (!snap.exists()) return;
-          const rec = toVectorRecord(snap.id, uid, snap.data());
-          if (rec) {
-            memoryVectorMap!.set(snap.id, rec);
-            fetchedRecords.push(rec);
+    // 과도한 동시 요청 방지를 위해 10개 단위로 나누어 조회
+    const FETCH_CONCURRENCY = 10;
+    for (let i = 0; i < staleNoteIds.length; i += FETCH_CONCURRENCY) {
+      const chunk = staleNoteIds.slice(i, i + FETCH_CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (noteId) => {
+          try {
+            const snap = await getDoc(doc(db, 'notes', noteId));
+            if (!snap.exists()) return;
+            const rec = toVectorRecord(snap.id, uid, snap.data());
+            if (rec) {
+              memoryVectorMap!.set(snap.id, rec);
+              fetchedRecords.push(rec);
+            }
+          } catch (e) {
+            console.warn(`벡터 증분 동기화 실패 (${noteId}):`, e);
           }
-        } catch (e) {
-          console.warn(`벡터 증분 동기화 실패 (${noteId}):`, e);
-        }
-      })
-    );
+        })
+      );
+    }
     if (fetchedRecords.length > 0) {
       await putVectorsToIdb(fetchedRecords);
     }
@@ -632,11 +745,11 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
 }
 
 /**
- * 요구사항 2 (읽기 비용 극대화 절감 버전):
+ * 요구사항 2 (읽기 비용 극대화 절감 + 한국어 하이브리드 보정 + 적응형 커트라인):
  * - 전체 문서를 Firestore에서 읽지 않고 로컬 캐시(allNotesCache + IndexedDB 벡터)만으로
- *   100% 로컬에서 코사인 유사도를 고속 계산하여 상위 topK(3~5개)를 추출합니다.
- * - 추출된 상위 3~5개 메모에 한해서만(잠금 메모 제외, snippet이 짧은 메모 제외)
- *   로컬에 본문이 없을 때 최소한으로 단건 조회하여 캐싱합니다.
+ *   100% 로컬에서 코사인 유사도를 고속 계산하여 상위 topK 메모를 추출합니다.
+ * - 잠금 메모가 상위권에 포함된 경우에도 RAG 추론에 사용할 일반(비잠금) 메모가 부족하지 않도록
+ *   후보를 보충하고, 잠금 메모의 본문은 절대 로컬 캐시나 스니펫에 노출하지 않습니다.
  */
 export async function semanticSearchNotes(
   queryText: string,
@@ -658,35 +771,47 @@ export async function semanticSearchNotes(
   ]);
 
   const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
-  const queryTerms = cleanQuery
-    .toLowerCase()
-    .split(/\s+/)
-    .map(t => t.trim())
-    .filter(t => t.length >= 2);
+  const queryTermGroups = extractQueryTermGroups(cleanQuery);
 
   let embeddedNotesCount = 0;
+  const sanitizedLockedForIdb: LocalVectorRecord[] = [];
 
   // 2) 전체 메모 스코어링은 Firestore 조회 없이 100% 로컬 메모리에서 수행
-  const scored: SemanticSearchResult[] = indexItems.map(idxItem => {
+  const scored: (SemanticSearchResult & { lexicalMatched: number })[] = indexItems.map(idxItem => {
     const vecRec = vectorMap.get(idxItem.id);
+    const isLocked = !!idxItem.locked;
+
+    // 보안: 잠금 메모에 혹시라도 로컬 본문 캐시가 남아 있다면 즉시 삭제
+    if (isLocked && vecRec && vecRec.body !== undefined) {
+      delete vecRec.body;
+      sanitizedLockedForIdb.push(vecRec);
+    }
+
     const hasEmb = Boolean(vecRec && vecRec.embedding.length === queryVector.length);
     if (hasEmb) embeddedNotesCount++;
 
     let score = hasEmb ? cosineSimilarity(queryVector, vecRec!.embedding) : 0;
+    let matchedTerms = 0;
 
-    if (queryTerms.length > 0) {
+    if (queryTermGroups.length > 0) {
       const hayTitle = `${idxItem.title || ''} ${getNoteTags(idxItem).join(' ')} ${idxItem.keywords || ''}`.toLowerCase();
-      const haySnippet = (vecRec?.body || idxItem.snippet || '').toLowerCase();
-      let matchedTerms = 0;
-      for (const term of queryTerms) {
-        if (hayTitle.includes(term)) matchedTerms += 1.0;
-        else if (haySnippet.includes(term)) matchedTerms += 0.4;
+      // 잠금 메모는 본문/스니펫 텍스트를 키워드 매칭에 사용하지 않음
+      const haySnippet = isLocked ? '' : (vecRec?.body || idxItem.snippet || '').toLowerCase();
+
+      for (const variants of queryTermGroups) {
+        if (variants.some(v => hayTitle.includes(v))) {
+          matchedTerms += 1.0;
+        } else if (haySnippet && variants.some(v => haySnippet.includes(v))) {
+          matchedTerms += 0.45;
+        }
       }
-      const lexicalBoost = Math.min(0.08, (matchedTerms / queryTerms.length) * 0.08);
+
+      const matchRatio = matchedTerms / queryTermGroups.length;
+      const lexicalBoost = Math.min(0.10, matchRatio * 0.10);
       if (hasEmb) {
         score = Math.min(0.999, score + lexicalBoost);
       } else if (matchedTerms > 0) {
-        score = Math.min(0.55, 0.35 + (matchedTerms / queryTerms.length) * 0.2);
+        score = Math.min(0.58, 0.38 + matchRatio * 0.20);
       }
     }
 
@@ -698,10 +823,10 @@ export async function semanticSearchNotes(
       categories: getNoteCategories(idxItem),
       tag: idxItem.tag || '',
       tags: getNoteTags(idxItem),
-      // 로컬 벡터 레코드에 이미 본문이 캐시되어 있으면 바로 사용, 없으면 우선 snippet(200자) 사용
-      body: vecRec?.body ?? (idxItem.snippet || ''),
+      // 잠금 메모는 본문을 비워 두고, 일반 메모는 로컬 캐시 본문 우선 → 없으면 인덱스 snippet(200자) 사용
+      body: isLocked ? '' : (vecRec?.body ?? (idxItem.snippet || '')),
       keywords: idxItem.keywords || '',
-      locked: !!idxItem.locked,
+      locked: isLocked,
       pinned: !!idxItem.pinned,
       createdAt: idxItem.createdAt || undefined
     };
@@ -709,15 +834,49 @@ export async function semanticSearchNotes(
     return {
       note: candidateNote,
       score,
-      hasEmbedding: hasEmb
+      hasEmbedding: hasEmb,
+      lexicalMatched: matchedTerms
     };
   });
 
-  // 3) 상위 topK(3~5개) 메모만 고속 추출
-  scored.sort((a, b) => b.score - a.score);
-  const topResults = scored.filter(item => item.score >= 0.25).slice(0, topK);
+  if (sanitizedLockedForIdb.length > 0) {
+    putVectorsToIdb(sanitizedLockedForIdb).catch(() => {});
+  }
 
-  // 4) 상위 일치 문서(최대 3~5개)만 본문 최소 조회 (On-Demand Top-K Hydration)
+  // 3) 적응형(Adaptive) 유사도 커트라인 적용 및 상위 메모 추출
+  //    - 1순위 점수 대비 편차가 너무 크거나 무관한 하위 노이즈 메모가 섞이는 현상 방지
+  //    - 상위권에 잠금 메모가 있더라도 비잠금 메모가 최소 topK개까지 확보될 수 있도록 여유 있게 추출(최대 topK + 3)
+  scored.sort((a, b) => b.score - a.score);
+
+  const bestScore = scored[0]?.score || 0;
+  // 최고점 대비 허용 낙폭(0.14)과 최소 하한선(0.45)을 결합하되, 키워드 직접 매칭이 있으면 0.38까지 허용
+  const adaptiveMinScore = bestScore >= 0.52 ? Math.max(0.45, bestScore - 0.14) : 0.40;
+
+  const filteredCandidates = scored.filter((item, idx) => {
+    if (item.score < 0.35) return false;
+    // 최상위 1~2개는 최소 기준(0.38)만 넘으면 우선 포함
+    if (idx < 2 && item.score >= 0.38) return true;
+    // 직접 키워드 매칭이 있는 경우 포함
+    if (item.lexicalMatched > 0 && item.score >= 0.38) return true;
+    return item.score >= adaptiveMinScore;
+  });
+
+  const topResults: SemanticSearchResult[] = [];
+  let unlockedCount = 0;
+  const maxTotalResults = topK + 3;
+
+  for (const item of filteredCandidates) {
+    if (topResults.length >= maxTotalResults) break;
+    if (topResults.length >= topK && unlockedCount >= topK) break;
+    topResults.push({
+      note: item.note,
+      score: item.score,
+      hasEmbedding: item.hasEmbedding
+    });
+    if (!item.note.locked) unlockedCount++;
+  }
+
+  // 4) 상위 일치 문서만 본문 최소 조회 (On-Demand Top-K Hydration)
   //    - 잠금 메모(locked)는 RAG에 본문을 보내지 않으므로 조회 생략 (0건)
   //    - 이미 로컬 캐시에 본문이 있거나, snippet 길이가 200자 미만(즉 snippet이 곧 전문)이면 조회 생략 (0건)
   const updatedForIdb: LocalVectorRecord[] = [];
@@ -742,16 +901,22 @@ export async function semanticSearchNotes(
       try {
         const fullNote = await getSingleNote(n.id);
         if (fullNote && typeof fullNote.body === 'string') {
+          if (fullNote.locked) {
+            n.locked = true;
+            n.body = '';
+            return;
+          }
           n.body = fullNote.body;
           if (vecRec) {
             vecRec.body = fullNote.body;
             updatedForIdb.push(vecRec);
-          } else if (Array.isArray(fullNote.embedding) && fullNote.embedding.length > 0) {
+          } else if (isCurrentEmbedding(fullNote.embeddingModel, fullNote.embedding)) {
             const newRec: LocalVectorRecord = {
               id: n.id,
               uid: fullNote.uid || appState.currentUser?.uid || '',
               embedding: fullNote.embedding,
               embeddingUpdatedMs: toMillis(fullNote.embeddingUpdatedAt) || Date.now(),
+              model: EMBEDDING_VERSION,
               body: fullNote.body
             };
             vectorMap.set(n.id, newRec);
@@ -775,6 +940,40 @@ export async function semanticSearchNotes(
   };
 }
 
+// 긴 메모 본문에서 질문 키워드가 등장하는 구간을 놓치지 않도록 컨텍스트 발췌
+function buildRagBodyExcerpt(rawBody: string, queryTermGroups: string[][], maxChars = 3200): string {
+  const cleaned = (rawBody || '')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (cleaned.length <= maxChars) return cleaned;
+
+  const lower = cleaned.toLowerCase();
+  const terms = queryTermGroups.flat();
+  let matchIdx = -1;
+  for (const t of terms) {
+    const pos = lower.indexOf(t);
+    if (pos >= Math.floor(maxChars * 0.6)) {
+      matchIdx = pos;
+      break;
+    }
+  }
+
+  // 키워드가 본문 중·후반부에 등장하면 앞부분 요약 + 매칭 구간 주변을 결합
+  if (matchIdx !== -1) {
+    const headLen = Math.floor(maxChars * 0.45);
+    const windowLen = maxChars - headLen - 15;
+    const start = Math.max(headLen, matchIdx - Math.floor(windowLen * 0.35));
+    const end = Math.min(cleaned.length, start + windowLen);
+    return `${cleaned.slice(0, headLen)}\n\n...(중략)...\n\n${cleaned.slice(start, end)}`;
+  }
+
+  // 기본적으로 앞부분(75%) + 뒷부분 결론(25%) 결합
+  const headLen = Math.floor(maxChars * 0.75);
+  const tailLen = maxChars - headLen - 15;
+  return `${cleaned.slice(0, headLen)}\n\n...(중략)...\n\n${cleaned.slice(cleaned.length - tailLen)}`;
+}
+
 // ─────────────────────────────────────────────
 // 4. 요구사항 3: AI 종합 및 추론 모드 (RAG — Gemini Flash)
 // ─────────────────────────────────────────────
@@ -787,12 +986,20 @@ export async function generateRagAnswer(
     return '연관된 메모를 찾지 못해 종합 답변을 생성할 수 없습니다.';
   }
 
-  const unlockedResults = topResults.filter(r => !r.note.locked);
-  const lockedCount = topResults.length - unlockedResults.length;
+  const allUnlocked = topResults.filter(r => !r.note.locked);
+  const lockedCount = topResults.length - allUnlocked.length;
+  const unlockedResults = allUnlocked.slice(0, 5);
 
   if (unlockedResults.length === 0 && lockedCount > 0) {
     return '검색된 상위 메모가 모두 🔒 잠금 상태입니다. 아래 검색 결과에서 메모를 눌러 잠금을 해제한 뒤 확인해 주세요.';
   }
+
+  const queryTermGroups = extractQueryTermGroups(userQuery);
+  const todayStr = new Date().toLocaleDateString('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  });
 
   const contextBlocks = unlockedResults.map((item, idx) => {
     const n = item.note;
@@ -802,15 +1009,12 @@ export async function generateRagAnswer(
       .join(', ');
     const tags = getNoteTags(n).map(t => `#${t}`).join(' ');
     const simPct = Math.round(item.score * 100);
-    // 추론 컨텍스트에서 마크다운 이미지 URL을 제거하여 답변에 거대한 이미지가 중복 출력되지 않도록 처리
-    const bodyText = (n.body || '')
-      .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()
-      .slice(0, 3000);
+    const dateStr = fmtDate(n.createdAt) || '날짜 정보 없음';
+    const bodyText = buildRagBodyExcerpt(n.body || '', queryTermGroups, 3200);
     return [
       `[메모 ${idx + 1}] (유사도: ${simPct}%)`,
       `- 제목: ${n.title || '제목 없음'}`,
+      `- 작성일: ${dateStr}`,
       `- 카테고리: ${cats || '미분류'}${tags ? ` | 태그: ${tags}` : ''}`,
       `- 키워드: ${n.keywords || '없음'}`,
       `- 본문:\n${bodyText}`
@@ -822,16 +1026,18 @@ export async function generateRagAnswer(
     '반드시 한국어로 한눈에 들어오도록 간결하게 작성하세요.',
     '규칙:',
     '1. 인사말이나 서론 없이 곧바로 핵심 결론과 요점(3~5개 이내의 짧은 글머리 기호 `-`)만 간명하게 제시하세요.',
-    '2. 답변에서 참조한 메모는 문장 끝에 [[메모 제목]] 형식으로 표기하세요. (클릭 가능한 링크로 변환됩니다)',
-    '3. 큰 제목(#, ##)이나 이미지 태그(![...](...)), 긴 URL은 절대 포함하지 마세요.',
-    '4. 모바일 작은 화면에서도 스크롤 없이 한눈에 읽히도록 문장을 짧고 명확하게 다듬으세요.'
+    '2. 답변에서 참조한 메모는 반드시 원문 제목 그대로 문장 끝에 [[메모 제목]] 형식으로 표기하세요. (클릭 가능한 링크로 변환됩니다)',
+    '3. 제공된 메모 중 질문과 직접적인 관련이 없는 메모는 억지로 답변에 포함하지 말고 무시하세요.',
+    '4. 큰 제목(#, ##)이나 이미지 태그(![...](...)), 긴 URL은 절대 포함하지 마세요.',
+    '5. 모바일 작은 화면에서도 스크롤 없이 한눈에 읽히도록 문장을 짧고 명확하게 다듬으세요.'
   ].join('\n');
 
   const promptText = [
-    `[사용자 질문 / 검색 의도]\n${userQuery}`,
+    `[현재 기준일]\n${todayStr}`,
+    `\n[사용자 질문 / 검색 의도]\n${userQuery}`,
     lockedCount > 0 ? `\n(참고: 검색된 상위 메모 중 ${lockedCount}건은 잠금 상태여서 컨텍스트에서 제외되었습니다.)` : '',
     `\n[참고 메모 컨텍스트 (상위 ${unlockedResults.length}개 메모)]\n${contextBlocks}`,
-    '\n위 메모들을 종합하여 사용자의 질문에 대해 요약·비교·추론한 답변을 작성해 주세요.'
+    '\n위 메모들 중 질문과 실제로 연관된 내용만을 바탕으로 요약·비교·추론한 답변을 작성해 주세요.'
   ].join('\n');
 
   const proxyUrl = getAiProxyUrl();
@@ -861,71 +1067,80 @@ export async function generateRagAnswer(
     throw new Error('Gemini API 키가 설정되지 않았습니다.');
   }
 
-  // 단일 모델로 generateContent 호출하는 내부 헬퍼
+  // 단일 모델로 generateContent 호출하는 내부 헬퍼 (일시적 429/503 시 1회 짧은 재시도 포함)
   const tryGenerateWithModel = async (
     modelName: string
   ): Promise<{ ok: boolean; status: number; answer?: string; errorMsg?: string; fatal?: boolean }> => {
     const cleanModel = modelName.replace(/^models\//, '');
     const url = `${GEMINI_API_BASE}/models/${cleanModel}:generateContent`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: systemInstruction }]
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
         },
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: promptText }]
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: systemInstruction }]
+          },
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: promptText }]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.25,
+            maxOutputTokens: 8192
           }
-        ],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 8192
+        })
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const errorMsg = errJson?.error?.message || `HTTP ${res.status}`;
+        if ((res.status === 429 || res.status === 503) && attempt === 0) {
+          await sleep(1500);
+          continue;
         }
-      })
-    });
+        // 401(잘못된 키) 또는 403(권한 없음)은 다른 모델을 시도해도 해결되지 않으므로 치명적 오류로 즉시 중단
+        const fatal = res.status === 401 || res.status === 403;
+        return {
+          ok: false,
+          status: res.status,
+          errorMsg,
+          fatal
+        };
+      }
 
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      const errorMsg = errJson?.error?.message || `HTTP ${res.status}`;
-      // 401(잘못된 키) 또는 403(권한 없음)은 다른 모델을 시도해도 해결되지 않으므로 치명적 오류로 즉시 중단
-      const fatal = res.status === 401 || res.status === 403;
-      return {
-        ok: false,
-        status: res.status,
-        errorMsg,
-        fatal
-      };
+      const json = await res.json();
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      // thought(내부 추론) 파트를 제외하고 실제 텍스트 파트만 결합
+      const visibleText = parts
+        .filter((p: any) => !p?.thought && typeof p?.text === 'string')
+        .map((p: any) => p.text)
+        .join('')
+        .trim();
+      const fallbackText = parts
+        .map((p: any) => p?.text || '')
+        .join('')
+        .trim();
+      const answer = visibleText || fallbackText;
+
+      if (!answer) {
+        return {
+          ok: false,
+          status: 200,
+          errorMsg: `모델(${cleanModel})이 빈 응답을 반환했습니다.`
+        };
+      }
+
+      return { ok: true, status: 200, answer };
     }
 
-    const json = await res.json();
-    const parts = json?.candidates?.[0]?.content?.parts || [];
-    // thought(내부 추론) 파트를 제외하고 실제 텍스트 파트만 결합
-    const visibleText = parts
-      .filter((p: any) => !p?.thought && typeof p?.text === 'string')
-      .map((p: any) => p.text)
-      .join('')
-      .trim();
-    const fallbackText = parts
-      .map((p: any) => p?.text || '')
-      .join('')
-      .trim();
-    const answer = visibleText || fallbackText;
-
-    if (!answer) {
-      return {
-        ok: false,
-        status: 200,
-        errorMsg: `모델(${cleanModel})이 빈 응답을 반환했습니다.`
-      };
-    }
-
-    return { ok: true, status: 200, answer };
+    return { ok: false, status: 503, errorMsg: `${cleanModel} 재시도 초과` };
   };
 
   // 이전에 성공했던 모델이 있으면 최우선으로 시도
@@ -1059,7 +1274,10 @@ export async function backfillMissingEmbeddings(
     );
 
     try {
-      const embeddings = await generateTextEmbeddingsBatch(prepared.map(p => p.text));
+      const embeddings = await generateTextEmbeddingsBatch(
+        prepared.map(p => p.text),
+        prepared.map(p => p.note.title)
+      );
       const now = Timestamp.now();
       for (let j = 0; j < prepared.length; j++) {
         const { note } = prepared[j];
@@ -1085,7 +1303,7 @@ export async function backfillMissingEmbeddings(
       for (const { note, text } of prepared) {
         if (!note.id) continue;
         try {
-          const embedding = await generateTextEmbedding(text, 'RETRIEVAL_DOCUMENT');
+          const embedding = await generateTextEmbedding(text, 'RETRIEVAL_DOCUMENT', note.title);
           const now = Timestamp.now();
           await updateDoc(doc(db, 'notes', note.id), {
             embedding,

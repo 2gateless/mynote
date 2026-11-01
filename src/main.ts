@@ -58,6 +58,8 @@ import {
 import { NoteIndexItem } from './types';
 import {
   tryGenerateNoteEmbedding,
+  buildNoteEmbeddingInput,
+  isCurrentEmbedding,
   semanticSearchNotes,
   generateRagAnswer,
   hasAiCredentials,
@@ -78,6 +80,7 @@ let listUnsubscribe: (() => void) | null = null;
 let notesUnsubscribe: (() => void) | null = null;
 let searchTimeout: any = null;
 let lastSearchedQuery = '';
+let lastKeywordResultCount = -1;
 let isAiSearchActive = false;
 let lastRenderedSearchSignature = '';
 let isSelectingSearchResult = false;
@@ -297,7 +300,11 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
   }));
   const map = new Map<string, NoteIndexItem>();
   for (const n of notes) {
-    if (n.title && !map.has(n.title)) map.set(n.title, n);
+    if (!n.title) continue;
+    const trimmed = n.title.trim();
+    if (trimmed && !map.has(trimmed)) map.set(trimmed, n);
+    const norm = trimmed.replace(/\s+/g, ' ').toLowerCase();
+    if (norm && !map.has(norm)) map.set(norm, n);
   }
   appState.notesByTitle = map;
   appState.sortedNotesByTitle = null; // 메모 링크 모달을 열 때 지연 계산
@@ -515,6 +522,7 @@ function resetSearchUI() {
   detailHistoryStack = [];
   clearTimeout(searchTimeout);
   lastSearchedQuery = '';
+  lastKeywordResultCount = -1;
   isAiSearchActive = false;
   lastRenderedSearchSignature = '';
   isSelectingSearchResult = false;
@@ -891,7 +899,8 @@ if (searchInput) {
     clearTimeout(searchTimeout);
     if (!v) {
       lastSearchedQuery = '';
-  isAiSearchActive = false;
+      lastKeywordResultCount = -1;
+      isAiSearchActive = false;
       lastRenderedSearchSignature = '';
       searchResults.style.display = 'none';
       searchResults.innerHTML = '';
@@ -912,7 +921,17 @@ if (searchInput) {
     if (e.key === 'Enter') {
       e.preventDefault();
       const v = searchInput.value.trim();
-      if (v && v !== lastSearchedQuery) {
+      if (!v) {
+        searchInput.blur();
+        return;
+      }
+      // Ctrl/Cmd/Shift + Enter 이거나, 일반 키워드 검색 결과가 0건(자연어 질문 등)일 때 Enter를 누르면 즉시 AI 의미 검색 실행
+      if (e.ctrlKey || e.metaKey || e.shiftKey || lastKeywordResultCount === 0) {
+        searchInput.blur();
+        runAiSemanticSearch(v);
+        return;
+      }
+      if (v !== lastSearchedQuery) {
         doSearch(v);
       }
       searchInput.blur();
@@ -1051,6 +1070,7 @@ async function runAiSemanticSearch(rawQuery: string) {
   isAiSearchActive = true;
   clearTimeout(searchTimeout);
   setHomeListVisible(false);
+  ensureSearchIndexReady();
   ensureAllNotesCache();
 
   if (btnAiSearch) {
@@ -1136,15 +1156,16 @@ async function runAiSemanticSearch(rawQuery: string) {
     }
 
     // 2단계: 상위 메모 본문 컨텍스트를 묶어 Gemini Flash RAG 종합·추론 호출
+    const unlockedRefCount = Math.min(5, results.filter(r => !r.note.locked).length);
     if (aiRagContainer) {
       aiRagContainer.innerHTML = `
         <div class="ai-rag-card">
           <div class="ai-rag-header">
             <div class="ai-rag-title"><span>🤖</span><span>AI 종합 및 추론 답변</span></div>
-            <span class="ai-rag-badge">상위 ${results.length}개 메모 참조 중...</span>
+            <span class="ai-rag-badge">상위 ${unlockedRefCount}개 메모 참조 중...</span>
           </div>
           <div class="ai-rag-body" style="color:var(--text-light)">
-            ✍️ 추출된 상위 ${results.length}개 메모의 본문을 바탕으로 요약·비교·추론 답변을 작성하고 있습니다...
+            ✍️ 추출된 상위 ${unlockedRefCount}개 메모의 본문을 바탕으로 요약·비교·추론 답변을 작성하고 있습니다...
           </div>
         </div>
       `;
@@ -1162,7 +1183,7 @@ async function runAiSemanticSearch(rawQuery: string) {
         <div class="ai-rag-card">
           <div class="ai-rag-header">
             <div class="ai-rag-title"><span>✨</span><span>AI 종합 및 추론 답변</span></div>
-            <span class="ai-rag-badge">참조 메모 ${results.length}건 · Gemini Flash</span>
+            <span class="ai-rag-badge">참조 메모 ${unlockedRefCount}건 · Gemini Flash</span>
           </div>
           <div class="ai-rag-body">${renderedHtml}</div>
         </div>
@@ -1223,6 +1244,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
     const results = searchIdx
       .filter(entry => keywords.every(kw => entry.text.includes(kw)))
       .map(entry => entry.note);
+    lastKeywordResultCount = results.length;
 
     // 백그라운드 캐시 동기화로 호출되었을 때 현재 화면에 표시된 결과 목록과 동일하면 DOM 재생성 생략 (클릭 위치 어긋남 방지)
     const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${getNoteTags(n).join(',')}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
@@ -1232,7 +1254,12 @@ function doSearch(keyword: string, fromCacheSync = false) {
     lastRenderedSearchSignature = signature;
 
     if (results.length === 0) {
-      searchResults.innerHTML = `<div class="search-no-result">🔍 "<b>${escHtml(keyword)}</b>" 검색 결과가 없어요</div>`;
+      searchResults.innerHTML = `<div class="search-no-result">
+        <div>🔍 "<b>${escHtml(keyword)}</b>" 키워드 일치 결과가 없어요</div>
+        <div style="margin-top:12px">
+          <button type="button" data-run-ai-search="1" style="padding:8px 14px;border-radius:10px;border:1.5px solid #6366F1;background:#EEF2FF;color:#4338CA;font-weight:700;font-size:13px;cursor:pointer">✨ 이 내용으로 AI 의미 검색 · 추론 실행</button>
+        </div>
+      </div>`;
       return;
     }
     const prevScrollY = window.scrollY;
@@ -1342,6 +1369,16 @@ if (searchResults) {
     // 터치 직후 브라우저가 발생시키는 합성 mousedown/click 이벤트를 차단하기 위해 타임스탬프 기록
     lastTouchEndTime = Date.now();
 
+    if (!isMoving && (e.target as HTMLElement).closest('[data-run-ai-search]')) {
+      if (e.cancelable) e.preventDefault();
+      touchStartId = null;
+      touchStartItem = null;
+      const q = searchInput ? searchInput.value.trim() : '';
+      searchInput?.blur();
+      runAiSemanticSearch(q);
+      return;
+    }
+
     if (!isMoving && (e.target as HTMLElement).closest('#search-home-btn')) {
       if (e.cancelable) e.preventDefault();
       touchStartId = null;
@@ -1398,6 +1435,15 @@ if (searchResults) {
     isPointerDownOnSearchResults = false;
     // 터치 이벤트에서 이미 처리된 경우 합성 click 무시
     if (Date.now() - lastTouchEndTime < 700) return;
+
+    if ((e.target as HTMLElement).closest('[data-run-ai-search]')) {
+      mouseDownId = null;
+      mouseDownItem = null;
+      const q = searchInput ? searchInput.value.trim() : '';
+      searchInput?.blur();
+      runAiSemanticSearch(q);
+      return;
+    }
 
     if ((e.target as HTMLElement).closest('#search-home-btn')) {
       mouseDownId = null;
@@ -2076,7 +2122,9 @@ async function saveNote() {
       .map(img => img.path || img.url);
 
     // 요구사항 1: 메모 본문/제목/태그를 Google Gemini gemini-embedding-001(768차원)로 임베딩 변환
-    const embedding = await tryGenerateNoteEmbedding({
+    // 수정 시 임베딩 대상 텍스트(제목·본문·카테고리·태그·키워드)가 기존과 동일하고
+    // 이미 현재 버전 임베딩이 존재한다면 API 재호출을 생략하여 저장 속도를 단축하고 할당량을 절약
+    const candidateForEmbedding = {
       title,
       body,
       category,
@@ -2084,10 +2132,30 @@ async function saveNote() {
       tag: tag || '',
       tags,
       keywords
-    });
-    const embeddingFields = embedding
-      ? { embedding, embeddingModel: EMBEDDING_VERSION, embeddingUpdatedAt: Timestamp.now() }
-      : {};
+    };
+    const canReuseExistingEmbedding =
+      isEdit &&
+      appState.currentNote &&
+      isCurrentEmbedding(appState.currentNote.embeddingModel, appState.currentNote.embedding) &&
+      buildNoteEmbeddingInput(appState.currentNote) === buildNoteEmbeddingInput(candidateForEmbedding);
+
+    let embeddingFields: Record<string, any> = {};
+    if (canReuseExistingEmbedding) {
+      embeddingFields = {
+        embedding: appState.currentNote.embedding,
+        embeddingModel: EMBEDDING_VERSION,
+        embeddingUpdatedAt: appState.currentNote.embeddingUpdatedAt || Timestamp.now()
+      };
+    } else {
+      const embedding = await tryGenerateNoteEmbedding(candidateForEmbedding);
+      if (embedding) {
+        embeddingFields = {
+          embedding,
+          embeddingModel: EMBEDDING_VERSION,
+          embeddingUpdatedAt: Timestamp.now()
+        };
+      }
+    }
 
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
