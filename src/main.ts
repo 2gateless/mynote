@@ -934,7 +934,7 @@ function lockAndBlurSearchInput(lockedRaw: string) {
   }, 25);
 }
 
-function handleSearchEnterAction(withModifier = false) {
+function handleSearchEnterAction() {
   if (!searchInput) return;
   const now = Date.now();
   if (now - lastEnterHandledAt < 250) return;
@@ -954,24 +954,15 @@ function handleSearchEnterAction(withModifier = false) {
 
   if (!v) return;
 
-  // 키워드 검색을 아직 실행하지 않은 검색어라면 먼저 키워드 검색 수행
-  if (v !== lastSearchedQuery && !isAiSearchActive) {
-    ensureSearchIndexReady();
-    ensureAllNotesCache();
-    doSearch(v);
-  }
-
-  // Ctrl/Cmd/Shift + Enter 이거나, 일반 키워드 검색 결과가 0건(자연어 질문 등)일 때 Enter를 누르면 즉시 AI 의미 검색 실행
-  if (withModifier || lastKeywordResultCount === 0) {
-    runAiSemanticSearch(v);
-  }
+  // 타이핑 중에는 실시간 키워드 검색이 동작하고, Enter를 치면 항상 AI 의미 검색 · 추론을 즉시 실행
+  runAiSemanticSearch(v);
 }
 
 if (searchInput) {
   searchInput.addEventListener('beforeinput', (e: InputEvent) => {
     if (e.inputType === 'insertLineBreak') {
       e.preventDefault();
-      handleSearchEnterAction(false);
+      handleSearchEnterAction();
     }
   });
 
@@ -1022,7 +1013,7 @@ if (searchInput) {
   searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Enter' || e.keyCode === 13) {
       e.preventDefault();
-      handleSearchEnterAction(e.ctrlKey || e.metaKey || e.shiftKey);
+      handleSearchEnterAction();
     }
   });
 }
