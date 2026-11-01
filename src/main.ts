@@ -523,6 +523,9 @@ function resetSearchUI() {
   clearTimeout(searchTimeout);
   lastSearchedQuery = '';
   lastKeywordResultCount = -1;
+  lastValidSearchInputRaw = '';
+  imeEnterLockedRaw = null;
+  imeEnterLockUntil = 0;
   isAiSearchActive = false;
   lastRenderedSearchSignature = '';
   isSelectingSearchResult = false;
@@ -890,11 +893,109 @@ if (btnDelDetail) {
 }
 
 // ─────────────────────────────────────────────
-// SEARCH
+// SEARCH (모바일 한글 IME 마지막 글자 중복 입력 방지 포함)
 // ─────────────────────────────────────────────
+let lastValidSearchInputRaw = '';
+let imeEnterLockedRaw: string | null = null;
+let imeEnterLockUntil = 0;
+let lastEnterHandledAt = 0;
+
+/**
+ * 모바일(Android/iOS) 가상 키보드에서 한글 조합 중 Enter 또는 blur가 발생할 때
+ * 마지막 완성형 음절(예: '나무' -> '나무무')이 한 번에 중복 삽입되는 현상인지 판별.
+ * 한글 입력 구조상 정상 타이핑에서는 자모 단계('나뭅'/'나무ㅁ')를 반드시 거치므로,
+ * 붙여넣기가 아닌데 완성형 음절 1글자가 단일 이벤트로 즉시 복제된 경우는 100% IME 중복 버그임.
+ */
+function isMobileImeTrailingDuplicate(newRaw: string, prevRaw: string, inputType?: string): boolean {
+  if (!prevRaw || inputType === 'insertFromPaste') return false;
+  if (newRaw.length !== prevRaw.length + 1) return false;
+  const lastChar = prevRaw.slice(-1);
+  if (!/[가-힣]/.test(lastChar)) return false;
+  return newRaw === prevRaw + lastChar;
+}
+
+function lockAndBlurSearchInput(lockedRaw: string) {
+  imeEnterLockedRaw = lockedRaw;
+  imeEnterLockUntil = Date.now() + 500;
+  if (searchInput && searchInput.value !== lockedRaw) {
+    searchInput.value = lockedRaw;
+  }
+  // keydown 도중 동기적으로 blur()를 호출하면 모바일 한글 IME가 조합 중인 글자를 중복 커밋하므로
+  // 현재 키 이벤트 사이클이 끝난 직후 비동기로 blur 처리 및 값 복원 보장
+  setTimeout(() => {
+    if (!searchInput) return;
+    if (imeEnterLockedRaw !== null && searchInput.value !== imeEnterLockedRaw) {
+      searchInput.value = imeEnterLockedRaw;
+    }
+    searchInput.blur();
+    if (imeEnterLockedRaw !== null && searchInput.value !== imeEnterLockedRaw) {
+      searchInput.value = imeEnterLockedRaw;
+    }
+  }, 25);
+}
+
+function handleSearchEnterAction(withModifier = false) {
+  if (!searchInput) return;
+  const now = Date.now();
+  if (now - lastEnterHandledAt < 250) return;
+  lastEnterHandledAt = now;
+
+  // 이미 마지막 글자 중복이 방금 발생했다면 직전 정상 문자열을 우선 사용
+  let raw = searchInput.value;
+  if (isMobileImeTrailingDuplicate(raw, lastValidSearchInputRaw)) {
+    raw = lastValidSearchInputRaw;
+    searchInput.value = raw;
+  } else {
+    lastValidSearchInputRaw = raw;
+  }
+
+  const v = raw.trim();
+  lockAndBlurSearchInput(raw);
+
+  if (!v) return;
+
+  // 키워드 검색을 아직 실행하지 않은 검색어라면 먼저 키워드 검색 수행
+  if (v !== lastSearchedQuery && !isAiSearchActive) {
+    ensureSearchIndexReady();
+    ensureAllNotesCache();
+    doSearch(v);
+  }
+
+  // Ctrl/Cmd/Shift + Enter 이거나, 일반 키워드 검색 결과가 0건(자연어 질문 등)일 때 Enter를 누르면 즉시 AI 의미 검색 실행
+  if (withModifier || lastKeywordResultCount === 0) {
+    runAiSemanticSearch(v);
+  }
+}
+
 if (searchInput) {
-  searchInput.addEventListener('input', () => {
-    const v = searchInput.value.trim();
+  searchInput.addEventListener('beforeinput', (e: InputEvent) => {
+    if (e.inputType === 'insertLineBreak') {
+      e.preventDefault();
+      handleSearchEnterAction(false);
+    }
+  });
+
+  searchInput.addEventListener('input', (e: Event) => {
+    const ie = e as InputEvent;
+
+    // 1) Enter 또는 blur 잠금 보호 구간 내 발생한 후속 IME 플러시 이벤트는 값을 원래대로 유지하고 무시
+    if (imeEnterLockedRaw !== null && Date.now() < imeEnterLockUntil) {
+      if (searchInput.value !== imeEnterLockedRaw) {
+        searchInput.value = imeEnterLockedRaw;
+      }
+      return;
+    }
+
+    // 2) 모바일 한글 IME가 Enter/조합종료 직전 마지막 음절을 한 번에 중복 삽입한 경우 즉시 복원
+    let rawVal = searchInput.value;
+    if (isMobileImeTrailingDuplicate(rawVal, lastValidSearchInputRaw, ie.inputType)) {
+      rawVal = lastValidSearchInputRaw;
+      searchInput.value = rawVal;
+    } else {
+      lastValidSearchInputRaw = rawVal;
+    }
+
+    const v = rawVal.trim();
     searchClear.style.display = v ? 'block' : 'none';
     clearTimeout(searchTimeout);
     if (!v) {
@@ -908,7 +1009,8 @@ if (searchInput) {
       return;
     }
     // 한글 IME 조합 완료/blur 등으로 동일한 검색어의 input 이벤트가 중복 발생할 때 재렌더링 차단
-    if (v === lastSearchedQuery && searchResults.style.display !== 'none') {
+    // (특히 AI 검색 실행 중 포커스 해제로 발생한 동일 검색어 input 이벤트가 AI 결과창을 닫지 않도록 보호)
+    if (v === lastSearchedQuery && (searchResults.style.display !== 'none' || isAiSearchActive)) {
       return;
     }
     ensureSearchIndexReady();
@@ -918,23 +1020,9 @@ if (searchInput) {
   });
 
   searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' || e.keyCode === 13) {
       e.preventDefault();
-      const v = searchInput.value.trim();
-      if (!v) {
-        searchInput.blur();
-        return;
-      }
-      // Ctrl/Cmd/Shift + Enter 이거나, 일반 키워드 검색 결과가 0건(자연어 질문 등)일 때 Enter를 누르면 즉시 AI 의미 검색 실행
-      if (e.ctrlKey || e.metaKey || e.shiftKey || lastKeywordResultCount === 0) {
-        searchInput.blur();
-        runAiSemanticSearch(v);
-        return;
-      }
-      if (v !== lastSearchedQuery) {
-        doSearch(v);
-      }
-      searchInput.blur();
+      handleSearchEnterAction(e.ctrlKey || e.metaKey || e.shiftKey);
     }
   });
 }
@@ -1068,6 +1156,9 @@ async function runAiSemanticSearch(rawQuery: string) {
 
   const token = ++aiSearchSessionToken;
   isAiSearchActive = true;
+  lastSearchedQuery = queryText;
+  imeEnterLockedRaw = queryText;
+  imeEnterLockUntil = Date.now() + 600;
   clearTimeout(searchTimeout);
   setHomeListVisible(false);
   ensureSearchIndexReady();
@@ -1210,9 +1301,25 @@ async function runAiSemanticSearch(rawQuery: string) {
 }
 
 if (btnAiSearch) {
+  const lockBeforeAiBtn = () => {
+    if (!searchInput) return;
+    const raw = isMobileImeTrailingDuplicate(searchInput.value, lastValidSearchInputRaw)
+      ? lastValidSearchInputRaw
+      : searchInput.value;
+    lastValidSearchInputRaw = raw;
+    imeEnterLockedRaw = raw;
+    imeEnterLockUntil = Date.now() + 600;
+  };
+  btnAiSearch.addEventListener('touchstart', lockBeforeAiBtn, { passive: true });
+  btnAiSearch.addEventListener('mousedown', lockBeforeAiBtn);
   btnAiSearch.onclick = () => {
-    const q = searchInput ? searchInput.value.trim() : '';
-    runAiSemanticSearch(q);
+    const raw = searchInput
+      ? (isMobileImeTrailingDuplicate(searchInput.value, lastValidSearchInputRaw)
+          ? lastValidSearchInputRaw
+          : searchInput.value)
+      : '';
+    if (searchInput && raw) lockAndBlurSearchInput(raw);
+    runAiSemanticSearch(raw.trim());
   };
 }
 
@@ -1302,10 +1409,13 @@ async function goToSearchDetailById(id: string, itemEl?: HTMLElement | null) {
     itemEl.classList.add('selected');
   }
 
-  // blur 호출 시 한글 IME 조합 완료로 인한 input 이벤트가 재검색을 유발하지 않도록 사전 차단
+  // blur 호출 시 한글 IME 조합 완료로 인한 마지막 글자 중복 입력 및 재검색을 원천 차단
   if (searchInput) {
-    lastSearchedQuery = searchInput.value.trim();
-    searchInput.blur();
+    const raw = isMobileImeTrailingDuplicate(searchInput.value, lastValidSearchInputRaw)
+      ? lastValidSearchInputRaw
+      : searchInput.value;
+    lastSearchedQuery = raw.trim();
+    lockAndBlurSearchInput(raw);
   }
   clearTimeout(searchTimeout);
 
