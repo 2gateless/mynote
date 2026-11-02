@@ -889,7 +889,13 @@
     min-height: 20px; font-size: 13px; font-weight: 600; color: var(--danger);
     margin-bottom: 12px;
   }
-  .pin-keypad {
+  .pin-keypad.locked-out {
+  opacity: 0.35;
+  pointer-events: none;
+  filter: grayscale(1);
+  cursor: not-allowed;
+}
+.pin-keypad {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
     max-width: 280px; margin: 0 auto 18px;
   }

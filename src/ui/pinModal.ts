@@ -1,11 +1,18 @@
 // ── 4자리 숫자 Lock 암호 설정(최초 1회 입력 + 1회 확인) 및 잠금 메모 열람 인증 모달 모듈
 // ※ 보안: 암호(PIN)는 평문으로 저장하거나 메모리에 보관하지 않으며, Web Crypto SHA-256 + 솔트로 해시화하여 이 기기(localStorage)에만 보관합니다.
+// ※ Brute-force 방어: 5회 이상 연속 오류 시 24시간 동안 입력이 차단되며 2gateless@gmail.com으로 보안 경고 메일이 발송됩니다.
 import { appState } from '../state';
 import { showToast } from '../utils/toast';
 
 const LEGACY_LOCK_PIN_STORAGE_KEY = 'mynote_lock_pin';
 const LOCK_PIN_HASH_KEY = 'mynote_lock_pin_hash_v1';
 const LOCK_PIN_SALT_KEY = 'mynote_lock_pin_salt_v1';
+const LOCK_PIN_FAIL_COUNT_KEY = 'mynote_lock_pin_fail_count';
+const LOCK_PIN_LOCKOUT_UNTIL_KEY = 'mynote_lock_pin_lockout_until';
+
+const MAX_FAIL_COUNT = 5;
+const LOCKOUT_DURATION_MS = 24 * 60 * 60 * 1000; // 24시간 잠금
+const ALERT_EMAIL = '2gateless@gmail.com';
 
 type PinModalMode = 'setup' | 'verify';
 
@@ -18,10 +25,126 @@ let currentInput = '';
 let isProcessingStep = false;
 let pendingResolve: ((ok: boolean) => void) | null = null;
 let hasTriggeredInitialSetup = false;
+let lockoutTimerInterval: any = null;
 
 const $ = (id: string) => document.getElementById(id);
 
+// ─────────────────────────────────────────────
+// 잠금 및 대기시간 연장(24시간) 관리 헬퍼
+// ─────────────────────────────────────────────
+
+function getLockoutRemainingMs(): number {
+  try {
+    const until = Number(localStorage.getItem(LOCK_PIN_LOCKOUT_UNTIL_KEY) || 0);
+    const now = Date.now();
+    if (until > now) {
+      return until - now;
+    }
+    // 24시간이 경과한 경우 잠금 및 오류 횟수 초기화
+    if (until > 0) {
+      localStorage.removeItem(LOCK_PIN_LOCKOUT_UNTIL_KEY);
+      localStorage.removeItem(LOCK_PIN_FAIL_COUNT_KEY);
+    }
+  } catch {}
+  return 0;
+}
+
+export function isCurrentlyLockedOut(): boolean {
+  return getLockoutRemainingMs() > 0;
+}
+
+function formatRemainingTime(ms: number): string {
+  const totalSec = Math.ceil(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}시간 ${minutes}분 ${seconds}초`;
+  }
+  if (minutes > 0) {
+    return `${minutes}분 ${seconds}초`;
+  }
+  return `${seconds}초`;
+}
+
+// 5회 실패 시 2gateless@gmail.com으로 긴급 보안 경고 이메일 발송 및 Firestore 기록
+async function sendLockoutEmailNotification(attempts: number, lockedUntilMs: number) {
+  const lockedDate = new Date(lockedUntilMs).toLocaleString('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  const nowStr = new Date().toLocaleString('ko-KR');
+
+  const subject = `🚨 [MyNote 보안 경고] 4자리 암호 ${attempts}회 연속 오류로 인한 24시간 입력 잠금`;
+  const messageBody = `
+[MyNote 보안 경고]
+귀하의 MyNote 계정에서 잠긴 메모의 4자리 암호(PIN)가 ${attempts}회 연속으로 잘못 입력되었습니다.
+
+무차별 대입 공격(Brute-force)을 방지하기 위해 해당 기기에서의 메모 암호 입력이 24시간 동안 완전히 차단되었습니다.
+
+- 잠금 발생 시각: ${nowStr}
+- 잠금 해제 예정 시각: ${lockedDate}
+- 사용자 이메일: ${ALERT_EMAIL}
+- 접속 기기 및 환경: ${navigator.userAgent}
+
+본인이 시도한 것이 아니라면 다른 사람이 회원님의 메모 열람을 시도했을 가능성이 있으니 계정 보안 상태를 점검하시기 바랍니다.
+`.trim();
+
+  // 1) formsubmit.co AJAX 엔드포인트를 통해 2gateless@gmail.com으로 백그라운드 발송
+  try {
+    fetch(`https://formsubmit.co/ajax/${ALERT_EMAIL}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        _subject: subject,
+        email: ALERT_EMAIL,
+        message: messageBody,
+        timestamp: nowStr,
+        unlockTime: lockedDate,
+        userAgent: navigator.userAgent
+      })
+    }).catch(err => console.warn('이메일 통지 발송 API 오류:', err));
+  } catch (e) {
+    console.warn('이메일 통지 발송 실패:', e);
+  }
+
+  // 2) Firestore에 보안 경고 로그(security_alerts 컬렉션 및 user_meta) 영구 보존
+  try {
+    const user = appState.currentUser;
+    if (user) {
+      const { doc, setDoc, collection, addDoc, Timestamp } = await import('firebase/firestore');
+      const { db } = await import('../services/firebase');
+
+      await setDoc(doc(db, 'user_meta', user.uid), {
+        pinLockoutUntil: Timestamp.fromMillis(lockedUntilMs),
+        lastSecurityAlertAt: Timestamp.now()
+      }, { merge: true });
+
+      await addDoc(collection(db, 'security_alerts'), {
+        uid: user.uid,
+        email: ALERT_EMAIL,
+        type: 'PIN_LOCKOUT_24H',
+        attempts,
+        lockedUntil: Timestamp.fromMillis(lockedUntilMs),
+        createdAt: Timestamp.now(),
+        userAgent: navigator.userAgent
+      });
+    }
+  } catch (e) {
+    console.warn('Firestore 보안 경고 기록 오류:', e);
+  }
+}
+
+// ─────────────────────────────────────────────
 // Web Crypto SHA-256 + 솔트 해시 계산 헬퍼
+// ─────────────────────────────────────────────
 async function hashPin(pin: string, salt: string): Promise<string> {
   const enc = new TextEncoder();
   const data = enc.encode(`${salt}:${pin}:mynote_secure_lock`);
@@ -122,6 +245,51 @@ function updateModalTexts() {
   }
 }
 
+function updateLockoutUI() {
+  const remMs = getLockoutRemainingMs();
+  const keypad = $('pin-keypad');
+  const dotsWrap = $('pin-dots');
+  const iconEl = $('pin-modal-icon');
+  const titleEl = $('pin-modal-title');
+  const descEl = $('pin-modal-desc');
+
+  if (remMs > 0) {
+    if (keypad) keypad.classList.add('locked-out');
+    if (dotsWrap) dotsWrap.style.display = 'none';
+    if (iconEl) iconEl.textContent = '🚫';
+    if (titleEl) titleEl.textContent = '암호 입력 24시간 차단됨';
+    if (descEl) {
+      descEl.innerHTML = `암호 5회 연속 오류로 24시간 동안 잠겼습니다.<br><b style="color:var(--danger)">${ALERT_EMAIL}</b>으로 보안 경고가 통지되었습니다.`;
+    }
+    setErrorMsg(`⏳ 남은 잠금 시간: ${formatRemainingTime(remMs)}`, false);
+  } else {
+    if (keypad) keypad.classList.remove('locked-out');
+    if (dotsWrap) dotsWrap.style.display = 'flex';
+    if (lockoutTimerInterval) {
+      clearInterval(lockoutTimerInterval);
+      lockoutTimerInterval = null;
+    }
+    updateModalTexts();
+    setErrorMsg('');
+  }
+}
+
+function startLockoutTimer() {
+  if (lockoutTimerInterval) clearInterval(lockoutTimerInterval);
+  updateLockoutUI();
+  lockoutTimerInterval = setInterval(() => {
+    const rem = getLockoutRemainingMs();
+    if (rem <= 0) {
+      clearInterval(lockoutTimerInterval);
+      lockoutTimerInterval = null;
+      updateLockoutUI();
+      showToast('24시간 잠금이 해제되었습니다. 암호를 다시 입력해주세요.');
+    } else {
+      updateLockoutUI();
+    }
+  }, 1000);
+}
+
 function renderDots() {
   const dotsWrap = $('pin-dots');
   if (!dotsWrap) return;
@@ -145,8 +313,17 @@ function setErrorMsg(msg: string, shake = false) {
 }
 
 function finishModal(result: boolean) {
+  if (lockoutTimerInterval) {
+    clearInterval(lockoutTimerInterval);
+    lockoutTimerInterval = null;
+  }
   const modal = $('pin-modal');
   if (modal) modal.style.display = 'none';
+  const keypad = $('pin-keypad');
+  if (keypad) keypad.classList.remove('locked-out');
+  const dotsWrap = $('pin-dots');
+  if (dotsWrap) dotsWrap.style.display = 'flex';
+
   isOpen = false;
   isProcessingStep = false;
   currentInput = '';
@@ -176,12 +353,16 @@ export function openPinModal(mode: PinModalMode, canCancel = true): Promise<bool
   isProcessingStep = false;
   isOpen = true;
 
-  updateModalTexts();
-  renderDots();
-  setErrorMsg('');
-
   const modal = $('pin-modal');
   if (modal) modal.style.display = 'flex';
+
+  if (mode === 'verify' && isCurrentlyLockedOut()) {
+    startLockoutTimer();
+  } else {
+    updateModalTexts();
+    renderDots();
+    setErrorMsg('');
+  }
 
   return new Promise<boolean>((resolve) => {
     pendingResolve = resolve;
@@ -217,6 +398,8 @@ export function closePinModalByBack() {
 
 function handleFourDigitsEntered() {
   if (currentInput.length !== 4 || isProcessingStep) return;
+  if (currentMode === 'verify' && isCurrentlyLockedOut()) return;
+
   isProcessingStep = true;
 
   setTimeout(async () => {
@@ -234,6 +417,8 @@ function handleFourDigitsEntered() {
       } else {
         if (currentInput === firstPin) {
           await setStoredLockPin(currentInput);
+          localStorage.removeItem(LOCK_PIN_FAIL_COUNT_KEY);
+          localStorage.removeItem(LOCK_PIN_LOCKOUT_UNTIL_KEY);
           showToast('이 기기에 4자리 잠금 암호가 암호화되어 저장되었어요 🔒');
           finishModal(true);
         } else {
@@ -271,18 +456,36 @@ function handleFourDigitsEntered() {
     }
 
     if (isValid) {
+      // 검증 성공 시 실패 카운트 및 잠금 해제
+      localStorage.removeItem(LOCK_PIN_FAIL_COUNT_KEY);
+      localStorage.removeItem(LOCK_PIN_LOCKOUT_UNTIL_KEY);
       finishModal(true);
     } else {
       currentInput = '';
       isProcessingStep = false;
       renderDots();
-      setErrorMsg('암호가 일치하지 않아요', true);
+
+      let failCount = Number(localStorage.getItem(LOCK_PIN_FAIL_COUNT_KEY) || 0) + 1;
+      localStorage.setItem(LOCK_PIN_FAIL_COUNT_KEY, String(failCount));
+
+      if (failCount >= MAX_FAIL_COUNT) {
+        const lockoutUntil = Date.now() + LOCKOUT_DURATION_MS;
+        localStorage.setItem(LOCK_PIN_LOCKOUT_UNTIL_KEY, String(lockoutUntil));
+        // 이메일 통지 발송 & Firestore 보안 기록
+        sendLockoutEmailNotification(failCount, lockoutUntil);
+        showToast(`⚠️ 암호 5회 연속 오류로 24시간 동안 잠겼습니다. 관리자 메일(${ALERT_EMAIL})로 통지되었습니다.`);
+        startLockoutTimer();
+      } else {
+        const remain = MAX_FAIL_COUNT - failCount;
+        setErrorMsg(`암호가 일치하지 않아요 (${failCount}/${MAX_FAIL_COUNT}회 오류 · ${remain}회 후 24시간 잠금)`, true);
+      }
     }
   }, 130);
 }
 
 function appendDigit(digit: string) {
   if (!isOpen || isProcessingStep || currentInput.length >= 4) return;
+  if (currentMode === 'verify' && isCurrentlyLockedOut()) return;
   if (!/^\d$/.test(digit)) return;
   setErrorMsg('');
   currentInput += digit;
@@ -294,6 +497,7 @@ function appendDigit(digit: string) {
 
 function deleteLastDigit() {
   if (!isOpen || isProcessingStep || currentInput.length === 0) return;
+  if (currentMode === 'verify' && isCurrentlyLockedOut()) return;
   setErrorMsg('');
   currentInput = currentInput.slice(0, -1);
   renderDots();
@@ -301,6 +505,7 @@ function deleteLastDigit() {
 
 function resetDigits() {
   if (!isOpen || isProcessingStep) return;
+  if (currentMode === 'verify' && isCurrentlyLockedOut()) return;
   setErrorMsg('');
   currentInput = '';
   renderDots();
@@ -312,6 +517,7 @@ export function initPinModal() {
   const keypad = $('pin-keypad');
   if (keypad) {
     keypad.addEventListener('click', (e) => {
+      if (currentMode === 'verify' && isCurrentlyLockedOut()) return;
       const btn = (e.target as HTMLElement).closest('button') as HTMLButtonElement | null;
       if (!btn) return;
       const digit = btn.dataset.digit;
@@ -341,6 +547,13 @@ export function initPinModal() {
 
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (!isOpen) return;
+    if (currentMode === 'verify' && isCurrentlyLockedOut()) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closePinModalByBack();
+      }
+      return;
+    }
     if (e.key >= '0' && e.key <= '9') {
       e.preventDefault();
       appendDigit(e.key);
