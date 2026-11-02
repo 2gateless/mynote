@@ -436,12 +436,14 @@ export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, n
 }
 
 // 9개 카테고리 인덱스를 모두 구독하여 병합 (복수 카테고리 메모는 ID 기준으로 중복 제거 후 병합)
-export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => void) {
+// isComplete: 9개 카테고리 모두 에러 없이 로드 완료되었는지 여부
+export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[], isComplete: boolean) => void) {
   if (!appState.currentUser) return () => {};
   const uid = appState.currentUser.uid;
   const categoryKeys = Object.keys(CATEGORIES);
   const perCategory: Record<string, NoteIndexItem[]> = {};
   const initialLoaded = new Set<string>();
+  const erroredCats = new Set<string>();
   let updateTimer: any = null;
 
   for (const cat of categoryKeys) {
@@ -473,7 +475,8 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
         }
       }
     }
-    onIndexChange(Array.from(byId.values()));
+    const isComplete = initialLoaded.size === categoryKeys.length && erroredCats.size === 0;
+    onIndexChange(Array.from(byId.values()), isComplete);
   };
 
   const scheduleNotifyIfReady = () => {
@@ -487,11 +490,13 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[]) => voi
       catIndexRef(uid, cat),
       snap => {
         perCategory[cat] = snap.exists() ? (snap.data().notes || []) : [];
+        erroredCats.delete(cat);
         initialLoaded.add(cat);
         scheduleNotifyIfReady();
       },
       err => {
         console.warn(`카테고리 인덱스 구독 오류 (${cat}):`, err);
+        erroredCats.add(cat);
         initialLoaded.add(cat);
         scheduleNotifyIfReady();
       }

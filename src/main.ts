@@ -70,6 +70,7 @@ import {
   backfillMissingEmbeddings,
   upsertVectorNoteCache,
   removeVectorNoteCache,
+  clearAiLocalCache,
   EMBEDDING_VERSION
 } from './services/ai';
 
@@ -126,6 +127,8 @@ function clearAuthCache() {
     localStorage.removeItem('mynote_search_cache');
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
+  // 로그아웃 시 평문 본문이 포함된 IndexedDB 벡터 캐시 및 세션 AI 데이터 즉시 파기
+  clearAiLocalCache().catch(() => {});
 }
 
 // 카테고리별/전체 카운트 표시
@@ -330,7 +333,8 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
 
 function subscribeAllNotesCache() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
-  notesUnsubscribe = subscribeAllNotes((notes) => {
+  notesUnsubscribe = subscribeAllNotes((notes, isComplete) => {
+    appState.isAllNotesComplete = isComplete;
     updateNotesCache(notes, true);
     const totalCnt = $('cnt-total-notes');
     if (totalCnt) totalCnt.textContent = String(notes.length);
@@ -2232,7 +2236,8 @@ async function saveNote() {
       categories,
       tag: tag || '',
       tags,
-      keywords
+      keywords,
+      locked
     };
     const canReuseExistingEmbedding =
       isEdit &&
@@ -2254,6 +2259,13 @@ async function saveNote() {
           embedding,
           embeddingModel: EMBEDDING_VERSION,
           embeddingUpdatedAt: Timestamp.now()
+        };
+      } else if (isEdit) {
+        // 임베딩 재호출이 실패한 경우, 바뀐 본문/제목과 맞지 않는 예전 벡터가 검색에 오작동하지 않도록 기존 임베딩 무효화
+        embeddingFields = {
+          embedding: null,
+          embeddingModel: null,
+          embeddingUpdatedAt: null
         };
       }
     }
@@ -2284,7 +2296,11 @@ async function saveNote() {
 
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       appState.currentNote = { ...appState.currentNote, ...updateData };
-      upsertVectorNoteCache(appState.currentNote);
+      if (embeddingFields.embedding) {
+        upsertVectorNoteCache(appState.currentNote);
+      } else if (embeddingFields.embedding === null) {
+        removeVectorNoteCache(appState.editingNoteId);
+      }
       openDetail(appState.currentNote, detailFrom);
     } else {
       // 신규 메모 생성 및 임베딩 저장

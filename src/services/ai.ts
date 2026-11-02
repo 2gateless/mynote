@@ -7,6 +7,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
   Timestamp
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
@@ -100,6 +101,48 @@ function toVectorRecord(id: string, uid: string, data: any): LocalVectorRecord |
 let memoryVectorMap: Map<string, LocalVectorRecord> | null = null;
 let memoryVectorUid: string | null = null;
 let idbPromise: Promise<IDBDatabase | null> | null = null;
+let syncPromise: Promise<Map<string, LocalVectorRecord>> | null = null;
+
+/**
+ * 로그아웃 시 메모리 및 IndexedDB에 저장된 벡터·본문 캐시를 정리합니다.
+ */
+export async function clearAiLocalCache(clearCredentials = false): Promise<void> {
+  memoryVectorMap = null;
+  memoryVectorUid = null;
+  queryEmbeddingCache.clear();
+  cachedWorkingFlashModel = null;
+  syncPromise = null;
+
+  try {
+    const idb = await openVectorIdb();
+    if (idb) {
+      await new Promise<void>((resolve) => {
+        try {
+          const tx = idb.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        } catch {
+          resolve();
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('IndexedDB 벡터 캐시 초기화 실패:', e);
+  }
+
+  try {
+    Object.keys(localStorage).forEach(key => {
+      if (key.startsWith(BOOTSTRAP_FLAG_PREFIX)) {
+        localStorage.removeItem(key);
+      }
+    });
+    if (clearCredentials) {
+      localStorage.removeItem(STORAGE_KEY_API);
+      localStorage.removeItem(STORAGE_KEY_PROXY);
+    }
+  } catch (e) {}
+}
 
 // ─────────────────────────────────────────────
 // 0. IndexedDB 영구 로컬 벡터 캐시 레이어
@@ -358,7 +401,9 @@ export function buildNoteEmbeddingInput(noteData: Partial<Note>): string {
     .join(', ');
   const tags = getNoteTags(noteData).join(', ');
   const keywords = (noteData.keywords || '').trim();
-  const body = cleanTextForEmbedding(noteData.body || '');
+  // 잠금 메모(locked: true)는 외부 AI API에 본문을 전송하지 않고 제목/카테고리/태그/키워드로만 임베딩 생성 (보안 강화)
+  const isLocked = Boolean(noteData.locked);
+  const body = isLocked ? '' : cleanTextForEmbedding(noteData.body || '');
 
   const parts: string[] = [];
   if (title) parts.push(`제목: ${title}`);
@@ -637,6 +682,14 @@ export function removeVectorNoteCache(noteId: string) {
  *    다른 기기에서 새로 추가/수정되어 로컬 캐시에 없거나 구버전인 메모 ID만 단건 조회(Delta Fetch)합니다.
  */
 async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord>> {
+  if (syncPromise) return syncPromise;
+  syncPromise = doEnsureLocalVectorsSynced().finally(() => {
+    syncPromise = null;
+  });
+  return syncPromise;
+}
+
+async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord>> {
   const uid = appState.currentUser?.uid;
   if (!uid) throw new Error('로그인이 필요합니다.');
 
@@ -650,8 +703,8 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
   const bootstrapKey = `${BOOTSTRAP_FLAG_PREFIX}${uid}`;
   const isBootstrapped = localStorage.getItem(bootstrapKey) === '1';
 
-  // 기기 최초 1회: 로컬 IndexedDB가 완전히 비어 있고 아직 초기 동기화 이력이 없을 때만 1회 초기화
-  if (memoryVectorMap.size === 0 && !isBootstrapped) {
+  // 로컬 캐시가 완전히 비어 있는 경우(기기 최초 1회 또는 브라우저 캐시 삭제 후): 전체 1회 일괄 조회로 초기화
+  if (memoryVectorMap.size === 0) {
     const q = query(collection(db, 'notes'), where('uid', '==', uid));
     const snap = await getDocs(q);
     const toSave: LocalVectorRecord[] = [];
@@ -672,11 +725,12 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
   }
 
   // 2) 증분 동기화(Delta Sync) 및 고아/잠금 레코드 정리:
-  //    - 다른 기기에서 삭제된 메모의 로컬 벡터 캐시 제거
+  //    - 다른 기기에서 삭제된 메모의 로컬 벡터 캐시 제거 (단, 9개 카테고리 전체가 온전히 로드된 경우에만 고아 제거)
   //    - 다른 기기에서 잠금(locked) 처리된 메모의 로컬 평문 본문 즉시 파기
   //    - embeddingUpdatedAt이 갱신되었거나 모델 버전이 다른 문서만 선별하여 조회
   const staleNoteIds: string[] = [];
   const lockedSanitizedRecords: LocalVectorRecord[] = [];
+  const isIndexFullyLoaded = Boolean(appState.isAllNotesComplete);
 
   if (indexItems.length > 0) {
     const validIds = new Set<string>();
@@ -697,16 +751,18 @@ async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord
       }
     }
 
-    // 인덱스에 더 이상 존재하지 않는(삭제된) 메모 벡터 정리
-    const orphanIds: string[] = [];
-    for (const cachedId of memoryVectorMap.keys()) {
-      if (!validIds.has(cachedId)) {
-        orphanIds.push(cachedId);
+    // 인덱스가 모든 카테고리에서 온전히 로드되었을 때만 고아 벡터 정리 (일부 카테고리 로딩 실패 시 정상 벡터 오삭제 방지)
+    if (isIndexFullyLoaded) {
+      const orphanIds: string[] = [];
+      for (const cachedId of memoryVectorMap.keys()) {
+        if (!validIds.has(cachedId)) {
+          orphanIds.push(cachedId);
+        }
       }
-    }
-    if (orphanIds.length > 0) {
-      for (const id of orphanIds) memoryVectorMap.delete(id);
-      deleteVectorsFromIdb(orphanIds).catch(() => {});
+      if (orphanIds.length > 0) {
+        for (const id of orphanIds) memoryVectorMap.delete(id);
+        deleteVectorsFromIdb(orphanIds).catch(() => {});
+      }
     }
   }
 
@@ -1279,11 +1335,13 @@ export async function backfillMissingEmbeddings(
         prepared.map(p => p.note.title)
       );
       const now = Timestamp.now();
+      const firestoreBatch = writeBatch(db);
+
       for (let j = 0; j < prepared.length; j++) {
         const { note } = prepared[j];
         const embedding = embeddings[j];
         if (!note.id || !embedding) continue;
-        await updateDoc(doc(db, 'notes', note.id), {
+        firestoreBatch.update(doc(db, 'notes', note.id), {
           embedding,
           embeddingModel: EMBEDDING_VERSION,
           embeddingUpdatedAt: now
@@ -1291,10 +1349,19 @@ export async function backfillMissingEmbeddings(
         note.embedding = embedding;
         note.embeddingModel = EMBEDDING_VERSION;
         note.embeddingUpdatedAt = now;
-        upsertVectorNoteCache(note);
         getNoteCategories(note).forEach(c => touchedCategories.add(c));
-        updated++;
       }
+
+      await firestoreBatch.commit();
+
+      for (let j = 0; j < prepared.length; j++) {
+        const { note } = prepared[j];
+        if (note.id && note.embedding) {
+          upsertVectorNoteCache(note);
+          updated++;
+        }
+      }
+
       // 할당량(TPM/RPM) 초과 방지를 위한 짧은 휴식
       await sleep(350);
     } catch (e) {
