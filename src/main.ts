@@ -25,13 +25,7 @@ import {
   toMillis,
   parseMarkdownBody 
 } from './utils/formatter';
-import { 
-  getShareText, 
-  shareViaEmail, 
-  shareViaKakao, 
-  shareViaTelegram, 
-  shareViaNative 
-} from './utils/share';
+// utils/share는 동적 import()로 전환됨
 import { 
   compressImage, 
   imageFileName,
@@ -40,7 +34,7 @@ import {
   collectImagePaths 
 } from './utils/image';
 import { showToast } from './utils/toast';
-import { initImageViewer } from './ui/imageViewer';
+// ui/imageViewer는 requestIdleCallback 지연 동적 import()로 전환됨
 import {
   initPinModal,
   verifyLockPinForNote,
@@ -56,23 +50,26 @@ import {
   currentScreen 
 } from './pwa';
 import { NoteIndexItem } from './types';
-import {
-  tryGenerateNoteEmbedding,
-  buildNoteEmbeddingInput,
-  isCurrentEmbedding,
-  semanticSearchNotes,
-  generateRagAnswer,
-  hasAiCredentials,
-  getGeminiApiKey,
-  getAiProxyUrl,
-  saveAiConfig,
-  syncAiConfigFromUserMeta,
-  backfillMissingEmbeddings,
-  upsertVectorNoteCache,
-  removeVectorNoteCache,
-  clearAiLocalCache,
-  EMBEDDING_VERSION
-} from './services/ai';
+// AI, 이미지 뷰어, 공유 모듈은 초기 로딩 지연을 없애기 위해 동적 임포트(import()) 적용
+import { saveNotesToLocalDb, loadNotesFromLocalDb, clearNotesLocalDb } from './services/notesCache';
+import { doc, updateDoc } from 'firebase/firestore';
+import { db } from './services/firebase';
+
+let aiModulePromise: Promise<typeof import('./services/ai')> | null = null;
+function getAi() {
+  if (!aiModulePromise) {
+    aiModulePromise = import('./services/ai');
+  }
+  return aiModulePromise;
+}
+
+let shareModulePromise: Promise<typeof import('./utils/share')> | null = null;
+function getShare() {
+  if (!shareModulePromise) {
+    shareModulePromise = import('./utils/share');
+  }
+  return shareModulePromise;
+}
 
 let recognition: any = null;
 let isRecording = false;
@@ -127,8 +124,9 @@ function clearAuthCache() {
     localStorage.removeItem('mynote_search_cache');
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
-  // 로그아웃 시 평문 본문이 포함된 IndexedDB 벡터 캐시 및 세션 AI 데이터 즉시 파기
-  clearAiLocalCache().catch(() => {});
+  // 로그아웃 시 이 기기에 저장된 IndexedDB 메모 인덱스 캐시 및 벡터 캐시 파기
+  clearNotesLocalDb().catch(() => {});
+  getAi().then(ai => ai.clearAiLocalCache()).catch(() => {});
 }
 
 // 카테고리별/전체 카운트 표시
@@ -194,28 +192,23 @@ let isSearchIndexReady = false;
 let persistCacheTimer: any = null;
 
 // 검색 캐시 localStorage 직렬화를 유휴 시간으로 지연하여 메인 스레드 블로킹 방지
+// 검색 및 전체 메모 캐시를 IndexedDB에 비동기 영구 저장 (localStorage 5MB 한계 및 메인 스레드 멈춤 극복)
 function schedulePersistSearchCache(notes: NoteIndexItem[]) {
   if (persistCacheTimer) clearTimeout(persistCacheTimer);
   persistCacheTimer = setTimeout(() => {
     persistCacheTimer = null;
-    const writeCache = () => {
-      try {
-        localStorage.setItem('mynote_search_cache', JSON.stringify(notes));
-      } catch (e) {
-        console.warn('검색 캐시 로컬 저장 실패:', e);
-      }
-    };
-    if ('requestIdleCallback' in window) {
-      (window as any).requestIdleCallback(writeCache, { timeout: 2000 });
-    } else {
-      writeCache();
-    }
+    saveNotesToLocalDb(notes).catch(e => console.warn('IndexedDB 메모 인덱스 캐시 저장 실패:', e));
+    // localStorage에도 초경량 백업 시도 (용량 초과 시 조용히 무시)
+    try {
+      localStorage.setItem('mynote_search_cache', JSON.stringify(notes));
+    } catch (e) {}
   }, 400);
 }
 
-// 로컬 스토리지의 검색 캐시를 복원하는 함수 (필요 시 즉시 동기 실행 가능)
+// 로컬 캐시(localStorage 및 IndexedDB)로부터 메모 인덱스를 0초대로 복원하는 함수
 function ensureSearchIndexReady(): boolean {
   if (isSearchIndexReady) return true;
+  // 1) 빠른 localStorage 복원 시도
   try {
     const rawSearch = localStorage.getItem('mynote_search_cache');
     if (rawSearch) {
@@ -230,9 +223,20 @@ function ensureSearchIndexReady(): boolean {
         return true;
       }
     }
-  } catch (e) {
-    console.warn('검색 캐시 복원 실패:', e);
-  }
+  } catch (e) {}
+
+  // 2) IndexedDB 영구 캐시 비동기 로드
+  loadNotesFromLocalDb().then(cachedNotes => {
+    if (cachedNotes && cachedNotes.length > 0 && !hasNotesLoaded) {
+      updateNotesCache(cachedNotes, false);
+      isSearchIndexReady = true;
+      const totalCnt = $('cnt-total-notes');
+      if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
+        totalCnt.textContent = String(cachedNotes.length);
+      }
+    }
+  }).catch(() => {});
+
   return false;
 }
 
@@ -243,7 +247,7 @@ function applyEarlyCache() {
     if (rawUser) {
       renderUserBar(JSON.parse(rawUser));
       scheduleInitialPinSetupCheck();
-    syncAiConfigFromUserMeta().catch(() => {});
+      getAi().then(ai => ai.syncAiConfigFromUserMeta()).catch(() => {});
       showRootScreen('app');
     }
     const rawCounts = localStorage.getItem('mynote_counts_cache');
@@ -365,7 +369,7 @@ initAuthListener(
     showRootScreen('app');
     loadAllCounts();
     scheduleInitialPinSetupCheck();
-    syncAiConfigFromUserMeta().catch(() => {});
+    getAi().then(ai => ai.syncAiConfigFromUserMeta()).catch(() => {});
 
     // 사용자가 인증 완료 전에 이미 카테고리 목록을 열었거나 대기 중인 경우 즉시 실시간 동기화 시작
     const targetCat = pendingListCat || (currentScreen() === 'list' ? appState.currentCat : null);
@@ -1008,10 +1012,13 @@ if (searchInput) {
     if (v === lastSearchedQuery && (searchResults.style.display !== 'none' || isAiSearchActive)) {
       return;
     }
-    ensureSearchIndexReady();
-    ensureAllNotesCache();
-    // 지연(setTimeout) 없이 즉시 검색하여 클릭/터치 직전에 목록이 뒤늦게 바뀌는 현상 원천 차단
-    doSearch(v);
+    // 300ms 디바운스(Debounce) 적용: 타이핑 중 불필요한 연속 필터링 및 렌더링 방지
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      ensureSearchIndexReady();
+      ensureAllNotesCache();
+      doSearch(v);
+    }, 300);
   });
 
   searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -1040,10 +1047,11 @@ const btnBackfillEmbeddings = $('btn-backfill-embeddings') as HTMLButtonElement 
 const aiBackfillStatus = $('ai-backfill-status') as HTMLElement | null;
 let aiSearchSessionToken = 0;
 
-function openAiConfigModal() {
+async function openAiConfigModal() {
   if (!aiConfigModal) return;
-  if (aiApiKeyInput) aiApiKeyInput.value = getGeminiApiKey();
-  if (aiProxyUrlInput) aiProxyUrlInput.value = getAiProxyUrl();
+  const ai = await getAi();
+  if (aiApiKeyInput) aiApiKeyInput.value = ai.getGeminiApiKey();
+  if (aiProxyUrlInput) aiProxyUrlInput.value = ai.getAiProxyUrl();
   if (aiSyncCloudCb) aiSyncCloudCb.checked = false; // 기본값은 로컬 기기 보관 (보안 권장)
   aiConfigModal.style.display = 'flex';
 }
@@ -1069,7 +1077,8 @@ if (aiConfigSave) {
     const syncCloud = aiSyncCloudCb ? aiSyncCloudCb.checked : false;
     aiConfigSave.disabled = true;
     try {
-      await saveAiConfig(key, proxy, syncCloud);
+      const ai = await getAi();
+      await ai.saveAiConfig(key, proxy, syncCloud);
       showToast(key || proxy ? 'AI 설정이 저장되었어요 ✨' : 'AI 설정이 초기화되었어요');
       closeAiConfigModal();
     } catch (e: any) {
@@ -1088,19 +1097,20 @@ if (aiConfigModal) {
 
 if (btnBackfillEmbeddings) {
   btnBackfillEmbeddings.onclick = async () => {
-    if (!hasAiCredentials()) {
+    const ai = await getAi();
+    if (!ai.hasAiCredentials()) {
       const tempKey = aiApiKeyInput?.value.trim() || '';
       const tempProxy = aiProxyUrlInput?.value.trim() || '';
       if (!tempKey && !tempProxy) {
         showToast('먼저 Gemini API 키를 입력하고 저장해주세요');
         return;
       }
-      await saveAiConfig(tempKey, tempProxy, aiSyncCloudCb ? aiSyncCloudCb.checked : false);
+      await ai.saveAiConfig(tempKey, tempProxy, aiSyncCloudCb ? aiSyncCloudCb.checked : false);
     }
     btnBackfillEmbeddings.disabled = true;
     btnBackfillEmbeddings.textContent = '⏳ 변환 중...';
     try {
-      const res = await backfillMissingEmbeddings((done, total, title) => {
+      const res = await ai.backfillMissingEmbeddings((done, total, title) => {
         if (aiBackfillStatus) {
           aiBackfillStatus.textContent = `진행 중 (${done}/${total}): "${title}" 임베딩 생성 중...`;
         }
@@ -1143,7 +1153,8 @@ async function runAiSemanticSearch(rawQuery: string) {
     searchInput?.focus();
     return;
   }
-  if (!hasAiCredentials()) {
+  const ai = await getAi();
+  if (!ai.hasAiCredentials()) {
     showToast('AI 검색을 위해 먼저 Gemini API 키를 설정해주세요 ✨');
     openAiConfigModal();
     return;
@@ -1186,7 +1197,7 @@ async function runAiSemanticSearch(rawQuery: string) {
 
   try {
     // 1단계: 코사인 유사도 상위 5개 메모 고속 추출
-    const { results, embeddedNotesCount } = await semanticSearchNotes(queryText, 5);
+    const { results, embeddedNotesCount } = await ai.semanticSearchNotes(queryText, 5);
     if (token !== aiSearchSessionToken) return;
 
     if (results.length === 0) {
@@ -1257,7 +1268,7 @@ async function runAiSemanticSearch(rawQuery: string) {
       `;
     }
 
-    const answerMarkdown = await generateRagAnswer(queryText, results);
+    const answerMarkdown = await ai.generateRagAnswer(queryText, results);
     if (token !== aiSearchSessionToken) return;
 
     const cleanAnswer = answerMarkdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
@@ -2173,6 +2184,85 @@ if (noteBodyEl) {
 // SAVE NOTE
 // ─────────────────────────────────────────────
 let isSaving = false;
+
+// ─────────────────────────────────────────────
+// 백그라운드 비동기 임베딩 파이프라인
+// 메모 본문 저장을 즉시 완료하고 사용자에게 UI를 반응시킨 뒤,
+// Gemini 임베딩 API 호출과 Firestore 벡터 필드 업데이트는 백그라운드에서 비동기 처리
+// ─────────────────────────────────────────────
+function runBackgroundEmbeddingPipeline(params: {
+  noteId: string;
+  uid: string;
+  candidate: {
+    title: string;
+    body: string;
+    category: string;
+    categories: string[];
+    tag: string;
+    tags: string[];
+    keywords: string;
+    locked: boolean;
+  };
+  isEdit: boolean;
+  oldNote?: any;
+}) {
+  const { noteId, uid, candidate, isEdit, oldNote } = params;
+  (async () => {
+    try {
+      const ai = await getAi();
+      const currentInput = ai.buildNoteEmbeddingInput(candidate);
+
+      // 수정인 경우 기존 임베딩 재사용 가능 여부 검사
+      if (
+        isEdit &&
+        oldNote &&
+        ai.isCurrentEmbedding(oldNote.embeddingModel, oldNote.embedding) &&
+        ai.buildNoteEmbeddingInput(oldNote) === currentInput
+      ) {
+        // 기존 임베딩 유지 및 로컬 벡터 캐시 업데이트
+        ai.upsertVectorNoteCache({
+          id: noteId,
+          uid,
+          ...candidate,
+          embedding: oldNote.embedding,
+          embeddingModel: ai.EMBEDDING_VERSION,
+          embeddingUpdatedAt: oldNote.embeddingUpdatedAt || Timestamp.now()
+        } as any);
+        return;
+      }
+
+      // 새 임베딩 생성 시도
+      const embedding = await ai.tryGenerateNoteEmbedding(candidate);
+      if (embedding) {
+        const nowTs = Timestamp.now();
+        await updateDoc(doc(db, 'notes', noteId), {
+          embedding,
+          embeddingModel: ai.EMBEDDING_VERSION,
+          embeddingUpdatedAt: nowTs
+        });
+        ai.upsertVectorNoteCache({
+          id: noteId,
+          uid,
+          ...candidate,
+          embedding,
+          embeddingModel: ai.EMBEDDING_VERSION,
+          embeddingUpdatedAt: nowTs
+        } as any);
+      } else if (isEdit) {
+        // 임베딩 생성 실패 시 구버전과 내용이 불일치하므로 기존 임베딩 무효화
+        await updateDoc(doc(db, 'notes', noteId), {
+          embedding: null,
+          embeddingModel: null,
+          embeddingUpdatedAt: null
+        });
+        ai.removeVectorNoteCache(noteId);
+      }
+    } catch (err) {
+      console.warn('백그라운드 임베딩 파이프라인 처리 오류:', err);
+    }
+  })();
+}
+
 async function saveNote() {
   if (isSaving) return;
   const titleEl = $('note-title') as HTMLInputElement;
@@ -2227,8 +2317,6 @@ async function saveNote() {
       .map(img => img.path || img.url);
 
     // 요구사항 1: 메모 본문/제목/태그를 Google Gemini gemini-embedding-001(768차원)로 임베딩 변환
-    // 수정 시 임베딩 대상 텍스트(제목·본문·카테고리·태그·키워드)가 기존과 동일하고
-    // 이미 현재 버전 임베딩이 존재한다면 API 재호출을 생략하여 저장 속도를 단축하고 할당량을 절약
     const candidateForEmbedding = {
       title,
       body,
@@ -2239,44 +2327,31 @@ async function saveNote() {
       keywords,
       locked
     };
-    const canReuseExistingEmbedding =
-      isEdit &&
-      appState.currentNote &&
-      isCurrentEmbedding(appState.currentNote.embeddingModel, appState.currentNote.embedding) &&
-      buildNoteEmbeddingInput(appState.currentNote) === buildNoteEmbeddingInput(candidateForEmbedding);
-
-    let embeddingFields: Record<string, any> = {};
-    if (canReuseExistingEmbedding) {
-      embeddingFields = {
-        embedding: appState.currentNote.embedding,
-        embeddingModel: EMBEDDING_VERSION,
-        embeddingUpdatedAt: appState.currentNote.embeddingUpdatedAt || Timestamp.now()
-      };
-    } else {
-      const embedding = await tryGenerateNoteEmbedding(candidateForEmbedding);
-      if (embedding) {
-        embeddingFields = {
-          embedding,
-          embeddingModel: EMBEDDING_VERSION,
-          embeddingUpdatedAt: Timestamp.now()
-        };
-      } else if (isEdit) {
-        // 임베딩 재호출이 실패한 경우, 바뀐 본문/제목과 맞지 않는 예전 벡터가 검색에 오작동하지 않도록 기존 임베딩 무효화
-        embeddingFields = {
-          embedding: null,
-          embeddingModel: null,
-          embeddingUpdatedAt: null
-        };
-      }
-    }
 
     if (isEdit) {
       const oldNote = { ...appState.currentNote };
-      const updateData = { category, categories, title, body, tag, tags, images: allImages, pinned, pinnedAt, locked, keywords, ...embeddingFields };
-      // 메모 문서 + 인덱스를 단일 트랜잭션으로 저장 (카테고리 변경 시 양쪽 인덱스·카운트 원자적 갱신)
+      // 기존 임베딩 정보 보존한 상태로 Firestore 즉시 업데이트
+      const updateData = {
+        category,
+        categories,
+        title,
+        body,
+        tag,
+        tags,
+        images: allImages,
+        pinned,
+        pinnedAt,
+        locked,
+        keywords,
+        embedding: oldNote.embedding || null,
+        embeddingModel: oldNote.embeddingModel || null,
+        embeddingUpdatedAt: oldNote.embeddingUpdatedAt || null
+      };
+
+      // 1) 메모 문서 + 인덱스 즉각 저장 (사용자 대기 시간 0초대 단축)
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
-      // 기존 메모(첨부 + 본문 인라인)에 있었지만 수정 후 사라진 이미지 + 미사용 세션 이미지를 병렬 삭제
+      // 기존 메모 이미지 정리
       const oldPaths = collectImagePaths(oldNote);
       const newPathsSet = new Set(collectImagePaths({ images: allImages, body }));
       const removed = [
@@ -2296,23 +2371,36 @@ async function saveNote() {
 
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       appState.currentNote = { ...appState.currentNote, ...updateData };
-      if (embeddingFields.embedding) {
-        upsertVectorNoteCache(appState.currentNote);
-      } else if (embeddingFields.embedding === null) {
-        removeVectorNoteCache(appState.editingNoteId);
-      }
       openDetail(appState.currentNote, detailFrom);
-    } else {
-      // 신규 메모 생성 및 임베딩 저장
-      const newNotePayload = { category, categories, tag, tags, title, body, images: allImages, pinned, pinnedAt, locked, keywords, ...embeddingFields };
-      const newNoteId = await createNoteWithIndex(newNotePayload);
-      upsertVectorNoteCache({ id: newNoteId, uid: appState.currentUser?.uid || '', ...newNotePayload } as any);
-      /*
-        category, categories,
-        tag, tags, title, body, images: allImages,
-        pinned, pinnedAt, locked, keywords
+
+      // 2) 백그라운드 비동기 파이프라인: 임베딩 생성 및 Firestore 벡터 갱신
+      runBackgroundEmbeddingPipeline({
+        noteId: appState.editingNoteId,
+        uid: appState.currentUser?.uid || '',
+        candidate: candidateForEmbedding,
+        isEdit: true,
+        oldNote
       });
-      */
+    } else {
+      // 신규 메모 생성: 기본 필드로 Firestore 즉각 생성
+      const newNotePayload = {
+        category,
+        categories,
+        tag,
+        tags,
+        title,
+        body,
+        images: allImages,
+        pinned,
+        pinnedAt,
+        locked,
+        keywords,
+        embedding: null,
+        embeddingModel: null,
+        embeddingUpdatedAt: null
+      };
+      const newNoteId = await createNoteWithIndex(newNotePayload);
+
       if (unusedSessionInlinePaths.length) {
         deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
       }
@@ -2320,6 +2408,14 @@ async function saveNote() {
         openList(category, tag);
       }
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
+
+      // 2) 백그라운드 비동기 파이프라인: 신규 임베딩 생성 및 Firestore 벡터 업데이트
+      runBackgroundEmbeddingPipeline({
+        noteId: newNoteId,
+        uid: appState.currentUser?.uid || '',
+        candidate: candidateForEmbedding,
+        isEdit: false
+      });
     }
     sessionUploadedInlineImages = [];
     requestCloseModal(true);
@@ -2359,7 +2455,7 @@ if (delConfirm) {
       } else {
         // 메모 문서 + 인덱스 + 카운트를 단일 트랜잭션으로 삭제
         await deleteNoteWithIndex(id, target);
-        removeVectorNoteCache(id);
+        getAi().then(ai => ai.removeVectorNoteCache(id)).catch(() => {});
         // 히스토리 스택에 해당 메모가 있다면 제거
         detailHistoryStack = detailHistoryStack.filter(item => item.noteId !== id);
         // 메모 삭제가 확정된 뒤 Storage 이미지를 병렬로 정리 (UI는 기다리지 않음)
@@ -2383,8 +2479,9 @@ if (delConfirm) {
 // ─────────────────────────────────────────────
 const btnShareDetail = $('btn-share-detail');
 if (btnShareDetail) {
-  btnShareDetail.onclick = () => {
-    const { title, body } = getShareText(appState.currentNote);
+  btnShareDetail.onclick = async () => {
+    const share = await getShare();
+    const { title, body } = share.getShareText(appState.currentNote);
     if (navigator.share) {
       navigator.share({ title, text: body }).catch(err => {
         if (err.name !== 'AbortError') setDisplay('share-modal', 'flex');
@@ -2398,20 +2495,21 @@ if (btnShareDetail) {
 const shareCancel = $('share-cancel');
 if (shareCancel) shareCancel.onclick = () => setDisplay('share-modal', 'none');
 
-// 공유 버튼 공통 바인딩: 모달을 닫고 해당 공유 함수 실행
-function bindShare(id: string, fn: (title: string, body: string) => void) {
+// 공유 버튼 공통 바인딩: 동적 모듈 로드 후 모달을 닫고 해당 공유 함수 실행
+function bindShare(id: string, fn: (share: typeof import('./utils/share'), title: string, body: string) => void) {
   const el = $(id);
   if (!el) return;
-  el.onclick = () => {
-    const { title, body } = getShareText(appState.currentNote);
+  el.onclick = async () => {
+    const share = await getShare();
+    const { title, body } = share.getShareText(appState.currentNote);
     setDisplay('share-modal', 'none');
-    fn(title, body);
+    fn(share, title, body);
   };
 }
-bindShare('share-gmail', (t, b) => shareViaEmail(t, b));
-bindShare('share-kakao', (t, b) => shareViaKakao(t, b, showToast));
-bindShare('share-telegram', (t, b) => shareViaTelegram(t, b));
-bindShare('share-native', (t, b) => shareViaNative(t, b, showToast));
+bindShare('share-gmail', (share, t, b) => share.shareViaEmail(t, b));
+bindShare('share-kakao', (share, t, b) => share.shareViaKakao(t, b, showToast));
+bindShare('share-telegram', (share, t, b) => share.shareViaTelegram(t, b));
+bindShare('share-native', (share, t, b) => share.shareViaNative(t, b, showToast));
 
 // ─────────────────────────────────────────────
 // VOICE SPEECH INPUT
@@ -2498,8 +2596,15 @@ if (noteModal) {
   }
 });
 
-// ── 이미지 뷰어 / 컨텍스트 메뉴 초기화 (src/ui/imageViewer.ts)
-initImageViewer();
+// ── 이미지 뷰어 / 컨텍스트 메뉴 지연 동적 로딩 (src/ui/imageViewer.ts)
+const initViewerDeferred = () => {
+  import('./ui/imageViewer').then(m => m.initImageViewer()).catch(console.warn);
+};
+if ('requestIdleCallback' in window) {
+  (window as any).requestIdleCallback(initViewerDeferred, { timeout: 2000 });
+} else {
+  setTimeout(initViewerDeferred, 100);
+}
 initPinModal();
 
 // ─────────────────────────────────────────────
