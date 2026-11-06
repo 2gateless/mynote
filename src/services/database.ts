@@ -315,17 +315,20 @@ export async function createNoteWithIndex(noteData: Partial<Note>): Promise<stri
   await runTransaction(db, async (t) => {
     const snaps = await Promise.all(targetCats.map(c => t.get(catIndexRef(uid, c))));
     t.set(noteRef, fullData);
-    const countIncrements: Record<string, any> = {};
+    const countUpdates: Record<string, any> = {};
     targetCats.forEach((c, idx) => {
       const snap = snaps[idx];
-      const notesIndex: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
+      const rawList: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
+      const notesIndex = rawList.filter(n => n.id !== noteRef.id);
       notesIndex.push(toIndexItem(noteRef.id, fullData, c));
       t.set(catIndexRef(uid, c), { notes: notesIndex }, { merge: true });
-      countIncrements[c] = increment(1);
+      countUpdates[c] = notesIndex.length;
     });
-    if (Object.keys(countIncrements).length > 0) {
-      t.set(metaRefOf(uid), { categoryCount: countIncrements }, { merge: true });
+    const metaPayload: Record<string, any> = { totalNotesCount: increment(1) };
+    if (Object.keys(countUpdates).length > 0) {
+      metaPayload.categoryCount = countUpdates;
     }
+    t.set(metaRefOf(uid), metaPayload, { merge: true });
   });
   return noteRef.id;
 }
@@ -360,7 +363,6 @@ export async function updateNoteWithIndex(noteId: string, updateData: Partial<No
     allCats.forEach((c, idx) => {
       const snap = snaps[idx];
       const existingList: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
-      const wasInCat = oldCats.includes(c);
       const isInCat = newCats.includes(c);
 
       if (isInCat) {
@@ -369,11 +371,11 @@ export async function updateNoteWithIndex(noteId: string, updateData: Partial<No
         if (pos !== -1) existingList[pos] = item;
         else existingList.push(item);
         t.set(catIndexRef(uid, c), { notes: existingList }, { merge: true });
-        if (!wasInCat) countUpdates[c] = increment(1);
+        countUpdates[c] = existingList.length;
       } else {
         const filtered = existingList.filter(n => n.id !== noteId);
         t.set(catIndexRef(uid, c), { notes: filtered }, { merge: true });
-        if (wasInCat) countUpdates[c] = increment(-1);
+        countUpdates[c] = filtered.length;
       }
     });
 
@@ -392,19 +394,28 @@ export async function deleteNoteWithIndex(noteId: string, oldNote: Partial<Note>
     const snaps = await Promise.all(oldCats.map(c => t.get(catIndexRef(uid, c))));
     t.delete(doc(db, 'notes', noteId));
     const countUpdates: Record<string, any> = {};
+    let wasRemovedFromAny = false;
 
     oldCats.forEach((c, idx) => {
       const snap = snaps[idx];
       const notesIndex: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
       const filtered = notesIndex.filter(n => n.id !== noteId);
       t.set(catIndexRef(uid, c), { notes: filtered }, { merge: true });
+      countUpdates[c] = filtered.length;
       if (filtered.length !== notesIndex.length) {
-        countUpdates[c] = increment(-1);
+        wasRemovedFromAny = true;
       }
     });
 
+    const metaPayload: Record<string, any> = {};
     if (Object.keys(countUpdates).length > 0) {
-      t.set(metaRefOf(uid), { categoryCount: countUpdates }, { merge: true });
+      metaPayload.categoryCount = countUpdates;
+    }
+    if (wasRemovedFromAny) {
+      metaPayload.totalNotesCount = increment(-1);
+    }
+    if (Object.keys(metaPayload).length > 0) {
+      t.set(metaRefOf(uid), metaPayload, { merge: true });
     }
   });
 }
@@ -430,14 +441,38 @@ export async function rebuildCategoryIndex(catId: string) {
 export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, number>) => void) {
   if (!appState.currentUser) return () => {};
   return onSnapshot(metaRefOf(appState.currentUser.uid), snap => {
-    const categoryCount = snap.exists() ? (snap.data().categoryCount || {}) : {};
+    if (!snap.exists()) {
+      onMetaChange({});
+      return;
+    }
+    const data = snap.data();
+    const categoryCount: Record<string, number> = { ...(data.categoryCount || {}) };
+    if (typeof data.totalNotesCount === 'number' && data.totalNotesCount >= 0) {
+      categoryCount._total = data.totalNotesCount;
+    }
     onMetaChange(categoryCount);
   });
 }
 
+// 실제 전체 인덱스 기준의 카테고리별 카운트 및 전체 고유 메모 수를 user_meta에 동기화 (오차 자동 보정용)
+export async function syncUserMetaCounts(categoryCount: Record<string, number>, totalNotesCount: number) {
+  if (!appState.currentUser) return;
+  const cleanCategoryCount: Record<string, number> = {};
+  for (const catId of Object.keys(CATEGORIES)) {
+    cleanCategoryCount[catId] = Math.max(0, categoryCount[catId] || 0);
+  }
+  await setDoc(
+    metaRefOf(appState.currentUser.uid),
+    { categoryCount: cleanCategoryCount, totalNotesCount: Math.max(0, totalNotesCount) },
+    { merge: true }
+  );
+}
+
 // 9개 카테고리 인덱스를 모두 구독하여 병합 (복수 카테고리 메모는 ID 기준으로 중복 제거 후 병합)
 // isComplete: 9개 카테고리 모두 에러 없이 로드 완료되었는지 여부
-export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[], isComplete: boolean) => void) {
+export function subscribeAllNotes(
+  onIndexChange: (notes: NoteIndexItem[], isComplete: boolean, actualCatCounts?: Record<string, number>) => void
+) {
   if (!appState.currentUser) return () => {};
   const uid = appState.currentUser.uid;
   const categoryKeys = Object.keys(CATEGORIES);
@@ -461,8 +496,12 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[], isComp
 
   const notifyMerged = () => {
     const byId = new Map<string, NoteIndexItem>();
+    const actualCatCounts: Record<string, number> = {};
     for (const c of categoryKeys) {
+      const seenInCat = new Set<string>();
       for (const item of perCategory[c] || []) {
+        if (!item?.id) continue;
+        seenInCat.add(item.id);
         const existing = byId.get(item.id);
         if (!existing) {
           const cats = getNoteCategories(item);
@@ -474,9 +513,10 @@ export function subscribeAllNotes(onIndexChange: (notes: NoteIndexItem[], isComp
           existing.categories = Array.from(new Set([...getNoteCategories(existing), ...getNoteCategories(item), c]));
         }
       }
+      actualCatCounts[c] = seenInCat.size;
     }
     const isComplete = initialLoaded.size === categoryKeys.length && erroredCats.size === 0;
-    onIndexChange(Array.from(byId.values()), isComplete);
+    onIndexChange(Array.from(byId.values()), isComplete, actualCatCounts);
   };
 
   const scheduleNotifyIfReady = () => {

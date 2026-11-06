@@ -11,6 +11,7 @@ import {
   getNoteTags,
   SUB_TAGS, 
   subscribeUserMeta, 
+  syncUserMetaCounts,
   subscribeAllNotes, 
   subscribeCategoryIndex,
   rebuildCategoryIndex,
@@ -98,8 +99,10 @@ let pendingListCat: string | null = null; // 인증 완료 전 목록 요청 대
 let listLoadTimer: any = null; // 목록 로딩 타임아웃 타이머
 // 구버전 인덱스 자동 보정을 세션당 카테고리별 1회만 수행
 const rebuiltCats = new Set<string>();
-// 최근 카테고리 카운트 (인덱스 누락 감지용)
+// 최근 카테고리 카운트 (인덱스 누락 감지 및 상단 전체 메모 수 표시용)
 let lastCounts: Record<string, number> = {};
+// Firestore user_meta에서 마지막으로 수신한 원본 카운트 (오차 감지 및 자동 보정용)
+let lastMetaCounts: Record<string, number> | null = null;
 
 const koCollator = new Intl.Collator('ko');
 
@@ -129,17 +132,48 @@ function clearAuthCache() {
   getAi().then(ai => ai.clearAiLocalCache()).catch(() => {});
 }
 
+// 메모 인덱스 배열에서 카테고리별 정확한 메모 수와 중복 제거된 전체 메모 수(_total)를 계산
+function computeCountsFromNotes(notes: NoteIndexItem[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const perCatSeen: Record<string, Set<string>> = {};
+  const allSeen = new Set<string>();
+  Object.keys(CATEGORIES).forEach(catId => {
+    counts[catId] = 0;
+    perCatSeen[catId] = new Set<string>();
+  });
+  for (const n of notes) {
+    if (!n?.id) continue;
+    allSeen.add(n.id);
+    for (const c of getNoteCategories(n)) {
+      if (perCatSeen[c]) perCatSeen[c].add(n.id);
+    }
+  }
+  Object.keys(CATEGORIES).forEach(catId => {
+    counts[catId] = perCatSeen[catId].size;
+  });
+  counts._total = allSeen.size;
+  return counts;
+}
+
 // 카테고리별/전체 카운트 표시
 function applyCounts(counts: Record<string, number>) {
-  let total = 0;
+  let sumTotal = 0;
   Object.keys(CATEGORIES).forEach(catId => {
     const n = Math.max(0, counts[catId] || 0);
-    total += n;
+    sumTotal += n;
     const cnt = $('cnt-' + catId);
     if (cnt) cnt.textContent = String(n);
   });
+  const resolvedTotal =
+    hasNotesLoaded && Array.isArray(appState.allNotesCache)
+      ? appState.allNotesCache.length
+      : typeof counts._total === 'number' && counts._total >= 0
+        ? counts._total
+        : typeof lastCounts._total === 'number' && lastCounts._total >= 0
+          ? lastCounts._total
+          : sumTotal;
   const totalCnt = $('cnt-total-notes');
-  if (totalCnt) totalCnt.textContent = String(total);
+  if (totalCnt) totalCnt.textContent = String(resolvedTotal);
 }
 
 // 태그 칩 HTML (클릭은 이벤트 위임으로 처리 — 인라인 onclick 미사용)
@@ -216,9 +250,12 @@ function ensureSearchIndexReady(): boolean {
       if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
         updateNotesCache(cachedNotes, false);
         isSearchIndexReady = true;
-        const totalCnt = $('cnt-total-notes');
-        if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
-          totalCnt.textContent = String(cachedNotes.length);
+        if (!appState.isAllNotesComplete && typeof lastCounts._total !== 'number') {
+          lastCounts = computeCountsFromNotes(cachedNotes);
+          try {
+            localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
+          } catch (e) {}
+          applyCounts(lastCounts);
         }
         return true;
       }
@@ -230,9 +267,12 @@ function ensureSearchIndexReady(): boolean {
     if (cachedNotes && cachedNotes.length > 0 && !hasNotesLoaded) {
       updateNotesCache(cachedNotes, false);
       isSearchIndexReady = true;
-      const totalCnt = $('cnt-total-notes');
-      if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
-        totalCnt.textContent = String(cachedNotes.length);
+      if (!appState.isAllNotesComplete && typeof lastCounts._total !== 'number') {
+        lastCounts = computeCountsFromNotes(cachedNotes);
+        try {
+          localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
+        } catch (e) {}
+        applyCounts(lastCounts);
       }
     }
   }).catch(() => {});
@@ -253,6 +293,22 @@ function applyEarlyCache() {
     const rawCounts = localStorage.getItem('mynote_counts_cache');
     if (rawCounts) {
       lastCounts = JSON.parse(rawCounts);
+    }
+    // 구버전 카운트 캐시(_total 미포함)인 경우 로컬 검색 인덱스 캐시에서 실제 메모 개수를 즉시 보정하여
+    // 첫 화면 진입 시점(0ms)부터 과거 오차(예: 1273 -> 1268) 없이 정확한 숫자를 표시
+    if (typeof lastCounts._total !== 'number') {
+      try {
+        const rawSearch = localStorage.getItem('mynote_search_cache');
+        if (rawSearch) {
+          const cachedNotes = JSON.parse(rawSearch);
+          if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
+            lastCounts = computeCountsFromNotes(cachedNotes);
+            localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
+          }
+        }
+      } catch (e) {}
+    }
+    if (Object.keys(lastCounts).length > 0) {
       applyCounts(lastCounts);
     }
 
@@ -335,13 +391,39 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
   }
 }
 
+function reconcileUserMetaIfNeeded(exactCounts: Record<string, number>, totalNotes: number) {
+  if (!lastMetaCounts) return;
+  const needsSync =
+    lastMetaCounts._total !== totalNotes ||
+    Object.keys(CATEGORIES).some(catId => (lastMetaCounts![catId] || 0) !== (exactCounts[catId] || 0));
+  if (needsSync) {
+    lastMetaCounts = { ...exactCounts, _total: totalNotes };
+    syncUserMetaCounts(exactCounts, totalNotes).catch(err =>
+      console.warn('user_meta 카운트 동기화 오류:', err)
+    );
+  }
+}
+
 function subscribeAllNotesCache() {
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
-  notesUnsubscribe = subscribeAllNotes((notes, isComplete) => {
+  notesUnsubscribe = subscribeAllNotes((notes, isComplete, actualCatCounts) => {
     appState.isAllNotesComplete = isComplete;
     updateNotesCache(notes, true);
-    const totalCnt = $('cnt-total-notes');
-    if (totalCnt) totalCnt.textContent = String(notes.length);
+    if (isComplete) {
+      const exactCounts: Record<string, number> = {
+        ...(actualCatCounts || computeCountsFromNotes(notes)),
+        _total: notes.length
+      };
+      lastCounts = exactCounts;
+      try {
+        localStorage.setItem('mynote_counts_cache', JSON.stringify(exactCounts));
+      } catch (e) {}
+      applyCounts(exactCounts);
+      reconcileUserMetaIfNeeded(exactCounts, notes.length);
+    } else {
+      const totalCnt = $('cnt-total-notes');
+      if (totalCnt) totalCnt.textContent = String(notes.length);
+    }
   });
 }
 
@@ -439,6 +521,22 @@ if (btnDeniedSignout) btnDeniedSignout.onclick = handleSignOut;
 function loadAllCounts() {
   if (metaUnsubscribe) metaUnsubscribe();
   metaUnsubscribe = subscribeUserMeta((categoryCount) => {
+    lastMetaCounts = { ...categoryCount };
+
+    // 이미 전체 인덱스(9개 카테고리)가 모두 로드된 상태라면 실제 인덱스 기준 카운트를 우선 유지하고,
+    // user_meta에 오차가 있을 경우 즉시 보정
+    if (appState.isAllNotesComplete && Array.isArray(appState.allNotesCache)) {
+      reconcileUserMetaIfNeeded(lastCounts, appState.allNotesCache.length);
+      return;
+    }
+
+    // 아직 user_meta에 totalNotesCount(_total)가 기록되기 전(마이그레이션 전 첫 실행)이고
+    // 이미 로컬 인덱스 캐시로부터 정확한 카운트(_total 포함)를 복원해 둔 상태라면,
+    // 과거 오차가 남아있는 user_meta 값으로 덮어써서 숫자가 튀는 현상(예: 1273 -> 1268)을 방지
+    if (typeof categoryCount._total !== 'number' && typeof lastCounts._total === 'number') {
+      return;
+    }
+
     lastCounts = categoryCount;
     try {
       localStorage.setItem('mynote_counts_cache', JSON.stringify(categoryCount));
