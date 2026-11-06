@@ -250,12 +250,9 @@ function ensureSearchIndexReady(): boolean {
       if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
         updateNotesCache(cachedNotes, false);
         isSearchIndexReady = true;
-        if (!appState.isAllNotesComplete && typeof lastCounts._total !== 'number') {
-          lastCounts = computeCountsFromNotes(cachedNotes);
-          try {
-            localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
-          } catch (e) {}
-          applyCounts(lastCounts);
+        const totalCnt = $('cnt-total-notes');
+        if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
+          totalCnt.textContent = String(cachedNotes.length);
         }
         return true;
       }
@@ -267,12 +264,9 @@ function ensureSearchIndexReady(): boolean {
     if (cachedNotes && cachedNotes.length > 0 && !hasNotesLoaded) {
       updateNotesCache(cachedNotes, false);
       isSearchIndexReady = true;
-      if (!appState.isAllNotesComplete && typeof lastCounts._total !== 'number') {
-        lastCounts = computeCountsFromNotes(cachedNotes);
-        try {
-          localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
-        } catch (e) {}
-        applyCounts(lastCounts);
+      const totalCnt = $('cnt-total-notes');
+      if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
+        totalCnt.textContent = String(cachedNotes.length);
       }
     }
   }).catch(() => {});
@@ -293,22 +287,6 @@ function applyEarlyCache() {
     const rawCounts = localStorage.getItem('mynote_counts_cache');
     if (rawCounts) {
       lastCounts = JSON.parse(rawCounts);
-    }
-    // 구버전 카운트 캐시(_total 미포함)인 경우 로컬 검색 인덱스 캐시에서 실제 메모 개수를 즉시 보정하여
-    // 첫 화면 진입 시점(0ms)부터 과거 오차(예: 1273 -> 1268) 없이 정확한 숫자를 표시
-    if (typeof lastCounts._total !== 'number') {
-      try {
-        const rawSearch = localStorage.getItem('mynote_search_cache');
-        if (rawSearch) {
-          const cachedNotes = JSON.parse(rawSearch);
-          if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
-            lastCounts = computeCountsFromNotes(cachedNotes);
-            localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
-          }
-        }
-      } catch (e) {}
-    }
-    if (Object.keys(lastCounts).length > 0) {
       applyCounts(lastCounts);
     }
 
