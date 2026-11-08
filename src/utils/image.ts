@@ -1,6 +1,11 @@
-import { ref, uploadString, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-import { auth, storage } from '../services/firebase';
+import { getStorage, ref, uploadString, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { app, auth } from '../services/firebase';
 import { appState } from '../state';
+
+const storage = getStorage(app);
+// 기본 재시도 제한 시간(2분)으로 인해 업로드 실패 시 UI가 멈추는 현상을 막기 위해 15초로 단축
+storage.maxUploadRetryTime = 15000;
+storage.maxOperationRetryTime = 15000;
 
 // 재인코딩 없이 원본을 그대로 올려도 되는 최대 크기 (1.5MB)
 const PASSTHROUGH_MAX_BYTES = 1.5 * 1024 * 1024;

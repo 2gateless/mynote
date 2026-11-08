@@ -222,30 +222,33 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     return buildVideoEmbed(videoEmbeds[idx], idx);
   });
 
-  // ⑧ [[메모 제목]] 복원 (제목→메모 Map으로 O(1) 조회, 클릭은 detail-content 이벤트 위임에서 처리)
-  const titleMap: Map<string, any> | undefined = appState.notesByTitle;
-  parsedBody = parsedBody.replace(/@@NOTELINK(\d+)@@/g, (_: string, i: string) => {
-    const title = (noteLinkRefs[parseInt(i, 10)] || '').trim();
-    const safeTitle = escHtml(title);
-    const normTitle = title.replace(/\s+/g, ' ').toLowerCase();
-    let found = titleMap
-      ? (titleMap.get(title) || titleMap.get(normTitle))
-      : undefined;
-    if (!found && Array.isArray(appState.allNotesCache)) {
-      found = appState.allNotesCache.find(
-        (n: any) => (n.title || '').trim().replace(/\s+/g, ' ').toLowerCase() === normTitle
-      );
-    }
-    if (found) {
-      const cat = CATEGORIES[found.category];
-      const icon = cat ? cat.icon : '📝';
-      return `<span class="note-link" data-note-id="${escHtml(found.id)}" data-note-title="${safeTitle}" title="메모로 이동: ${safeTitle}">`
-        + `<span class="note-link-icon">${icon}</span>${safeTitle}</span>`;
-    } else {
-      return `<span class="note-link broken" title="연결된 메모 없음: ${safeTitle}">`
-        + `<span class="note-link-icon">📝</span>${safeTitle} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
-    }
-  });
+  // ⑧ [[메모 제목]] 복원 (제목→메모 Map으로 O(1) 조회, 실제로 메모 링크가 있을 때만 지연 생성)
+  if (noteLinkRefs.length > 0) {
+    const titleMap: Map<string, any> | undefined =
+      typeof appState.getNotesByTitle === 'function' ? appState.getNotesByTitle() : appState.notesByTitle;
+    parsedBody = parsedBody.replace(/@@NOTELINK(\d+)@@/g, (_: string, i: string) => {
+      const title = (noteLinkRefs[parseInt(i, 10)] || '').trim();
+      const safeTitle = escHtml(title);
+      const normTitle = title.replace(/\s+/g, ' ').toLowerCase();
+      let found = titleMap
+        ? (titleMap.get(title) || titleMap.get(normTitle))
+        : undefined;
+      if (!found && Array.isArray(appState.allNotesCache)) {
+        found = appState.allNotesCache.find(
+          (n: any) => (n.title || '').trim().replace(/\s+/g, ' ').toLowerCase() === normTitle
+        );
+      }
+      if (found) {
+        const cat = CATEGORIES[found.category];
+        const icon = cat ? cat.icon : '📝';
+        return `<span class="note-link" data-note-id="${escHtml(found.id)}" data-note-title="${safeTitle}" title="메모로 이동: ${safeTitle}">`
+          + `<span class="note-link-icon">${icon}</span>${safeTitle}</span>`;
+      } else {
+        return `<span class="note-link broken" title="연결된 메모 없음: ${safeTitle}">`
+          + `<span class="note-link-icon">📝</span>${safeTitle} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
+      }
+    });
+  }
 
   return parsedBody;
 }

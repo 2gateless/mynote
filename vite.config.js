@@ -8,13 +8,17 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules/firebase')) {
+          const norm = id.replace(/\\/g, '/');
+          if (norm.includes('@firebase/storage') || norm.includes('firebase/storage')) {
+            return undefined;
+          }
+          if (norm.includes('node_modules/firebase') || norm.includes('node_modules/@firebase')) {
             return 'firebase-vendor';
           }
-          if (id.includes('node_modules/katex')) {
+          if (norm.includes('node_modules/katex')) {
             return 'katex-vendor';
           }
-          if (id.includes('node_modules/marked') || id.includes('node_modules/dompurify')) {
+          if (norm.includes('node_modules/marked') || norm.includes('node_modules/dompurify')) {
             return 'markdown-vendor';
           }
         }

@@ -11,13 +11,14 @@ export const appState: any = {
   allNotesCache: [],
   // 보안: PIN은 평문으로 메모리에 보관하지 않으며, Web Crypto SHA-256 해시로만 검증합니다.
 
-  // allNotesCache 갱신 시 한 번만 계산해 두는 파생 데이터 (검색/링크 성능용)
-  searchIndex: [] as { note: any; text: string }[], // 소문자화된 검색용 텍스트
-  notesByTitle: new Map<string, any>(),              // 제목 → 메모 (메모 링크 O(1) 조회)
-  sortedNotesByTitle: null as any[] | null,          // 제목순 정렬본 (메모 링크 모달용, 지연 계산)
+  // allNotesCache 갱신 시 필요 시점에만 지연 계산해 두는 파생 데이터 (검색/링크 성능용)
+  searchIndex: null as { note: any; text: string }[] | null, // 소문자화된 검색용 텍스트 (검색 시 지연 생성)
+  notesByTitle: null as Map<string, any> | null,             // 제목 → 메모 (메모 링크 O(1) 조회, 필요 시 지연 생성)
+  sortedNotesByTitle: null as any[] | null,                  // 제목순 정렬본 (메모 링크 모달용, 지연 계산)
 
   // 콜백/구독 관리용 훅 및 유틸리티 매핑
   handleNoteLinkClick: null,
+  getNotesByTitle: null,
   openList: null,
   openImageViewer: null,
   closeImageViewer: null,

@@ -26,14 +26,7 @@ import {
   toMillis,
   parseMarkdownBody 
 } from './utils/formatter';
-// utils/share는 동적 import()로 전환됨
-import { 
-  compressImage, 
-  imageFileName,
-  uploadImageToStorage, 
-  deleteImagesFromStorage, 
-  collectImagePaths 
-} from './utils/image';
+// utils/share 및 utils/image는 초기 번들 경량화를 위해 동적 import()로 전환됨
 import { showToast } from './utils/toast';
 // ui/imageViewer는 requestIdleCallback 지연 동적 import()로 전환됨
 import {
@@ -51,7 +44,7 @@ import {
   currentScreen 
 } from './pwa';
 import { NoteIndexItem } from './types';
-// AI, 이미지 뷰어, 공유 모듈은 초기 로딩 지연을 없애기 위해 동적 임포트(import()) 적용
+// AI, 이미지 업로드(Storage), 이미지 뷰어, 공유 모듈은 초기 로딩 지연을 없애기 위해 동적 임포트(import()) 적용
 import { saveNotesToLocalDb, loadNotesFromLocalDb, clearNotesLocalDb } from './services/notesCache';
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from './services/firebase';
@@ -70,6 +63,26 @@ function getShare() {
     shareModulePromise = import('./utils/share');
   }
   return shareModulePromise;
+}
+
+let imageModulePromise: Promise<typeof import('./utils/image')> | null = null;
+function getImage() {
+  if (!imageModulePromise) {
+    imageModulePromise = import('./utils/image');
+  }
+  return imageModulePromise;
+}
+
+// 메모에서 삭제 대상 이미지 경로 수집 (Storage 모듈을 로드하지 않고 즉시 판별하기 위한 경량 헬퍼)
+function collectImagePathsLocal(note: any): string[] {
+  const paths: string[] = [];
+  (note?.images || []).forEach((i: any) => {
+    if (i.path || i.url) paths.push(i.path || i.url);
+  });
+  const body: string = note?.body || '';
+  const re = /https:\/\/[^\s)"'<]*firebasestorage[^\s)"'<]+/g;
+  (body.match(re) || []).forEach(u => paths.push(u));
+  return paths;
 }
 
 let recognition: any = null;
@@ -156,6 +169,7 @@ function computeCountsFromNotes(notes: NoteIndexItem[]): Record<string, number> 
 }
 
 // 카테고리별/전체 카운트 표시
+// (총 메모 개수는 전체 인덱스 로딩을 기다리지 않고 counts._total / lastCounts._total을 최우선으로 즉시 표시)
 function applyCounts(counts: Record<string, number>) {
   let sumTotal = 0;
   Object.keys(CATEGORIES).forEach(catId => {
@@ -165,12 +179,12 @@ function applyCounts(counts: Record<string, number>) {
     if (cnt) cnt.textContent = String(n);
   });
   const resolvedTotal =
-    hasNotesLoaded && Array.isArray(appState.allNotesCache)
-      ? appState.allNotesCache.length
-      : typeof counts._total === 'number' && counts._total >= 0
-        ? counts._total
-        : typeof lastCounts._total === 'number' && lastCounts._total >= 0
-          ? lastCounts._total
+    typeof counts._total === 'number' && counts._total >= 0
+      ? counts._total
+      : typeof lastCounts._total === 'number' && lastCounts._total >= 0
+        ? lastCounts._total
+        : Array.isArray(appState.allNotesCache) && appState.allNotesCache.length > 0
+          ? appState.allNotesCache.length
           : sumTotal;
   const totalCnt = $('cnt-total-notes');
   if (totalCnt) totalCnt.textContent = String(resolvedTotal);
@@ -223,87 +237,107 @@ function renderUserBar(user: any) {
 // 로컬 스토리지 조기 캐시 복원 & 지능형 검색 인덱스 준비
 // ─────────────────────────────────────────────
 let isSearchIndexReady = false;
+let localDbLoadPromise: Promise<boolean> | null = null;
+let isSearchIndexDirty = true;
+let isNotesByTitleDirty = true;
 let persistCacheTimer: any = null;
+let bgAllNotesTimer: any = null;
+let hasReconciledMetaOnce = false;
 
-// 검색 캐시 localStorage 직렬화를 유휴 시간으로 지연하여 메인 스레드 블로킹 방지
-// 검색 및 전체 메모 캐시를 IndexedDB에 비동기 영구 저장 (localStorage 5MB 한계 및 메인 스레드 멈춤 극복)
+// 전체 메모 캐시는 비동기 IndexedDB에만 영구 저장 (localStorage 대용량 동기 I/O 및 부팅 블로킹 원천 제거)
 function schedulePersistSearchCache(notes: NoteIndexItem[]) {
   if (persistCacheTimer) clearTimeout(persistCacheTimer);
   persistCacheTimer = setTimeout(() => {
     persistCacheTimer = null;
     saveNotesToLocalDb(notes).catch(e => console.warn('IndexedDB 메모 인덱스 캐시 저장 실패:', e));
-    // localStorage에도 초경량 백업 시도 (용량 초과 시 조용히 무시)
-    try {
-      localStorage.setItem('mynote_search_cache', JSON.stringify(notes));
-    } catch (e) {}
   }, 400);
 }
 
-// 로컬 캐시(localStorage 및 IndexedDB)로부터 메모 인덱스를 0초대로 복원하는 함수
+// 로컬 캐시(IndexedDB)로부터 메모 인덱스 배열 참조만 비동기로 가볍게 복원
 function ensureSearchIndexReady(): boolean {
   if (isSearchIndexReady) return true;
-  // 1) 빠른 localStorage 복원 시도
-  try {
-    const rawSearch = localStorage.getItem('mynote_search_cache');
-    if (rawSearch) {
-      const cachedNotes = JSON.parse(rawSearch);
-      if (Array.isArray(cachedNotes) && cachedNotes.length > 0) {
-        updateNotesCache(cachedNotes, false);
-        isSearchIndexReady = true;
-        const totalCnt = $('cnt-total-notes');
-        if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
-          totalCnt.textContent = String(cachedNotes.length);
+  if (localDbLoadPromise) return false;
+
+  localDbLoadPromise = loadNotesFromLocalDb()
+    .then(cachedNotes => {
+      let notesToUse = cachedNotes;
+      // 구버전 localStorage에 남아있던 대용량 검색 캐시가 있다면 IndexedDB로 이관 후 즉시 삭제하여 다음 부팅 시 디스크 I/O 경량화
+      try {
+        const rawLegacy = localStorage.getItem('mynote_search_cache');
+        if (rawLegacy) {
+          if (!notesToUse || notesToUse.length === 0) {
+            const parsed = JSON.parse(rawLegacy);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              notesToUse = parsed;
+              saveNotesToLocalDb(parsed).catch(() => {});
+            }
+          }
+          localStorage.removeItem('mynote_search_cache');
+        }
+      } catch (e) {}
+
+      if (notesToUse && notesToUse.length > 0 && !hasNotesLoaded) {
+        updateNotesCache(notesToUse, false);
+        // 카운트 캐시에 _total이 없던 경우에만 로컬 인덱스에서 계산하여 보충
+        if (typeof lastCounts._total !== 'number') {
+          lastCounts = computeCountsFromNotes(notesToUse);
+          try {
+            localStorage.setItem('mynote_counts_cache', JSON.stringify(lastCounts));
+          } catch (e) {}
+          applyCounts(lastCounts);
+        }
+        // 사용자가 이미 특정 카테고리 목록을 열어 대기 중인 경우 즉시 렌더링
+        if (listCatId && listNotesCache.length === 0) {
+          const cachedForCat = notesToUse.filter(n => getNoteCategories(n).includes(listCatId!));
+          if (cachedForCat.length > 0) {
+            listNotesCache = cachedForCat;
+            renderList();
+          }
         }
         return true;
       }
-    }
-  } catch (e) {}
-
-  // 2) IndexedDB 영구 캐시 비동기 로드
-  loadNotesFromLocalDb().then(cachedNotes => {
-    if (cachedNotes && cachedNotes.length > 0 && !hasNotesLoaded) {
-      updateNotesCache(cachedNotes, false);
-      isSearchIndexReady = true;
-      const totalCnt = $('cnt-total-notes');
-      if (totalCnt && (!totalCnt.textContent || totalCnt.textContent === '0')) {
-        totalCnt.textContent = String(cachedNotes.length);
-      }
-    }
-  }).catch(() => {});
+      return false;
+    })
+    .catch(() => false)
+    .finally(() => {
+      localDbLoadPromise = null;
+    });
 
   return false;
 }
 
-// 1단계: 첫 화면(홈 화면)을 0.001초 만에 즉시 띄우기 위해 유저 프로필과 카운트만 동기 복원
+// 1단계: 첫 화면(홈 화면)과 총 메모 개수를 지연 없이 즉시 띄우기 위해 초경량 카운트와 유저 프로필만 동기 복원
 function applyEarlyCache() {
   try {
-    const rawUser = localStorage.getItem('mynote_user_cache');
-    if (rawUser) {
-      renderUserBar(JSON.parse(rawUser));
-      scheduleInitialPinSetupCheck();
-      getAi().then(ai => ai.syncAiConfigFromUserMeta()).catch(() => {});
-      showRootScreen('app');
-    }
     const rawCounts = localStorage.getItem('mynote_counts_cache');
     if (rawCounts) {
       lastCounts = JSON.parse(rawCounts);
       applyCounts(lastCounts);
     }
+    const rawUser = localStorage.getItem('mynote_user_cache');
+    if (rawUser) {
+      renderUserBar(JSON.parse(rawUser));
+      showRootScreen('app');
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => scheduleInitialPinSetupCheck());
+      } else {
+        setTimeout(scheduleInitialPinSetupCheck, 0);
+      }
+    }
 
-    // 2단계: 무거운 전체 검색 캐시 파싱 및 소문자 맵 구축은
-    // 첫 프레임 페인팅을 막지 않도록 브라우저가 화면을 그린 직후 백그라운드에서 실행
+    // 2단계: IndexedDB 로컬 메모 캐시 워밍업은 첫 화면 페인팅과 초기 반응성을 방해하지 않도록 유휴 시간에 비동기로 실행
     const scheduleWarmup = () => {
       if ('requestIdleCallback' in window) {
-        (window as any).requestIdleCallback(() => ensureSearchIndexReady(), { timeout: 1500 });
+        (window as any).requestIdleCallback(() => ensureSearchIndexReady(), { timeout: 2500 });
       } else {
-        setTimeout(ensureSearchIndexReady, 50);
+        setTimeout(ensureSearchIndexReady, 300);
       }
     };
 
     if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => scheduleWarmup());
     } else {
-      setTimeout(scheduleWarmup, 0);
+      setTimeout(scheduleWarmup, 50);
     }
   } catch (e) {
     console.warn('초기 캐시 복원 실패:', e);
@@ -330,25 +364,48 @@ function ensureAllNotesCache() {
   subscribeAllNotesCache();
 }
 
-// 캐시 갱신 시 검색용 텍스트/제목 Map을 한 번만 계산해 둔다
+// 키워드 검색을 실제로 수행할 때만 소문자 검색 텍스트 배열을 지연 생성 (초기 부팅 시 CPU 블로킹 0ms)
+function getSearchIndex(): { note: NoteIndexItem; text: string }[] {
+  if (isSearchIndexDirty || !Array.isArray(appState.searchIndex)) {
+    const notes = (appState.allNotesCache as NoteIndexItem[]) || [];
+    appState.searchIndex = notes.map(n => ({
+      note: n,
+      text: `${n.title || ''}\n${n.snippet || ''}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
+    }));
+    isSearchIndexDirty = false;
+  }
+  return appState.searchIndex;
+}
+
+// [[메모 링크]]가 포함된 본문을 실제로 파싱할 때만 제목 Map을 지연 생성
+function getNotesByTitle(): Map<string, NoteIndexItem> {
+  if (isNotesByTitleDirty || !(appState.notesByTitle instanceof Map)) {
+    const notes = (appState.allNotesCache as NoteIndexItem[]) || [];
+    const map = new Map<string, NoteIndexItem>();
+    for (const n of notes) {
+      if (!n.title) continue;
+      const trimmed = n.title.trim();
+      if (trimmed && !map.has(trimmed)) map.set(trimmed, n);
+      const norm = trimmed.replace(/\s+/g, ' ').toLowerCase();
+      if (norm && !map.has(norm)) map.set(norm, n);
+    }
+    appState.notesByTitle = map;
+    isNotesByTitleDirty = false;
+  }
+  return appState.notesByTitle;
+}
+appState.getNotesByTitle = getNotesByTitle;
+
+// 캐시 갱신 시 배열 참조만 즉시 저장하고, 무거운 파생 데이터(searchIndex, notesByTitle, sortedNotesByTitle)는 필요 시점에 지연 계산
 function updateNotesCache(notes: NoteIndexItem[], persist = true) {
   hasNotesLoaded = true;
   isSearchIndexReady = true;
   appState.allNotesCache = notes;
-  appState.searchIndex = notes.map(n => ({
-    note: n,
-    text: `${n.title || ''}\n${n.snippet || ''}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
-  }));
-  const map = new Map<string, NoteIndexItem>();
-  for (const n of notes) {
-    if (!n.title) continue;
-    const trimmed = n.title.trim();
-    if (trimmed && !map.has(trimmed)) map.set(trimmed, n);
-    const norm = trimmed.replace(/\s+/g, ' ').toLowerCase();
-    if (norm && !map.has(norm)) map.set(norm, n);
-  }
-  appState.notesByTitle = map;
-  appState.sortedNotesByTitle = null; // 메모 링크 모달을 열 때 지연 계산
+  isSearchIndexDirty = true;
+  isNotesByTitleDirty = true;
+  appState.searchIndex = null;
+  appState.notesByTitle = null;
+  appState.sortedNotesByTitle = null;
 
   if (persist) {
     schedulePersistSearchCache(notes);
@@ -370,7 +427,8 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
 }
 
 function reconcileUserMetaIfNeeded(exactCounts: Record<string, number>, totalNotes: number) {
-  if (!lastMetaCounts) return;
+  if (!lastMetaCounts || hasReconciledMetaOnce) return;
+  hasReconciledMetaOnce = true;
   const needsSync =
     lastMetaCounts._total !== totalNotes ||
     Object.keys(CATEGORIES).some(catId => (lastMetaCounts![catId] || 0) !== (exactCounts[catId] || 0));
@@ -383,6 +441,7 @@ function reconcileUserMetaIfNeeded(exactCounts: Record<string, number>, totalNot
 }
 
 function subscribeAllNotesCache() {
+  if (bgAllNotesTimer) { clearTimeout(bgAllNotesTimer); bgAllNotesTimer = null; }
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
   notesUnsubscribe = subscribeAllNotes((notes, isComplete, actualCatCounts) => {
     appState.isAllNotesComplete = isComplete;
@@ -398,7 +457,7 @@ function subscribeAllNotesCache() {
       } catch (e) {}
       applyCounts(exactCounts);
       reconcileUserMetaIfNeeded(exactCounts, notes.length);
-    } else {
+    } else if (typeof lastCounts._total !== 'number') {
       const totalCnt = $('cnt-total-notes');
       if (totalCnt) totalCnt.textContent = String(notes.length);
     }
@@ -406,10 +465,12 @@ function subscribeAllNotesCache() {
 }
 
 function stopAllSubscriptions() {
+  if (bgAllNotesTimer) { clearTimeout(bgAllNotesTimer); bgAllNotesTimer = null; }
   if (notesUnsubscribe) { notesUnsubscribe(); notesUnsubscribe = null; }
   if (metaUnsubscribe) { metaUnsubscribe(); metaUnsubscribe = null; }
   stopListSubscription();
   pendingAllNotesSubscription = false;
+  hasReconciledMetaOnce = false;
 }
 
 // ─────────────────────────────────────────────
@@ -429,7 +490,16 @@ initAuthListener(
     showRootScreen('app');
     loadAllCounts();
     scheduleInitialPinSetupCheck();
-    getAi().then(ai => ai.syncAiConfigFromUserMeta()).catch(() => {});
+
+    // AI 설정 동기화는 첫 화면 로딩 및 카운트 표시와 경합하지 않도록 유휴 시간에 지연 실행
+    const syncAiDeferred = () => {
+      getAi().then(ai => ai.syncAiConfigFromUserMeta()).catch(() => {});
+    };
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(syncAiDeferred, { timeout: 3000 });
+    } else {
+      setTimeout(syncAiDeferred, 1500);
+    }
 
     // 사용자가 인증 완료 전에 이미 카테고리 목록을 열었거나 대기 중인 경우 즉시 실시간 동기화 시작
     const targetCat = pendingListCat || (currentScreen() === 'list' ? appState.currentCat : null);
@@ -438,13 +508,21 @@ initAuthListener(
       loadList(targetCat, true);
     }
 
-    // 사용자가 이미 검색창을 열었거나 인덱스 요청이 대기 중이면 즉시 동기화,
-    // 그렇지 않다면 첫 화면 부팅 속도와 반응성을 최우선으로 보장하기 위해
-    // 첫 렌더링이 완전히 안정화된 후(1.2초) 백그라운드에서 부드럽게 동기화
+    // 첫 화면의 총 메모 개수와 카테고리별 개수는 초경량 user_meta 단일 문서(loadAllCounts)와 로컬 캐시로 즉시 표시되므로,
+    // 9개 카테고리 전체 인덱스 구독(ensureAllNotesCache)은 검색창이 열려있거나 요청이 대기 중일 때만 즉시 실행하고,
+    // 평소에는 초기 부팅과 인터랙션이 완전히 끝난 뒤 유휴 시간에 조용히 실행
     if (pendingAllNotesSubscription || (searchWrap && searchWrap.style.display !== 'none')) {
       ensureAllNotesCache();
     } else {
-      setTimeout(ensureAllNotesCache, 1200);
+      if (bgAllNotesTimer) clearTimeout(bgAllNotesTimer);
+      bgAllNotesTimer = setTimeout(() => {
+        bgAllNotesTimer = null;
+        if ('requestIdleCallback' in window) {
+          (window as any).requestIdleCallback(() => ensureAllNotesCache(), { timeout: 4000 });
+        } else {
+          ensureAllNotesCache();
+        }
+      }, 3000);
     }
   },
   (email) => {
@@ -501,18 +579,18 @@ function loadAllCounts() {
   metaUnsubscribe = subscribeUserMeta((categoryCount) => {
     lastMetaCounts = { ...categoryCount };
 
-    // 이미 전체 인덱스(9개 카테고리)가 모두 로드된 상태라면 실제 인덱스 기준 카운트를 우선 유지하고,
-    // user_meta에 오차가 있을 경우 즉시 보정
-    if (appState.isAllNotesComplete && Array.isArray(appState.allNotesCache)) {
+    // 전체 인덱스가 이미 로드된 상태이고 아직 1회 보정 전이라면 오차 여부 점검
+    if (appState.isAllNotesComplete && Array.isArray(appState.allNotesCache) && !hasReconciledMetaOnce) {
       reconcileUserMetaIfNeeded(lastCounts, appState.allNotesCache.length);
-      return;
     }
 
-    // 아직 user_meta에 totalNotesCount(_total)가 기록되기 전(마이그레이션 전 첫 실행)이고
-    // 이미 로컬 인덱스 캐시로부터 정확한 카운트(_total 포함)를 복원해 둔 상태라면,
-    // 과거 오차가 남아있는 user_meta 값으로 덮어써서 숫자가 튀는 현상(예: 1273 -> 1268)을 방지
-    if (typeof categoryCount._total !== 'number' && typeof lastCounts._total === 'number') {
-      return;
+    // user_meta에 아직 totalNotesCount(_total) 필드가 없는 초기 상태인 경우:
+    // 로컬에 이미 _total이 있다면 유지하고, 백그라운드에서 전체 인덱스를 구독해 user_meta에 totalNotesCount를 기록
+    if (typeof categoryCount._total !== 'number') {
+      if (typeof lastCounts._total === 'number') {
+        categoryCount._total = lastCounts._total;
+      }
+      ensureAllNotesCache();
     }
 
     lastCounts = categoryCount;
@@ -1419,7 +1497,7 @@ function doSearch(keyword: string, fromCacheSync = false) {
   try {
     lastSearchedQuery = keyword;
     const keywords = keyword.toLowerCase().split(/\s+/).filter(Boolean);
-    const searchIdx = (appState.searchIndex as { note: NoteIndexItem; text: string }[]) || [];
+    const searchIdx = getSearchIndex();
 
     // 아직 인덱스 로딩 전이고 로컬 캐시도 없는 극초기 상태인 경우
     if (searchIdx.length === 0 && !hasNotesLoaded) {
@@ -2167,7 +2245,7 @@ function closeModal(saved = false) {
   if (!saved && sessionUploadedInlineImages.length > 0) {
     const pathsToDelete = sessionUploadedInlineImages.map(i => i.path || i.url);
     sessionUploadedInlineImages = [];
-    deleteImagesFromStorage(pathsToDelete).catch(console.error);
+    getImage().then(m => m.deleteImagesFromStorage(pathsToDelete)).catch(console.error);
   }
 }
 
@@ -2184,11 +2262,12 @@ const noteBodyEl = $('note-body') as HTMLTextAreaElement;
 
 // 이미지 압축(Blob) → Storage 업로드 → 본문 커서 위치에 마크다운 삽입
 async function uploadAndInsertImage(file: File, prefix: string, token: number): Promise<boolean> {
-  const blob = await compressImage(file, 2560, 2560, 0.88);
-  const { url, path } = await uploadImageToStorage(blob, imageFileName(prefix, blob));
+  const imgMod = await getImage();
+  const blob = await imgMod.compressImage(file, 2560, 2560, 0.88);
+  const { url, path } = await imgMod.uploadImageToStorage(blob, imgMod.imageFileName(prefix, blob));
   // 업로드 도중 모달이 닫혔거나 다른 메모 모달이 열렸다면 방금 올린 파일을 정리하고 중단
   if (token !== modalSessionToken) {
-    deleteImagesFromStorage([path || url]).catch(console.error);
+    imgMod.deleteImagesFromStorage([path || url]).catch(console.error);
     return false;
   }
   sessionUploadedInlineImages.push({ url, path });
@@ -2367,10 +2446,16 @@ async function saveNote() {
   }
   try {
     // 첨부 이미지 병렬 업로드 (실패한 것만 건너뜀)
-    const uploadResults = await Promise.allSettled(
-      (appState.pendingImages || []).map((img: any) =>
-        uploadImageToStorage(img.blob || img.dataUrl, img.name))
-    );
+    const pendingList = appState.pendingImages || [];
+    const uploadResults = pendingList.length > 0
+      ? await getImage().then(imgMod =>
+          Promise.allSettled(
+            pendingList.map((img: any) =>
+              imgMod.uploadImageToStorage(img.blob || img.dataUrl, img.name)
+            )
+          )
+        )
+      : [];
     const uploadedImgs = uploadResults
       .filter((r): r is PromiseFulfilledResult<{ url: string; path: string }> => r.status === 'fulfilled')
       .map(r => ({ url: r.value.url, path: r.value.path }));
@@ -2428,13 +2513,15 @@ async function saveNote() {
       await updateNoteWithIndex(appState.editingNoteId, updateData, oldNote);
 
       // 기존 메모 이미지 정리
-      const oldPaths = collectImagePaths(oldNote);
-      const newPathsSet = new Set(collectImagePaths({ images: allImages, body }));
+      const oldPaths = collectImagePathsLocal(oldNote);
+      const newPathsSet = new Set(collectImagePathsLocal({ images: allImages, body }));
       const removed = [
         ...oldPaths.filter(p => !newPathsSet.has(p)),
         ...unusedSessionInlinePaths
       ];
-      if (removed.length) deleteImagesFromStorage(removed).catch(console.error);
+      if (removed.length) {
+        getImage().then(m => m.deleteImagesFromStorage(removed)).catch(console.error);
+      }
 
       if (!appState.currentCat || !categories.includes(appState.currentCat)) {
         appState.currentCat = category;
@@ -2478,7 +2565,7 @@ async function saveNote() {
       const newNoteId = await createNoteWithIndex(newNotePayload);
 
       if (unusedSessionInlinePaths.length) {
-        deleteImagesFromStorage(unusedSessionInlinePaths).catch(console.error);
+        getImage().then(m => m.deleteImagesFromStorage(unusedSessionInlinePaths)).catch(console.error);
       }
       if (!appState.currentCat || !categories.includes(appState.currentCat)) {
         openList(category, tag);
@@ -2535,8 +2622,10 @@ if (delConfirm) {
         // 히스토리 스택에 해당 메모가 있다면 제거
         detailHistoryStack = detailHistoryStack.filter(item => item.noteId !== id);
         // 메모 삭제가 확정된 뒤 Storage 이미지를 병렬로 정리 (UI는 기다리지 않음)
-        const paths = collectImagePaths(target);
-        if (paths.length) deleteImagesFromStorage(paths).catch(console.error);
+        const paths = collectImagePathsLocal(target);
+        if (paths.length) {
+          getImage().then(m => m.deleteImagesFromStorage(paths)).catch(console.error);
+        }
         showToast('메모가 삭제되었어요 🗑️');
       }
       setDisplay('del-modal', 'none');

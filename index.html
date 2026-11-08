@@ -15,8 +15,9 @@
 <meta name="x5-orientation" content="portrait">
 <meta name="browsermode" content="application">
   <style>
-    /* 외부 CSS 다운로드 전에도 캐시가 있으면 로딩 화면이 단 1프레임도 뜨지 않도록 인라인 적용 */
+    /* 외부 CSS/JS 다운로드 전에도 캐시가 있으면 로딩 화면 없이 첫 화면(#app)을 0ms 즉시 표시 */
     html.has-cached-auth #loading-screen { display: none !important; }
+    html.has-cached-auth #app { display: block; }
   </style>
   <script>
     (function() {
@@ -158,6 +159,50 @@
       <button class="btn-logout-sm" id="btn-logout">로그아웃</button>
     </div>
     <div class="app-footer">2026 Summer, Antigravity, JHS v2.3</div>
+    <script>
+      /* JS 모듈(Firebase SDK 등) 다운로드 전 첫 페인트(0ms)에 총 메모 개수·카테고리 개수·유저바를 즉시 렌더링 */
+      (function() {
+        try {
+          var rawCounts = localStorage.getItem('mynote_counts_cache');
+          if (rawCounts) {
+            var counts = JSON.parse(rawCounts);
+            var cats = ['memory','ref_science','ref_art','nature','it_history','ref_others','finance_realty','office','family'];
+            var sum = 0;
+            for (var i = 0; i < cats.length; i++) {
+              var c = cats[i];
+              var n = Math.max(0, counts[c] || 0);
+              sum += n;
+              var el = document.getElementById('cnt-' + c);
+              if (el) el.textContent = String(n);
+            }
+            var total = (typeof counts._total === 'number' && counts._total >= 0) ? counts._total : sum;
+            var totalEl = document.getElementById('cnt-total-notes');
+            if (totalEl) totalEl.textContent = String(total);
+          }
+          var rawUser = localStorage.getItem('mynote_user_cache');
+          if (rawUser) {
+            var appEl = document.getElementById('app');
+            if (appEl) appEl.style.display = 'block';
+            var user = JSON.parse(rawUser);
+            var nameEl = document.getElementById('user-bar-name');
+            if (nameEl) nameEl.textContent = user.displayName || user.email || '';
+            var av = document.getElementById('user-bar-avatar');
+            if (av) {
+              if (user.photoURL) {
+                av.className = 'user-bar-avatar';
+                var img = document.createElement('img');
+                img.src = user.photoURL;
+                img.alt = '';
+                av.appendChild(img);
+              } else {
+                av.className = 'user-bar-avatar-default';
+                av.textContent = (user.displayName || 'U')[0].toUpperCase();
+              }
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
   </div>
 
   <!-- LIST SCREEN -->
