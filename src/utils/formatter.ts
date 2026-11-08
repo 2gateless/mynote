@@ -194,6 +194,9 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     ADD_ATTR: ['target', 'rel', 'loading', 'decoding']
   });
 
+  // 마크다운 본문 내 외부 링크(<a>) 클릭 시 PWA 단독 창이 이탈하지 않도록 새 탭 열기 속성 보장
+  parsedBody = parsedBody.replace(/<a\s+(?![^>]*\btarget=)([^>]*\bhref=["']https?:\/\/[^>]*)>/gi, '<a target="_blank" rel="noopener noreferrer" $1>');
+
   // ⑥ KaTeX 수식 복원
   if (mathBlocks.length > 0) {
     try { await loadKatex(); } catch(e) { console.error('KaTeX load error', e); }

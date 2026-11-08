@@ -254,6 +254,7 @@ export function initImageViewer() {
   // ── IMAGE CONTEXT MENU (ContextMenu & LongPress)
   let ctxMenuUrl: string | null = null;
   let longPressTimer: any = null;
+  let longPressTriggeredAt = 0;
   const ctxMenu = document.getElementById('img-ctx-menu') as HTMLElement;
 
   function showImgCtxMenu(x: number, y: number, url: string) {
@@ -288,6 +289,8 @@ export function initImageViewer() {
   }
 
   document.addEventListener('click', e => {
+    // 모바일 롱프레스 직후 손가락을 뗄 때 발생하는 합성 click으로 메뉴가 즉시 닫히는 현상 방지
+    if (Date.now() - longPressTriggeredAt < 450) return;
     if (ctxMenu && !ctxMenu.contains(e.target as Node)) hideImgCtxMenu();
   });
   document.addEventListener('contextmenu', e => {
@@ -298,7 +301,12 @@ export function initImageViewer() {
   let detailTouchTime = 0;
   const detailContent = document.getElementById('detail-content');
   if (detailContent) {
-    const imgOf = (e: Event) => (e.target as HTMLElement).closest('img') as HTMLImageElement | null;
+    // Google Drive 동영상 카드(.video-drive-card) 내부의 썸네일 이미지는 뷰어 대상에서 제외
+    const imgOf = (e: Event) => {
+      const img = (e.target as HTMLElement).closest('img') as HTMLImageElement | null;
+      if (!img || img.closest('.video-drive-card')) return null;
+      return img;
+    };
 
     detailContent.addEventListener('contextmenu', e => {
       const img = imgOf(e);
@@ -307,8 +315,9 @@ export function initImageViewer() {
       showImgCtxMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY, img.src);
     });
 
-    // 본문 이미지 1회 클릭 시 이미지 뷰어 열기
+    // 본문 이미지 1회 클릭 시 이미지 뷰어 열기 (롱프레스 직후 합성 click은 무시)
     detailContent.addEventListener('click', e => {
+      if (Date.now() - longPressTriggeredAt < 450) return;
       const img = imgOf(e);
       if (!img) return;
       appState.openImageViewer(img.src, 1);
@@ -328,18 +337,23 @@ export function initImageViewer() {
       const touch = e.touches[0];
       clearTimeout(longPressTimer);
       longPressTimer = setTimeout(() => {
+        longPressTriggeredAt = Date.now();
         showImgCtxMenu(touch.clientX, touch.clientY, img.src);
       }, 600);
     }, { passive: true });
 
     detailContent.addEventListener('touchend', e => {
       clearTimeout(longPressTimer);
+      if (Date.now() - longPressTriggeredAt < 450) {
+        if (e.cancelable) e.preventDefault();
+        return;
+      }
       const img = imgOf(e);
       if (!img) return;
       const now = Date.now();
       // 모바일 더블 탭 시 2배 확대 뷰어로 즉시 열기
       if (now - detailTouchTime <= 300) {
-        e.preventDefault();
+        if (e.cancelable) e.preventDefault();
         appState.openImageViewer(img.src, 2);
       }
       detailTouchTime = now;
@@ -361,7 +375,10 @@ export function initImageViewer() {
       const url = currentUrl();
       clearTimeout(longPressTimer);
       longPressTimer = setTimeout(() => {
-        if (url) showImgCtxMenu(touch.clientX, touch.clientY, url);
+        if (url) {
+          longPressTriggeredAt = Date.now();
+          showImgCtxMenu(touch.clientX, touch.clientY, url);
+        }
       }, 600);
     }, { passive: true });
     viewerImg.addEventListener('touchend', () => clearTimeout(longPressTimer), { passive: true });

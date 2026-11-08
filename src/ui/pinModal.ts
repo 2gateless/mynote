@@ -1,6 +1,8 @@
 // ── 4자리 숫자 Lock 암호 설정(최초 1회 입력 + 1회 확인) 및 잠금 메모 열람 인증 모달 모듈
 // ※ 보안: 암호(PIN)는 평문으로 저장하거나 메모리에 보관하지 않으며, Web Crypto SHA-256 + 솔트로 해시화하여 이 기기(localStorage)에만 보관합니다.
 // ※ Brute-force 방어: 5회 이상 연속 오류 시 24시간 동안 입력이 차단되며 2gateless@gmail.com으로 보안 경고 메일이 발송됩니다.
+import { doc, setDoc, collection, addDoc, Timestamp } from 'firebase/firestore';
+import { db } from '../services/firebase';
 import { appState } from '../state';
 import { showToast } from '../utils/toast';
 
@@ -119,8 +121,8 @@ async function sendLockoutEmailNotification(attempts: number, lockedUntilMs: num
   try {
     const user = appState.currentUser;
     if (user) {
-      const { doc, setDoc, collection, addDoc, Timestamp } = await import('firebase/firestore');
-      const { db } = await import('../services/firebase');
+      // 정적 임포트된 Firestore 모듈 사용 (불필요한 동적 import 경고 제거)
+
 
       await setDoc(doc(db, 'user_meta', user.uid), {
         pinLockoutUntil: Timestamp.fromMillis(lockedUntilMs),
@@ -379,6 +381,10 @@ export async function verifyLockPinForNote(): Promise<boolean> {
 }
 
 // 뒤로가기(PWA popstate)나 취소 버튼 처리
+// 뒤로가기(PWA popstate)나 취소 버튼 처리
+export function closePinModalSilently() {
+  if (isOpen) finishModal(false);
+}
 export function closePinModalByBack() {
   if (!isOpen) return;
   if (currentMode === 'setup' && setupStep === 2) {

@@ -385,6 +385,41 @@ export async function updateNoteWithIndex(noteId: string, updateData: Partial<No
   });
 }
 
+// 백그라운드 임베딩 생성/무효화 완료 시 카테고리 인덱스 내 해당 메모의 임베딩 메타데이터 동기화
+export async function updateNoteIndexEmbeddingMeta(
+  noteId: string,
+  categories: string[],
+  embeddingModel: string | null,
+  embeddingUpdatedAt: Timestamp | null
+) {
+  if (!appState.currentUser || !noteId) return;
+  const uid = appState.currentUser.uid;
+  const targetCats = Array.from(new Set(categories.filter(c => c && c in CATEGORIES)));
+  if (targetCats.length === 0) return;
+
+  await runTransaction(db, async (t) => {
+    const snaps = await Promise.all(targetCats.map(c => t.get(catIndexRef(uid, c))));
+    targetCats.forEach((c, idx) => {
+      const snap = snaps[idx];
+      if (!snap.exists()) return;
+      const existingList: NoteIndexItem[] = snap.data().notes || [];
+      let changed = false;
+      const updatedList = existingList.map(item => {
+        if (item.id !== noteId) return item;
+        changed = true;
+        return {
+          ...item,
+          embeddingModel,
+          embeddingUpdatedAt
+        };
+      });
+      if (changed) {
+        t.set(catIndexRef(uid, c), { notes: updatedList }, { merge: true });
+      }
+    });
+  });
+}
+
 // 메모 삭제: 메모 문서 + 속해 있던 모든 카테고리 인덱스 + 카운트를 하나의 트랜잭션으로 처리
 export async function deleteNoteWithIndex(noteId: string, oldNote: Partial<Note>) {
   const uid = requireUid();
@@ -511,6 +546,10 @@ export function subscribeAllNotes(
           });
         } else {
           existing.categories = Array.from(new Set([...getNoteCategories(existing), ...getNoteCategories(item), c]));
+          if (!existing.embeddingUpdatedAt && item.embeddingUpdatedAt) {
+            existing.embeddingUpdatedAt = item.embeddingUpdatedAt;
+            existing.embeddingModel = item.embeddingModel || existing.embeddingModel;
+          }
         }
       }
       actualCatCounts[c] = seenInCat.size;

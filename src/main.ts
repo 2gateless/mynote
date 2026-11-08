@@ -18,6 +18,7 @@ import {
   getSingleNote, 
   createNoteWithIndex, 
   updateNoteWithIndex,
+  updateNoteIndexEmbeddingMeta,
   deleteNoteWithIndex 
 } from './services/database';
 import { 
@@ -35,7 +36,8 @@ import {
   scheduleInitialPinSetupCheck,
   getStoredLockPin,
   openPinModal,
-  closePinModalByBack
+  closePinModalByBack,
+  closePinModalSilently
 } from './ui/pinModal';
 import { 
   showAppScreen, 
@@ -370,7 +372,7 @@ function getSearchIndex(): { note: NoteIndexItem; text: string }[] {
     const notes = (appState.allNotesCache as NoteIndexItem[]) || [];
     appState.searchIndex = notes.map(n => ({
       note: n,
-      text: `${n.title || ''}\n${n.snippet || ''}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
+      text: `${n.title || ''}\n${n.locked ? '' : (n.snippet || '')}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
     }));
     isSearchIndexDirty = false;
   }
@@ -471,6 +473,14 @@ function stopAllSubscriptions() {
   stopListSubscription();
   pendingAllNotesSubscription = false;
   hasReconciledMetaOnce = false;
+  // 로그아웃/권한거부 시 열려있는 모달이나 뷰어가 인증 화면을 가리지 않도록 모두 닫기
+  closePinModalSilently();
+  closeModal(true);
+  closeAiConfigModal();
+  closeNoteLinkModal();
+  setDisplay('del-modal', 'none');
+  setDisplay('share-modal', 'none');
+  appState.closeImageViewer?.();
 }
 
 // ─────────────────────────────────────────────
@@ -612,7 +622,9 @@ function isNoteLockedInCache(noteId: string): boolean {
 }
 
 // ── 메모 ID로 전체 메모를 불러와 상세 화면 열기 (목록·검색·메모 링크 공통)
-async function openNoteById(noteId: string, from: string) {
+async function openNoteById(noteId: string, from: string, pushCurrentToHistory = false) {
+  const prevNoteId = currentScreen() === 'detail' && appState.currentNote?.id ? appState.currentNote.id : null;
+  const prevFrom = detailFrom || 'list';
   let verified = false;
   if (isNoteLockedInCache(noteId)) {
     const ok = await verifyLockPinForNote();
@@ -628,6 +640,10 @@ async function openNoteById(noteId: string, from: string) {
     if (note.locked && !verified) {
       const ok = await verifyLockPinForNote();
       if (!ok || reqToken !== detailRenderToken) return;
+    }
+    // 대상 메모 조회 및 PIN 인증이 모두 통과했을 때만 이전 상세 메모를 히스토리 스택에 추가
+    if (pushCurrentToHistory && prevNoteId && prevNoteId !== noteId) {
+      detailHistoryStack.push({ noteId: prevNoteId, from: prevFrom });
     }
     const noteCats = getNoteCategories(note);
     if (!appState.currentCat || !noteCats.includes(appState.currentCat)) {
@@ -649,10 +665,10 @@ async function openNoteById(noteId: string, from: string) {
 appState.handleNoteLinkClick = function(el: HTMLElement) {
   const noteId = el.dataset.noteId;
   if (noteId) {
-    if (currentScreen() === 'detail' && appState.currentNote && appState.currentNote.id && appState.currentNote.id !== noteId) {
-      detailHistoryStack.push({ noteId: appState.currentNote.id, from: detailFrom || 'list' });
-    }
-    openNoteById(noteId, detailFrom || 'list');
+    const shouldPushHistory = Boolean(
+      currentScreen() === 'detail' && appState.currentNote && appState.currentNote.id && appState.currentNote.id !== noteId
+    );
+    openNoteById(noteId, detailFrom || 'list', shouldPushHistory);
   }
 };
 
@@ -1031,19 +1047,7 @@ const detailBack = $('detail-back');
 if (detailBack) {
   detailBack.onclick = () => goBackFromDetail();
 }
-/*
-    if (detailFrom === 'search') {
-      goBackFromDetail();
-      return;
-      resetSearchUI();
-      showAppScreen('home');
-    } else {
-      goBackToList();
-    }
-  };
-}
 
-*/
 const btnEditDetail = $('btn-edit-detail');
 if (btnEditDetail) {
   btnEditDetail.onclick = () => openEditModal(appState.currentNote);
@@ -1537,11 +1541,10 @@ function doSearch(keyword: string, fromCacheSync = false) {
     // 검색 결과 카드 내부의 카테고리/태그 배지는 클릭을 가로채지 않도록 순수 표시용으로 렌더링
     const items = results.map(note => {
       const noteCats = getNoteCategories(note);
-  const catBadgesHtml = noteCats.map(cid => {
-    const c = CATEGORIES[cid];
-    return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
-  }).join('');
-  const tagTargetCat = appState.currentCat && noteCats.includes(appState.currentCat) ? appState.currentCat : (noteCats[0] || note.category);
+      const catBadgesHtml = noteCats.map(cid => {
+        const c = CATEGORIES[cid];
+        return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
+      }).join('');
       return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
         <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
         ${catBadgesHtml}
@@ -1810,11 +1813,6 @@ function renderNoteLinkList(keyword: string) {
   }
   noteLinkList.innerHTML = filtered.map(note => {
     const noteCats = getNoteCategories(note);
-  const catBadgesHtml = noteCats.map(cid => {
-    const c = CATEGORIES[cid];
-    return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
-  }).join('');
-  const tagTargetCat = appState.currentCat && noteCats.includes(appState.currentCat) ? appState.currentCat : (noteCats[0] || note.category);
     return `<div class="note-link-item" data-title="${escHtml(note.title)}">`
       + `<span class="note-link-item-cat">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
       + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
@@ -1970,65 +1968,6 @@ if (tagOptionsEl) {
   tagOptionsEl.addEventListener('change', () => scheduleSaveDraft());
 }
 
-/*
-
-function renderCategorySelect(selectedCatId: string) {
-  if (!noteCategoryEl) return;
-  noteCategoryEl.innerHTML = Object.entries(CATEGORIES)
-    .map(([id, info]) => `<option value="${escHtml(id)}"${id === selectedCatId ? ' selected' : ''}>${info.icon} ${escHtml(info.name)}</option>`)
-    .join('');
-  noteCategoryEl.value = selectedCatId;
-}
-
-if (noteCategoryEl) {
-  noteCategoryEl.addEventListener('change', () => {
-    const newCat = noteCategoryEl.value;
-    renderTagOptions(newCat, null);
-    if (!appState.editingNoteId) {
-      const modalTitle = $('modal-title');
-      if (modalTitle) modalTitle.textContent = `새 메모 — ${CATEGORIES[newCat]?.name || ''}`;
-    }
-  });
-}
-
-function renderTagOptions(catId: string, selectedTag: string | null) {
-  const tg = $('tag-group');
-  const to = $('tag-options');
-  if (!tg || !to) return;
-  if (SUB_TAGS[catId]) {
-    tg.style.display = 'block';
-    to.innerHTML = SUB_TAGS[catId].map((tag) => `
-      <label style="display:inline-flex">
-        <input type="radio" name="note-tag" value="${escHtml(tag)}" class="tag-radio" ${tag === selectedTag ? 'checked data-was-checked="true"' : ''}>
-        <span class="tag-label">${escHtml(tag)}</span>
-      </label>
-    `).join('');
-  } else {
-    tg.style.display = 'none';
-    to.innerHTML = '';
-  }
-}
-
-// (체크박스 복수 선택으로 전환되어 기존 라디오 단일 토글 리스너는 비활성화)
-const tagOptionsEl = $('tag-options');
-if (tagOptionsEl) {
-  tagOptionsEl.addEventListener('click', (e) => {
-    const radio = (e.target as HTMLElement).closest('label')?.querySelector('input.tag-radio') as HTMLInputElement | null;
-    if (!radio) return;
-    // label 클릭으로 인해 radio에 도달한 click 이벤트에서 토글 처리
-    if ((e.target as HTMLElement) !== radio) return;
-    if (radio.dataset.wasChecked === 'true') {
-      radio.checked = false;
-      radio.dataset.wasChecked = 'false';
-    } else {
-      tagOptionsEl.querySelectorAll<HTMLInputElement>('input.tag-radio').forEach(r => {
-        r.dataset.wasChecked = r === radio ? 'true' : 'false';
-      });
-    }
-  });
-}
-
-*/
 function setLockToggleUI(isLocked: boolean) {
   const cb = $('note-locked') as HTMLInputElement;
   const wrap = $('lock-toggle-wrap');
@@ -2395,6 +2334,17 @@ function runBackgroundEmbeddingPipeline(params: {
           embeddingModel: ai.EMBEDDING_VERSION,
           embeddingUpdatedAt: nowTs
         });
+        await updateNoteIndexEmbeddingMeta(
+          noteId,
+          candidate.categories,
+          ai.EMBEDDING_VERSION,
+          nowTs
+        ).catch(err => console.warn('카테고리 인덱스 임베딩 메타 갱신 오류:', err));
+        if (appState.currentNote?.id === noteId) {
+          appState.currentNote.embedding = embedding;
+          appState.currentNote.embeddingModel = ai.EMBEDDING_VERSION;
+          appState.currentNote.embeddingUpdatedAt = nowTs;
+        }
         ai.upsertVectorNoteCache({
           id: noteId,
           uid,
@@ -2410,6 +2360,17 @@ function runBackgroundEmbeddingPipeline(params: {
           embeddingModel: null,
           embeddingUpdatedAt: null
         });
+        await updateNoteIndexEmbeddingMeta(
+          noteId,
+          candidate.categories,
+          null,
+          null
+        ).catch(err => console.warn('카테고리 인덱스 임베딩 메타 초기화 오류:', err));
+        if (appState.currentNote?.id === noteId) {
+          appState.currentNote.embedding = null;
+          appState.currentNote.embeddingModel = null;
+          appState.currentNote.embeddingUpdatedAt = null;
+        }
         ai.removeVectorNoteCache(noteId);
       }
     } catch (err) {
@@ -2422,7 +2383,6 @@ async function saveNote() {
   if (isSaving) return;
   const titleEl = $('note-title') as HTMLInputElement;
   const bodyEl = $('note-body') as HTMLTextAreaElement;
-  const tagRadio = document.querySelector('input[name="note-tag"]:checked') as HTMLInputElement;
   const pinnedEl = $('note-pinned') as HTMLInputElement;
   const lockedEl = $('note-locked') as HTMLInputElement;
   const keywordsEl = $('note-keywords') as HTMLInputElement;
@@ -2569,6 +2529,9 @@ async function saveNote() {
       }
       if (!appState.currentCat || !categories.includes(appState.currentCat)) {
         openList(category, tag);
+      } else if (appState.currentTag && !tags.includes(appState.currentTag)) {
+        // 현재 선택된 태그 필터와 다른 태그로 새 메모를 작성한 경우 방금 추가한 메모가 보이도록 태그 필터 조정
+        openList(appState.currentCat, tag);
       }
       showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
 
@@ -2688,7 +2651,8 @@ if (voiceBtn) {
     const bodyTa = $('note-body') as HTMLTextAreaElement;
     // (버그 수정) 녹음 시작 시점의 본문을 기준으로, 확정 텍스트 + 현재 중간 텍스트만 덧붙인다.
     // 이전에는 중간(interim) 결과가 올 때마다 누적되어 같은 말이 반복 입력되었음.
-    const baseText = bodyTa ? bodyTa.value : '';
+    const rawBaseText = bodyTa ? bodyTa.value : '';
+    const baseText = rawBaseText && !/\s$/.test(rawBaseText) ? rawBaseText + ' ' : rawBaseText;
     let finalText = '';
 
     recognition = new SR();
@@ -2701,7 +2665,10 @@ if (voiceBtn) {
         if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
         else interim += e.results[i][0].transcript;
       }
-      if (bodyTa) bodyTa.value = baseText + finalText + interim;
+      if (bodyTa) {
+        bodyTa.value = baseText + finalText + interim;
+        scheduleSaveDraft();
+      }
     };
     recognition.onerror = () => { stopRecording(); showToast('음성 인식 오류'); };
     recognition.onend = () => { if (isRecording) stopRecording(); };
@@ -2745,11 +2712,18 @@ if (notePinnedCb) {
   });
 }
 
-// 모달 바깥 배경 클릭 시 닫기
+// 모달 바깥 배경 클릭 시 닫기 및 모달 내부 빈 영역 클릭 시 카테고리 드롭다운 닫기
 const noteModal = $('note-modal');
 if (noteModal) {
   noteModal.addEventListener('click', e => { 
-    if ((e.target as HTMLElement).id === 'note-modal') requestCloseModal(false); 
+    const target = e.target as HTMLElement;
+    if (target.id === 'note-modal') {
+      requestCloseModal(false);
+      return;
+    }
+    if (catMultiselectPanel && catMultiselectPanel.style.display !== 'none' && !target.closest('#cat-multiselect')) {
+      setCategoryPanelOpen(false);
+    }
   });
 }
 ['del-modal', 'share-modal'].forEach(id => {
@@ -2824,18 +2798,13 @@ initPwaNavigation((screen) => {
       history.pushState(null, '', location.href);
       return;
     }
-  }
-  /*
-    if (detailFrom === 'search') {
+    if (searchWrap && searchWrap.style.display !== 'none') {
+      searchWrap.style.display = 'none';
       resetSearchUI();
-      showAppScreen('home');
-    } else {
-      goBackToList();
+      history.pushState(null, '', location.href);
+      return;
     }
-    history.pushState(null, '', location.href);
-    return;
   }
-  */
   if (screen === 'list') {
     stopListSubscription();
     resetSearchUI();
