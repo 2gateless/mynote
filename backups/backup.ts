@@ -25,26 +25,46 @@ admin.initializeApp({
 const db = getFirestore();
 
 async function backup() {
-  console.log("🔄 Firestore 데이터 백업 시작...");
+  const includeEmbedding = process.argv.includes('--with-embedding');
+  console.log(
+    includeEmbedding
+      ? "🔄 Firestore 데이터 백업 시작 (임베딩 포함 전체 백업)..."
+      : "🔄 Firestore 데이터 백업 시작 (임베딩 필드 제외 경량 백업)..."
+  );
   
   const now = new Date();
   const dateStr = now.getFullYear() + '-' + 
     String(now.getMonth() + 1).padStart(2, '0') + '-' + 
     String(now.getDate()).padStart(2, '0'); // YYYY-MM-DD 형식
     
-  const backupData = {
+  const backupData: {
+    backupDate: string;
+    excludedFields: string[];
+    notes: Record<string, any>;
+    user_meta: Record<string, any>;
+    note_index: Record<string, any>;
+  } = {
     backupDate: now.toISOString(),
+    excludedFields: includeEmbedding ? [] : ['notes.*.embedding'],
     notes: {},
     user_meta: {},
     note_index: {}
   };
 
   try {
-    // 1. notes 컬렉션 백업
+    // 1. notes 컬렉션 백업 (기본적으로 용량이 큰 768차원 embedding 벡터 필드는 제외)
     console.log("  - notes 컬렉션 다운로드 중...");
     const notesSnap = await db.collection('notes').get();
+    let excludedEmbeddingCount = 0;
     notesSnap.forEach(doc => {
-      backupData.notes[doc.id] = doc.data();
+      const data = doc.data();
+      if (!includeEmbedding && 'embedding' in data) {
+        const { embedding: _omitted, ...rest } = data;
+        backupData.notes[doc.id] = rest;
+        excludedEmbeddingCount++;
+      } else {
+        backupData.notes[doc.id] = data;
+      }
     });
 
     // 2. user_meta 컬렉션 백업
@@ -64,9 +84,11 @@ async function backup() {
     // 4. 파일로 저장
     const fileName = `backup_${dateStr}.json`;
     const filePath = path.join(__dirname, fileName);
-    fs.writeFileSync(filePath, JSON.stringify(backupData, null, 2), 'utf-8');
+    const jsonStr = JSON.stringify(backupData, null, 2);
+    fs.writeFileSync(filePath, jsonStr, 'utf-8');
+    const sizeKB = (Buffer.byteLength(jsonStr, 'utf-8') / 1024).toFixed(1);
     
-    console.log(`✅ 백업 완료! 저장된 파일: ${fileName}`);
+    console.log(`✅ 백업 완료! 저장된 파일: ${fileName} (${sizeKB} KB${!includeEmbedding ? `, 임베딩 제외 ${excludedEmbeddingCount}건` : ''})`);
     process.exit(0);
   } catch (error) {
     console.error("❌ 백업 중 오류 발생:", error);
