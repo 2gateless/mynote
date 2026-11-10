@@ -34,6 +34,8 @@ import {
   initPinModal,
   verifyLockPinForNote,
   scheduleInitialPinSetupCheck,
+  syncPinFromUserMeta,
+  clearPinMetaSyncState,
   getStoredLockPin,
   openPinModal,
   closePinModalByBack,
@@ -93,6 +95,7 @@ let metaUnsubscribe: (() => void) | null = null;
 let listUnsubscribe: (() => void) | null = null;
 let notesUnsubscribe: (() => void) | null = null;
 let searchTimeout: any = null;
+let draftSaveTimer: any = null;
 let lastSearchedQuery = '';
 let lastKeywordResultCount = -1;
 let isAiSearchActive = false;
@@ -136,10 +139,13 @@ function clearAuthCache() {
     clearTimeout(persistCacheTimer);
     persistCacheTimer = null;
   }
+  clearTimeout(draftSaveTimer);
+  clearPinMetaSyncState();
   try {
     localStorage.removeItem('mynote_user_cache');
     localStorage.removeItem('mynote_counts_cache');
     localStorage.removeItem('mynote_search_cache');
+    localStorage.removeItem('mynote_new_note_draft_v1');
   } catch (e) {}
   document.documentElement.classList.remove('has-cached-auth');
   // 로그아웃 시 이 기기에 저장된 IndexedDB 메모 인덱스 캐시 및 벡터 캐시 파기
@@ -321,9 +327,9 @@ function applyEarlyCache() {
       renderUserBar(JSON.parse(rawUser));
       showRootScreen('app');
       if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => scheduleInitialPinSetupCheck());
+        requestAnimationFrame(() => { scheduleInitialPinSetupCheck().catch(() => {}); });
       } else {
-        setTimeout(scheduleInitialPinSetupCheck, 0);
+        setTimeout(() => { scheduleInitialPinSetupCheck().catch(() => {}); }, 0);
       }
     }
 
@@ -413,6 +419,11 @@ function updateNotesCache(notes: NoteIndexItem[], persist = true) {
     schedulePersistSearchCache(notes);
   }
 
+  // 메모 링크 모달이 열려있는 상태에서 비동기 인덱스 로드가 완료되면 즉시 목록 갱신
+  if (noteLinkModal && noteLinkModal.style.display !== 'none') {
+    renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '');
+  }
+
   // 사용자가 이미 검색어를 입력해 둔 상태이고 터치/클릭 중이 아니라면 변경 시에만 검색 결과 갱신
   if (
     searchInput &&
@@ -499,7 +510,7 @@ initAuthListener(
     renderUserBar(user);
     showRootScreen('app');
     loadAllCounts();
-    scheduleInitialPinSetupCheck();
+    scheduleInitialPinSetupCheck().catch(() => {});
 
     // AI 설정 동기화는 첫 화면 로딩 및 카운트 표시와 경합하지 않도록 유휴 시간에 지연 실행
     const syncAiDeferred = () => {
@@ -1778,6 +1789,7 @@ if (noteLinkModal) {
 }
 
 function openNoteLinkModal() {
+  ensureSearchIndexReady();
   ensureAllNotesCache();
   noteLinkSearchInput.value = '';
   renderNoteLinkList('');
@@ -1801,6 +1813,11 @@ function getSortedNotesByTitle(): NoteIndexItem[] {
 
 function renderNoteLinkList(keyword: string) {
   const kw = keyword.toLowerCase().trim();
+  const allNotes = (appState.allNotesCache as NoteIndexItem[]) || [];
+  if (allNotes.length === 0 && !hasNotesLoaded) {
+    noteLinkList.innerHTML = `<div style="text-align:center;padding:28px;color:var(--text-light);font-size:13px">⏳ 메모 목록을 불러오는 중...</div>`;
+    return;
+  }
   const filtered = getSortedNotesByTitle().filter(n =>
     n.id !== appState.editingNoteId &&
     (!kw || (n.title || '').toLowerCase().includes(kw))
@@ -2008,7 +2025,6 @@ let modalSessionToken = 0;
 
 // 작성 중인 메모 실수 방지 및 드래프트 자동 저장
 const NOTE_DRAFT_KEY = 'mynote_new_note_draft_v1';
-let draftSaveTimer: any = null;
 
 interface NoteFormSnapshot {
   title: string;
@@ -2116,7 +2132,6 @@ function setInlineImgBtnUploading() {
 function openAddModal() {
   modalSessionToken++;
   appState.editingNoteId = null; 
-  appState.pendingImages = []; 
   appState.existingImages = [];
   sessionUploadedInlineImages = [];
   resetInlineImgBtn();
@@ -2159,7 +2174,6 @@ function openAddModal() {
 function openEditModal(note: any) {
   modalSessionToken++;
   appState.editingNoteId = note.id; 
-  appState.pendingImages = [];
   appState.existingImages = (note.images || []).map((i: any) => ({...i}));
   sessionUploadedInlineImages = [];
   resetInlineImgBtn();
@@ -2278,6 +2292,76 @@ if (noteBodyEl) {
 // SAVE NOTE
 // ─────────────────────────────────────────────
 let isSaving = false;
+const embeddingPipelineSeqMap = new Map<string, number>();
+const deletedNoteIds = new Set<string>();
+
+// 검색 결과에서 상세 진입 후 수정/삭제 시 검색 화면 캐시와 DOM을 즉시 동기화
+function syncSearchResultOnNoteUpdated(noteId: string, updated: Partial<NoteIndexItem> & { body?: string; locked?: boolean; title?: string }) {
+  if (Array.isArray(appState.allNotesCache)) {
+    const idx = (appState.allNotesCache as NoteIndexItem[]).findIndex(n => n.id === noteId);
+    if (idx !== -1) {
+      const prev = appState.allNotesCache[idx];
+      appState.allNotesCache[idx] = {
+        ...prev,
+        title: updated.title ?? prev.title,
+        category: updated.category ?? prev.category,
+        categories: updated.categories ?? prev.categories,
+        tag: updated.tag ?? prev.tag,
+        tags: updated.tags ?? prev.tags,
+        keywords: updated.keywords ?? prev.keywords,
+        pinned: updated.pinned ?? prev.pinned,
+        locked: updated.locked ?? prev.locked,
+        snippet: updated.locked ? '' : (typeof updated.body === 'string' ? updated.body.substring(0, 200) : prev.snippet),
+      };
+      isSearchIndexDirty = true;
+      isNotesByTitleDirty = true;
+      appState.sortedNotesByTitle = null;
+    }
+  }
+  if (detailFrom === 'search' && searchResults) {
+    if (!isAiSearchActive && lastSearchedQuery) {
+      doSearch(lastSearchedQuery, true);
+    } else {
+      const card = searchResults.querySelector(`.search-result-item[data-id="${CSS.escape(noteId)}"]`) as HTMLElement | null;
+      if (card) {
+        const titleEl = card.querySelector('.search-result-title');
+        if (titleEl) {
+          const badge = titleEl.querySelector('.ai-sim-badge')?.outerHTML || '';
+          titleEl.innerHTML = `${updated.locked ? '🔒 ' : ''}${escHtml(updated.title || '제목 없음')}${badge}`;
+        }
+        const bodyEl = card.querySelector('.search-result-body');
+        if (bodyEl) {
+          const snip = (updated.body || '')
+            .replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 120);
+          bodyEl.textContent = updated.locked ? '🔒 잠긴 메모입니다' : snip;
+        }
+      }
+    }
+  }
+}
+
+function syncSearchResultOnNoteDeleted(noteId: string) {
+  if (Array.isArray(appState.allNotesCache)) {
+    appState.allNotesCache = (appState.allNotesCache as NoteIndexItem[]).filter(n => n.id !== noteId);
+    isSearchIndexDirty = true;
+    isNotesByTitleDirty = true;
+    appState.sortedNotesByTitle = null;
+  }
+  if (!searchResults) return;
+  if (!isAiSearchActive && lastSearchedQuery && detailFrom === 'search') {
+    doSearch(lastSearchedQuery, true);
+    return;
+  }
+  const card = searchResults.querySelector(`.search-result-item[data-id="${CSS.escape(noteId)}"]`);
+  if (card) card.remove();
+  const remaining = searchResults.querySelectorAll('.search-result-item').length;
+  if (remaining === 0 && searchResults.style.display !== 'none') {
+    searchResults.innerHTML = `<div class="search-no-result">🔍 남은 검색 결과가 없어요</div>`;
+  }
+}
 
 // ─────────────────────────────────────────────
 // 백그라운드 비동기 임베딩 파이프라인
@@ -2301,9 +2385,16 @@ function runBackgroundEmbeddingPipeline(params: {
   oldNote?: any;
 }) {
   const { noteId, uid, candidate, isEdit, oldNote } = params;
+  deletedNoteIds.delete(noteId);
+  const seq = (embeddingPipelineSeqMap.get(noteId) || 0) + 1;
+  embeddingPipelineSeqMap.set(noteId, seq);
+  const isStaleOrDeleted = () =>
+    embeddingPipelineSeqMap.get(noteId) !== seq || deletedNoteIds.has(noteId);
+
   (async () => {
     try {
       const ai = await getAi();
+      if (isStaleOrDeleted()) return;
       const currentInput = ai.buildNoteEmbeddingInput(candidate);
 
       // 수정인 경우 기존 임베딩 재사용 가능 여부 검사
@@ -2327,6 +2418,9 @@ function runBackgroundEmbeddingPipeline(params: {
 
       // 새 임베딩 생성 시도
       const embedding = await ai.tryGenerateNoteEmbedding(candidate);
+      // API 응답 대기 중 해당 메모가 삭제되었거나 재수정되었다면 덮어쓰기 중단 (경쟁 상태 방지)
+      if (isStaleOrDeleted()) return;
+
       if (embedding) {
         const nowTs = Timestamp.now();
         await updateDoc(doc(db, 'notes', noteId), {
@@ -2334,12 +2428,14 @@ function runBackgroundEmbeddingPipeline(params: {
           embeddingModel: ai.EMBEDDING_VERSION,
           embeddingUpdatedAt: nowTs
         });
+        if (isStaleOrDeleted()) return;
         await updateNoteIndexEmbeddingMeta(
           noteId,
           candidate.categories,
           ai.EMBEDDING_VERSION,
           nowTs
         ).catch(err => console.warn('카테고리 인덱스 임베딩 메타 갱신 오류:', err));
+        if (isStaleOrDeleted()) return;
         if (appState.currentNote?.id === noteId) {
           appState.currentNote.embedding = embedding;
           appState.currentNote.embeddingModel = ai.EMBEDDING_VERSION;
@@ -2360,6 +2456,7 @@ function runBackgroundEmbeddingPipeline(params: {
           embeddingModel: null,
           embeddingUpdatedAt: null
         });
+        if (isStaleOrDeleted()) return;
         await updateNoteIndexEmbeddingMeta(
           noteId,
           candidate.categories,
@@ -2405,25 +2502,7 @@ async function saveNote() {
     btn.disabled = true;
   }
   try {
-    // 첨부 이미지 병렬 업로드 (실패한 것만 건너뜀)
-    const pendingList = appState.pendingImages || [];
-    const uploadResults = pendingList.length > 0
-      ? await getImage().then(imgMod =>
-          Promise.allSettled(
-            pendingList.map((img: any) =>
-              imgMod.uploadImageToStorage(img.blob || img.dataUrl, img.name)
-            )
-          )
-        )
-      : [];
-    const uploadedImgs = uploadResults
-      .filter((r): r is PromiseFulfilledResult<{ url: string; path: string }> => r.status === 'fulfilled')
-      .map(r => ({ url: r.value.url, path: r.value.path }));
-    if (uploadedImgs.length < uploadResults.length) {
-      uploadResults.forEach(r => { if (r.status === 'rejected') console.error('이미지 업로드 오류:', r.reason); });
-      showToast('일부 이미지 업로드 실패 — 나머지만 저장돼요');
-    }
-    const allImages = [...appState.existingImages, ...uploadedImgs];
+    const allImages = [...appState.existingImages];
 
     const isEdit = !!appState.editingNoteId;
     const prevPinned = isEdit ? !!appState.currentNote?.pinned : false;
@@ -2494,6 +2573,7 @@ async function saveNote() {
 
       showToast(pinned ? '메모가 수정되었어요 📌' : '메모가 수정되었어요 ✅');
       appState.currentNote = { ...appState.currentNote, ...updateData };
+      syncSearchResultOnNoteUpdated(appState.editingNoteId, { ...updateData, body });
       openDetail(appState.currentNote, detailFrom);
 
       // 2) 백그라운드 비동기 파이프라인: 임베딩 생성 및 Firestore 벡터 갱신
@@ -2579,9 +2659,13 @@ if (delConfirm) {
       if (!target) {
         showToast('이미 삭제된 메모예요');
       } else {
+        // 진행 중이던 백그라운드 임베딩 파이프라인을 무효화하여 삭제된 메모가 캐시에 되살아나는 현상 차단
+        deletedNoteIds.add(id);
+        embeddingPipelineSeqMap.set(id, (embeddingPipelineSeqMap.get(id) || 0) + 1);
         // 메모 문서 + 인덱스 + 카운트를 단일 트랜잭션으로 삭제
         await deleteNoteWithIndex(id, target);
         getAi().then(ai => ai.removeVectorNoteCache(id)).catch(() => {});
+        syncSearchResultOnNoteDeleted(id);
         // 히스토리 스택에 해당 메모가 있다면 제거
         detailHistoryStack = detailHistoryStack.filter(item => item.noteId !== id);
         // 메모 삭제가 확정된 뒤 Storage 이미지를 병렬로 정리 (UI는 기다리지 않음)
@@ -2607,9 +2691,11 @@ if (delConfirm) {
 // ─────────────────────────────────────────────
 const btnShareDetail = $('btn-share-detail');
 if (btnShareDetail) {
-  btnShareDetail.onclick = async () => {
-    const share = await getShare();
-    const { title, body } = share.getShareText(appState.currentNote);
+  btnShareDetail.onclick = () => {
+    // iOS Safari 등에서 Transient User Activation 만료를 막기 위해 await 없이 동기 틱에서 navigator.share 즉시 호출
+    const note = appState.currentNote;
+    const title = note?.title || '제목 없음';
+    const body = note?.body || '';
     if (navigator.share) {
       navigator.share({ title, text: body }).catch(err => {
         if (err.name !== 'AbortError') setDisplay('share-modal', 'flex');
@@ -2623,7 +2709,21 @@ if (btnShareDetail) {
 const shareCancel = $('share-cancel');
 if (shareCancel) shareCancel.onclick = () => setDisplay('share-modal', 'none');
 
-// 공유 버튼 공통 바인딩: 동적 모듈 로드 후 모달을 닫고 해당 공유 함수 실행
+// 공유 버튼 공통 바인딩: 모달 닫고 실행 (네이티브 공유는 동기 호출, 그 외 채널은 동적 로드)
+const shareNativeBtn = $('share-native');
+if (shareNativeBtn) {
+  shareNativeBtn.onclick = () => {
+    const note = appState.currentNote;
+    const title = note?.title || '제목 없음';
+    const body = note?.body || '';
+    setDisplay('share-modal', 'none');
+    if (navigator.share) {
+      navigator.share({ title, text: body }).catch(console.error);
+    } else {
+      showToast('이 브라우저에서는 공유 기능을 지원하지 않아요');
+    }
+  };
+}
 function bindShare(id: string, fn: (share: typeof import('./utils/share'), title: string, body: string) => void) {
   const el = $(id);
   if (!el) return;
@@ -2637,7 +2737,6 @@ function bindShare(id: string, fn: (share: typeof import('./utils/share'), title
 bindShare('share-gmail', (share, t, b) => share.shareViaEmail(t, b));
 bindShare('share-kakao', (share, t, b) => share.shareViaKakao(t, b, showToast));
 bindShare('share-telegram', (share, t, b) => share.shareViaTelegram(t, b));
-bindShare('share-native', (share, t, b) => share.shareViaNative(t, b, showToast));
 
 // ─────────────────────────────────────────────
 // VOICE SPEECH INPUT
@@ -2689,18 +2788,23 @@ function stopRecording() {
   }
 }
 
-// Lock 토글 UI 바인딩 (암호가 아직 미설정된 경우 설정 모달 먼저 호출)
+// Lock 토글 UI 바인딩 (암호가 아직 미설정된 경우 클라우드 확인 후 설정 모달 호출)
 const noteLockedCb = $('note-locked') as HTMLInputElement | null;
 if (noteLockedCb) {
   noteLockedCb.addEventListener('change', async () => {
     if (noteLockedCb.checked && !getStoredLockPin()) {
-      const ok = await openPinModal('setup', true);
-      if (!ok) {
-        setLockToggleUI(false);
-        return;
+      await syncPinFromUserMeta();
+      if (!getStoredLockPin()) {
+        const ok = await openPinModal('setup', true);
+        if (!ok) {
+          setLockToggleUI(false);
+          scheduleSaveDraft();
+          return;
+        }
       }
     }
     setLockToggleUI(noteLockedCb.checked);
+    scheduleSaveDraft();
   });
 }
 
@@ -2709,6 +2813,7 @@ const notePinnedCb = $('note-pinned') as HTMLInputElement | null;
 if (notePinnedCb) {
   notePinnedCb.addEventListener('change', () => {
     setPinToggleUI(notePinnedCb.checked);
+    scheduleSaveDraft();
   });
 }
 

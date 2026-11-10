@@ -1,7 +1,7 @@
 // ── 4자리 숫자 Lock 암호 설정(최초 1회 입력 + 1회 확인) 및 잠금 메모 열람 인증 모달 모듈
 // ※ 보안: 암호(PIN)는 평문으로 저장하거나 메모리에 보관하지 않으며, Web Crypto SHA-256 + 솔트로 해시화하여 이 기기(localStorage)에만 보관합니다.
 // ※ Brute-force 방어: 5회 이상 연속 오류 시 24시간 동안 입력이 차단되며 2gateless@gmail.com으로 보안 경고 메일이 발송됩니다.
-import { doc, setDoc, collection, addDoc, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, addDoc, Timestamp } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { appState } from '../state';
 import { showToast } from '../utils/toast';
@@ -28,6 +28,8 @@ let isProcessingStep = false;
 let pendingResolve: ((ok: boolean) => void) | null = null;
 let hasTriggeredInitialSetup = false;
 let lockoutTimerInterval: any = null;
+let pinMetaSyncedUid: string | null = null;
+let pinMetaSyncPromise: Promise<void> | null = null;
 
 const $ = (id: string) => document.getElementById(id);
 
@@ -126,6 +128,7 @@ async function sendLockoutEmailNotification(attempts: number, lockedUntilMs: num
 
       await setDoc(doc(db, 'user_meta', user.uid), {
         pinLockoutUntil: Timestamp.fromMillis(lockedUntilMs),
+        pinFailCount: attempts,
         lastSecurityAlertAt: Timestamp.now()
       }, { merge: true });
 
@@ -187,6 +190,76 @@ export function getStoredLockPin(): string | null {
   return hasStoredLockPin() ? '****' : null;
 }
 
+export function clearPinMetaSyncState() {
+  pinMetaSyncedUid = null;
+  pinMetaSyncPromise = null;
+  hasTriggeredInitialSetup = false;
+}
+
+/**
+ * Firestore user_meta/{uid}와 PIN 해시·24시간 잠금 상태를 양방향 동기화.
+ * 브라우저 사이트 데이터(localStorage) 삭제 후에도 기존 PIN 설정과 잠금 차단이 우회되지 않도록 보호합니다.
+ */
+export async function syncPinFromUserMeta(force = false): Promise<void> {
+  const user = appState.currentUser;
+  if (!user) return;
+  if (!force && pinMetaSyncedUid === user.uid) return;
+  if (!force && pinMetaSyncPromise) return pinMetaSyncPromise;
+
+  pinMetaSyncPromise = (async () => {
+    try {
+      const metaRef = doc(db, 'user_meta', user.uid);
+      const snap = await getDoc(metaRef);
+      const data = snap.exists() ? snap.data() : {};
+
+      // 1) PIN 해시 & 솔트 동기화
+      if (typeof data.pinHash === 'string' && data.pinHash && typeof data.pinSalt === 'string' && data.pinSalt) {
+        try {
+          localStorage.setItem(LOCK_PIN_HASH_KEY, data.pinHash);
+          localStorage.setItem(LOCK_PIN_SALT_KEY, data.pinSalt);
+          localStorage.removeItem(LEGACY_LOCK_PIN_STORAGE_KEY);
+        } catch {}
+      } else {
+        // 클라우드에 아직 없고 로컬에만 해시가 있다면 클라우드에 백업
+        try {
+          const localHash = localStorage.getItem(LOCK_PIN_HASH_KEY);
+          const localSalt = localStorage.getItem(LOCK_PIN_SALT_KEY);
+          if (localHash && localSalt) {
+            await setDoc(metaRef, { pinHash: localHash, pinSalt: localSalt }, { merge: true });
+          }
+        } catch {}
+      }
+
+      // 2) 24시간 잠금 만료 시각 & 실패 횟수 복원
+      const remoteUntil = data.pinLockoutUntil
+        ? (typeof data.pinLockoutUntil.toMillis === 'function' ? data.pinLockoutUntil.toMillis() : Number(data.pinLockoutUntil) || 0)
+        : 0;
+      const localUntil = Number(localStorage.getItem(LOCK_PIN_LOCKOUT_UNTIL_KEY) || 0);
+      if (remoteUntil > Date.now() && remoteUntil > localUntil) {
+        try {
+          localStorage.setItem(LOCK_PIN_LOCKOUT_UNTIL_KEY, String(remoteUntil));
+        } catch {}
+      }
+
+      const remoteFails = Number(data.pinFailCount || 0);
+      const localFails = Number(localStorage.getItem(LOCK_PIN_FAIL_COUNT_KEY) || 0);
+      if (remoteFails > localFails && (remoteUntil > Date.now() || localUntil === 0)) {
+        try {
+          localStorage.setItem(LOCK_PIN_FAIL_COUNT_KEY, String(remoteFails));
+        } catch {}
+      }
+
+      pinMetaSyncedUid = user.uid;
+    } catch (e) {
+      console.warn('Firestore PIN 상태 동기화 실패:', e);
+    } finally {
+      pinMetaSyncPromise = null;
+    }
+  })();
+
+  return pinMetaSyncPromise;
+}
+
 export async function setStoredLockPin(pin: string): Promise<void> {
   if (!/^\d{4}$/.test(pin)) return;
   try {
@@ -195,14 +268,27 @@ export async function setStoredLockPin(pin: string): Promise<void> {
     localStorage.setItem(LOCK_PIN_HASH_KEY, hash);
     // 기존에 평문으로 남아있던 PIN 키는 즉시 안전하게 파기
     localStorage.removeItem(LEGACY_LOCK_PIN_STORAGE_KEY);
+    if (appState.currentUser) {
+      setDoc(
+        doc(db, 'user_meta', appState.currentUser.uid),
+        { pinHash: hash, pinSalt: salt },
+        { merge: true }
+      ).catch(err => console.warn('클라우드 PIN 해시 백업 오류:', err));
+    }
   } catch (e) {
     console.error('PIN 암호화 저장 실패:', e);
   }
 }
 
 // 이 기기(브라우저/앱)에 저장된 Lock 암호가 없으면 앱 실행 초기에 1회 설정 모달을 표시
-export function scheduleInitialPinSetupCheck() {
+export async function scheduleInitialPinSetupCheck() {
   if (hasStoredLockPin() || hasTriggeredInitialSetup) return;
+  if (appState.currentUser) {
+    await syncPinFromUserMeta();
+  }
+  if (hasStoredLockPin() || hasTriggeredInitialSetup) return;
+  // 아직 인증 전 상태(낙관적 캐시 부팅)라면 인증 완료 후 클라우드 해시를 먼저 확인한 뒤 결정
+  if (!appState.currentUser) return;
   hasTriggeredInitialSetup = true;
   openPinModal('setup', false);
 }
@@ -371,8 +457,11 @@ export function openPinModal(mode: PinModalMode, canCancel = true): Promise<bool
   });
 }
 
-// 잠긴 메모를 열기 전에 호출: 기기에 저장된 4자리 암호와 일치하는지 확인
+// 잠긴 메모를 열기 전에 호출: 클라우드와 기기 내 4자리 암호 및 잠금 상태를 동기화한 뒤 검증
 export async function verifyLockPinForNote(): Promise<boolean> {
+  if (appState.currentUser) {
+    await syncPinFromUserMeta();
+  }
   const savedPin = getStoredLockPin();
   if (!savedPin) {
     return openPinModal('setup', true);
@@ -462,9 +551,16 @@ function handleFourDigitsEntered() {
     }
 
     if (isValid) {
-      // 검증 성공 시 실패 카운트 및 잠금 해제
+      // 검증 성공 시 실패 카운트 및 잠금 해제 (로컬 + 클라우드 동시 초기화)
       localStorage.removeItem(LOCK_PIN_FAIL_COUNT_KEY);
       localStorage.removeItem(LOCK_PIN_LOCKOUT_UNTIL_KEY);
+      if (appState.currentUser) {
+        setDoc(
+          doc(db, 'user_meta', appState.currentUser.uid),
+          { pinFailCount: 0, pinLockoutUntil: null },
+          { merge: true }
+        ).catch(() => {});
+      }
       finishModal(true);
     } else {
       currentInput = '';
@@ -482,6 +578,13 @@ function handleFourDigitsEntered() {
         showToast(`⚠️ 암호 5회 연속 오류로 24시간 동안 잠겼습니다. 관리자 메일(${ALERT_EMAIL})로 통지되었습니다.`);
         startLockoutTimer();
       } else {
+        if (appState.currentUser) {
+          setDoc(
+            doc(db, 'user_meta', appState.currentUser.uid),
+            { pinFailCount: failCount },
+            { merge: true }
+          ).catch(() => {});
+        }
         const remain = MAX_FAIL_COUNT - failCount;
         setErrorMsg(`암호가 일치하지 않아요 (${failCount}/${MAX_FAIL_COUNT}회 오류 · ${remain}회 후 24시간 잠금)`, true);
       }

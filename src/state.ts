@@ -6,7 +6,6 @@ export const appState: any = {
   currentNote: null,
   editingNoteId: null,
   deleteTargetId: null,
-  pendingImages: [],
   existingImages: [],
   allNotesCache: [],
   // 보안: PIN은 평문으로 메모리에 보관하지 않으며, Web Crypto SHA-256 해시로만 검증합니다.
