@@ -1,24 +1,29 @@
 import { Timestamp } from 'firebase/firestore';
 
+export interface NoteImage {
+  url: string;
+  path?: string;
+}
+
 export interface Note {
   id?: string;
   uid: string;
   title: string;
   category: string;
   categories?: string[];
-  tag: string;
+  tag: string | null;
   tags?: string[];
   body: string;
+  images?: NoteImage[];
   keywords?: string;
   pinned?: boolean;
   pinnedAt?: Timestamp | null;
   locked?: boolean;
-  embedding?: number[];
+  embedding?: number[] | null;
   embeddingUpdatedAt?: Timestamp | null;
-  embeddingModel?: string; // 예: 'gemini-embedding-001@768' (모델·차원이 다른 벡터는 혼용 불가)
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
-  [key: string]: any;
+  embeddingModel?: string | null; // 예: 'gemini-embedding-001@768' (모델·차원이 다른 벡터는 혼용 불가)
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
 }
 
 export interface NoteIndexItem {
@@ -42,4 +47,5 @@ export interface NoteIndexItem {
 
 export interface UserMeta {
   categoryCount: Record<string, number>;
+  totalNotesCount?: number;
 }

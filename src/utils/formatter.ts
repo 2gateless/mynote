@@ -97,7 +97,7 @@ export function buildVideoEmbed(url: string, index = 0) {
 
   if (gDrive) {
     const fileId = gDrive[1];
-    const thumbUrl = `https://drive.google.com/thumbnail?id=${fileId}&sz=w640`;
+    const thumbUrl = escHtml(`https://drive.google.com/thumbnail?id=${fileId}&sz=w640`);
     const openUrl = escHtml(url);
     return `<a class="video-drive-card" href="${openUrl}" target="_blank" rel="noopener noreferrer">
 <div class="video-drive-thumb">
@@ -122,7 +122,7 @@ export function buildVideoEmbed(url: string, index = 0) {
   }
 
   return `<div class="video-embed-wrap">
-<div class="video-embed-label">${label}</div>
+<div class="video-embed-label">${escHtml(label)}</div>
 <div class="video-embed-container">
   <iframe src="${escHtml(embedUrl)}" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>
 </div>
@@ -143,11 +143,12 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
 
   // ⓪ 코드 블록(```...```) 및 인라인 코드(`...`) 보호
   // 코드 내부의 [[...]], $...$, URL이 수식이나 링크로 변환되지 않도록 먼저 분리
+  // 마크다운 강조(_, *) 등과 충돌하지 않도록 영숫자 전용 플레이스홀더 사용
   const codeBlocks: string[] = [];
   let processed = rawBody.replace(/```[\s\S]*?```|`[^`\n]+`/g, (match) => {
     const idx = codeBlocks.length;
     codeBlocks.push(match);
-    return `@@CODEBLOCK${idx}@@`;
+    return `MYNOTEPHCODE${idx}END`;
   });
 
   // ① [[메모 제목]] 패턴을 임시 플레이스홀더로 치환 (제목 내부에 대괄호 [말머리]가 포함된 경우도 안전하게 매칭)
@@ -155,7 +156,7 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
   processed = processed.replace(/\[\[([^\n]+?)\]\]/g, (_, title) => {
     const idx = noteLinkRefs.length;
     noteLinkRefs.push(title);
-    return `@@NOTELINK${idx}@@`;
+    return `MYNOTEPHLINK${idx}END`;
   });
 
   // ② 동영상 URL 임시 플레이스홀더 치환
@@ -165,7 +166,7 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     (_, prefix, url) => {
       const idx = videoEmbeds.length;
       videoEmbeds.push(url.trim());
-      return `${prefix}@@VIDEOEMBED${idx}@@`;
+      return `${prefix}MYNOTEPHVIDEO${idx}END`;
     }
   );
 
@@ -175,17 +176,17 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     .replace(/\$\$([\s\S]+?)\$\$/g, (_, expr) => {
       const idx = mathBlocks.length;
       mathBlocks.push({ type: 'block', expr: expr.trim() });
-      return `@@MATHBLOCK${idx}@@`;
+      return `MYNOTEPHMATHB${idx}END`;
     })
     .replace(/\$([^$\n]+?)\$/g, (_, expr) => {
       const idx = mathBlocks.length;
       mathBlocks.push({ type: 'inline', expr: expr.trim() });
-      return `@@MATHINLINE${idx}@@`;
+      return `MYNOTEPHMATHI${idx}END`;
     });
 
   // ④ 보호했던 코드 블록 복원 후 marked 파싱
   if (codeBlocks.length > 0) {
-    processed = processed.replace(/@@CODEBLOCK(\d+)@@/g, (_, i) => codeBlocks[parseInt(i, 10)]);
+    processed = processed.replace(/MYNOTEPHCODE(\d+)END/g, (_, i) => codeBlocks[parseInt(i, 10)]);
   }
   const rawHtml: string = markedModule.parse(processed, { breaks: true });
 
@@ -202,25 +203,25 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
     try { await loadKatex(); } catch(e) { console.error('KaTeX load error', e); }
   }
   if (katexModule) {
-    parsedBody = parsedBody.replace(/@@MATHBLOCK(\d+)@@/g, (_: string, i: string) => {
+    parsedBody = parsedBody.replace(/MYNOTEPHMATHB(\d+)END/g, (_: string, i: string) => {
       const expr = mathBlocks[parseInt(i, 10)]?.expr || '';
       try {
         return katexModule.renderToString(expr, { displayMode: true, throwOnError: false });
       } catch(e) { return `<code>$$${escHtml(expr)}$$</code>`; }
     });
-    parsedBody = parsedBody.replace(/@@MATHINLINE(\d+)@@/g, (_: string, i: string) => {
+    parsedBody = parsedBody.replace(/MYNOTEPHMATHI(\d+)END/g, (_: string, i: string) => {
       const expr = mathBlocks[parseInt(i, 10)]?.expr || '';
       try {
         return katexModule.renderToString(expr, { displayMode: false, throwOnError: false });
       } catch(e) { return `<code>$${escHtml(expr)}$</code>`; }
     });
   } else if (mathBlocks.length > 0) {
-    parsedBody = parsedBody.replace(/@@MATHBLOCK(\d+)@@/g, (_: string, i: string) => `<code>$$${escHtml(mathBlocks[parseInt(i, 10)]?.expr || '')}$$</code>`);
-    parsedBody = parsedBody.replace(/@@MATHINLINE(\d+)@@/g, (_: string, i: string) => `<code>$${escHtml(mathBlocks[parseInt(i, 10)]?.expr || '')}$</code>`);
+    parsedBody = parsedBody.replace(/MYNOTEPHMATHB(\d+)END/g, (_: string, i: string) => `<code>$$${escHtml(mathBlocks[parseInt(i, 10)]?.expr || '')}$$</code>`);
+    parsedBody = parsedBody.replace(/MYNOTEPHMATHI(\d+)END/g, (_: string, i: string) => `<code>$${escHtml(mathBlocks[parseInt(i, 10)]?.expr || '')}$</code>`);
   }
 
   // ⑦ 동영상 iframe 복원
-  parsedBody = parsedBody.replace(/@@VIDEOEMBED(\d+)@@/g, (_: string, i: string) => {
+  parsedBody = parsedBody.replace(/MYNOTEPHVIDEO(\d+)END/g, (_: string, i: string) => {
     const idx = parseInt(i, 10);
     return buildVideoEmbed(videoEmbeds[idx], idx);
   });
@@ -229,7 +230,7 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
   if (noteLinkRefs.length > 0) {
     const titleMap: Map<string, any> | undefined =
       typeof appState.getNotesByTitle === 'function' ? appState.getNotesByTitle() : appState.notesByTitle;
-    parsedBody = parsedBody.replace(/@@NOTELINK(\d+)@@/g, (_: string, i: string) => {
+    parsedBody = parsedBody.replace(/MYNOTEPHLINK(\d+)END/g, (_: string, i: string) => {
       const title = (noteLinkRefs[parseInt(i, 10)] || '').trim();
       const safeTitle = escHtml(title);
       const normTitle = title.replace(/\s+/g, ' ').toLowerCase();

@@ -8,9 +8,13 @@ import { showToast } from '../utils/toast';
 
 const LEGACY_LOCK_PIN_STORAGE_KEY = 'mynote_lock_pin';
 const LOCK_PIN_HASH_KEY = 'mynote_lock_pin_hash_v1';
+const LOCK_PIN_HASH_VER_KEY = 'mynote_lock_pin_hash_ver';
 const LOCK_PIN_SALT_KEY = 'mynote_lock_pin_salt_v1';
 const LOCK_PIN_FAIL_COUNT_KEY = 'mynote_lock_pin_fail_count';
 const LOCK_PIN_LOCKOUT_UNTIL_KEY = 'mynote_lock_pin_lockout_until';
+
+const PIN_HASH_VER_PBKDF2 = '2';
+const PBKDF2_ITERATIONS = 100000;
 
 const MAX_FAIL_COUNT = 5;
 const LOCKOUT_DURATION_MS = 24 * 60 * 60 * 1000; // 24시간 잠금
@@ -148,13 +152,35 @@ async function sendLockoutEmailNotification(attempts: number, lockedUntilMs: num
 }
 
 // ─────────────────────────────────────────────
-// Web Crypto SHA-256 + 솔트 해시 계산 헬퍼
+// Web Crypto PBKDF2(100,000회) + 솔트 해시 계산 헬퍼 (구버전 SHA-256 호환 포함)
 // ─────────────────────────────────────────────
-async function hashPin(pin: string, salt: string): Promise<string> {
+async function hashPinLegacySha256(pin: string, salt: string): Promise<string> {
   const enc = new TextEncoder();
   const data = enc.encode(`${salt}:${pin}:mynote_secure_lock`);
   const buf = await crypto.subtle.digest('SHA-256', data);
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashPin(pin: string, salt: string): Promise<string> {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(`${pin}:mynote_secure_lock`),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: enc.encode(salt),
+      iterations: PBKDF2_ITERATIONS,
+      hash: 'SHA-256'
+    },
+    keyMaterial,
+    256
+  );
+  return Array.from(new Uint8Array(derived)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function getOrCreateSalt(): string {
@@ -217,6 +243,11 @@ export async function syncPinFromUserMeta(force = false): Promise<void> {
         try {
           localStorage.setItem(LOCK_PIN_HASH_KEY, data.pinHash);
           localStorage.setItem(LOCK_PIN_SALT_KEY, data.pinSalt);
+          if (String(data.pinHashVer || '') === PIN_HASH_VER_PBKDF2) {
+            localStorage.setItem(LOCK_PIN_HASH_VER_KEY, PIN_HASH_VER_PBKDF2);
+          } else {
+            localStorage.removeItem(LOCK_PIN_HASH_VER_KEY);
+          }
           localStorage.removeItem(LEGACY_LOCK_PIN_STORAGE_KEY);
         } catch {}
       } else {
@@ -224,8 +255,13 @@ export async function syncPinFromUserMeta(force = false): Promise<void> {
         try {
           const localHash = localStorage.getItem(LOCK_PIN_HASH_KEY);
           const localSalt = localStorage.getItem(LOCK_PIN_SALT_KEY);
+          const localVer = localStorage.getItem(LOCK_PIN_HASH_VER_KEY);
           if (localHash && localSalt) {
-            await setDoc(metaRef, { pinHash: localHash, pinSalt: localSalt }, { merge: true });
+            await setDoc(
+              metaRef,
+              { pinHash: localHash, pinSalt: localSalt, ...(localVer ? { pinHashVer: localVer } : {}) },
+              { merge: true }
+            );
           }
         } catch {}
       }
@@ -266,12 +302,13 @@ export async function setStoredLockPin(pin: string): Promise<void> {
     const salt = getOrCreateSalt();
     const hash = await hashPin(pin, salt);
     localStorage.setItem(LOCK_PIN_HASH_KEY, hash);
+    localStorage.setItem(LOCK_PIN_HASH_VER_KEY, PIN_HASH_VER_PBKDF2);
     // 기존에 평문으로 남아있던 PIN 키는 즉시 안전하게 파기
     localStorage.removeItem(LEGACY_LOCK_PIN_STORAGE_KEY);
     if (appState.currentUser) {
       setDoc(
         doc(db, 'user_meta', appState.currentUser.uid),
-        { pinHash: hash, pinSalt: salt },
+        { pinHash: hash, pinSalt: salt, pinHashVer: PIN_HASH_VER_PBKDF2 },
         { merge: true }
       ).catch(err => console.warn('클라우드 PIN 해시 백업 오류:', err));
     }
@@ -529,20 +566,36 @@ function handleFourDigitsEntered() {
       return;
     }
 
-    // verify 모드: 해시 검증 (레거시 평문 저장된 기기는 1회 검증 후 자동 해시 마이그레이션)
+    // verify 모드: PBKDF2 해시 검증 (구버전 SHA-256 및 레거시 평문은 검증 성공 시 자동으로 PBKDF2로 업그레이드)
     const pinToVerify = currentInput;
     let isValid = false;
     try {
       const storedHash = localStorage.getItem(LOCK_PIN_HASH_KEY);
       if (storedHash) {
         const salt = getOrCreateSalt();
-        const computed = await hashPin(pinToVerify, salt);
-        isValid = computed === storedHash;
+        const hashVer = localStorage.getItem(LOCK_PIN_HASH_VER_KEY);
+        if (hashVer === PIN_HASH_VER_PBKDF2) {
+          const computed = await hashPin(pinToVerify, salt);
+          isValid = computed === storedHash;
+        } else {
+          // 구버전 SHA-256 검증 후 일치하면 즉시 PBKDF2로 업그레이드
+          const computedLegacy = await hashPinLegacySha256(pinToVerify, salt);
+          if (computedLegacy === storedHash) {
+            isValid = true;
+            await setStoredLockPin(pinToVerify);
+          } else {
+            const computedPbkdf2 = await hashPin(pinToVerify, salt);
+            if (computedPbkdf2 === storedHash) {
+              isValid = true;
+              localStorage.setItem(LOCK_PIN_HASH_VER_KEY, PIN_HASH_VER_PBKDF2);
+            }
+          }
+        }
       } else {
         const legacyPin = localStorage.getItem(LEGACY_LOCK_PIN_STORAGE_KEY);
         if (legacyPin && legacyPin === pinToVerify) {
           isValid = true;
-          // 평문 암호를 즉시 SHA-256 해시로 업그레이드하고 평문 키 삭제
+          // 평문 암호를 즉시 PBKDF2 해시로 업그레이드하고 평문 키 삭제
           await setStoredLockPin(pinToVerify);
         }
       }

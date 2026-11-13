@@ -47,3 +47,16 @@ export function initPwaNavigation(onNavigateBack: (screen: string) => void) {
   // 초기 히스토리 엔트리 생성
   history.pushState(null, '', location.href);
 }
+
+// 프로덕션 환경에서 오프라인 앱 셸 캐싱을 위한 서비스 워커 등록
+export function registerServiceWorker() {
+  if (!(import.meta as any).env?.PROD) return;
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      const base = (import.meta as any).env?.BASE_URL || '/mynote/';
+      navigator.serviceWorker.register(`${base}sw.js`, { scope: base }).catch(err => {
+        console.warn('Service Worker 등록 실패:', err);
+      });
+    });
+  }
+}

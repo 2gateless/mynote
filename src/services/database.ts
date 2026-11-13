@@ -63,6 +63,21 @@ export function getNoteTags(data: any): string[] {
   return [];
 }
 
+const INDEX_DOC_WARN_BYTES = 800 * 1024; // Firestore 단일 문서 1MiB 제한 사전 경고 임계값
+
+function warnIfIndexTooLarge(catId: string, notesIndex: NoteIndexItem[]) {
+  try {
+    const approxBytes = JSON.stringify(notesIndex).length * 2;
+    if (approxBytes >= INDEX_DOC_WARN_BYTES) {
+      console.warn(
+        `[database] 카테고리(${catId}) 인덱스 크기가 약 ${Math.round(approxBytes / 1024)}KB에 도달했습니다. Firestore 1MiB 제한에 근접하므로 샤딩을 고려하세요.`
+      );
+    }
+  } catch {
+    // 무시
+  }
+}
+
 // 카테고리별 note_index 문서 참조 헬퍼 (note_index/{uid}_{category})
 function catIndexRef(uid: string, category: string) {
   return doc(db, 'note_index', `${uid}_${category}`);
@@ -133,6 +148,7 @@ export async function createNoteWithIndex(noteData: Partial<Note>): Promise<stri
       const rawList: NoteIndexItem[] = snap.exists() ? (snap.data().notes || []) : [];
       const notesIndex = rawList.filter(n => n.id !== noteRef.id);
       notesIndex.push(toIndexItem(noteRef.id, fullData, c));
+      warnIfIndexTooLarge(c, notesIndex);
       t.set(catIndexRef(uid, c), { notes: notesIndex }, { merge: true });
       countUpdates[c] = notesIndex.length;
     });
@@ -182,6 +198,7 @@ export async function updateNoteWithIndex(noteId: string, updateData: Partial<No
         const pos = existingList.findIndex(n => n.id === noteId);
         if (pos !== -1) existingList[pos] = item;
         else existingList.push(item);
+        warnIfIndexTooLarge(c, existingList);
         t.set(catIndexRef(uid, c), { notes: existingList }, { merge: true });
         countUpdates[c] = existingList.length;
       } else {
@@ -281,24 +298,39 @@ export async function rebuildCategoryIndex(catId: string) {
   snapSingle.docs.forEach(d => map.set(d.id, toIndexItem(d.id, d.data(), catId)));
   snapMulti.docs.forEach(d => map.set(d.id, toIndexItem(d.id, d.data(), catId)));
   const notesIndex = Array.from(map.values());
-  await setDoc(catIndexRef(uid, catId), { notes: notesIndex });
-  await setDoc(metaRefOf(uid), { categoryCount: { [catId]: notesIndex.length } }, { merge: true });
+  warnIfIndexTooLarge(catId, notesIndex);
+
+  // 인덱스와 카운트를 트랜잭션으로 원자적 갱신
+  await runTransaction(db, async (t) => {
+    t.set(catIndexRef(uid, catId), { notes: notesIndex });
+    t.set(metaRefOf(uid), { categoryCount: { [catId]: notesIndex.length } }, { merge: true });
+  });
 }
 
-export function subscribeUserMeta(onMetaChange: (categoryCount: Record<string, number>) => void) {
+export function subscribeUserMeta(
+  onMetaChange: (categoryCount: Record<string, number>) => void,
+  onError?: (err: Error) => void
+) {
   if (!appState.currentUser) return () => {};
-  return onSnapshot(metaRefOf(appState.currentUser.uid), snap => {
-    if (!snap.exists()) {
-      onMetaChange({});
-      return;
+  return onSnapshot(
+    metaRefOf(appState.currentUser.uid),
+    snap => {
+      if (!snap.exists()) {
+        onMetaChange({});
+        return;
+      }
+      const data = snap.data();
+      const categoryCount: Record<string, number> = { ...(data.categoryCount || {}) };
+      if (typeof data.totalNotesCount === 'number' && data.totalNotesCount >= 0) {
+        categoryCount._total = data.totalNotesCount;
+      }
+      onMetaChange(categoryCount);
+    },
+    err => {
+      console.warn('user_meta 구독 오류:', err);
+      onError?.(err);
     }
-    const data = snap.data();
-    const categoryCount: Record<string, number> = { ...(data.categoryCount || {}) };
-    if (typeof data.totalNotesCount === 'number' && data.totalNotesCount >= 0) {
-      categoryCount._total = data.totalNotesCount;
-    }
-    onMetaChange(categoryCount);
-  });
+  );
 }
 
 // 실제 전체 인덱스 기준의 카테고리별 카운트 및 전체 고유 메모 수를 user_meta에 동기화 (오차 자동 보정용)

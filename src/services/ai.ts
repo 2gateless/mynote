@@ -1285,31 +1285,71 @@ export async function backfillMissingEmbeddings(
   if (!uid) throw new Error('로그인이 필요합니다.');
 
   const vectorMap = await ensureLocalVectorsSynced();
-  const q = query(collection(db, 'notes'), where('uid', '==', uid));
-  const snap = await getDocs(q);
+  const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
 
-  const allDocs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Note));
-  // 현재 모델·차원(gemini-embedding-001@768)과 일치하지 않는 모든 메모를 갱신 대상으로 선정
-  const targets = allDocs.filter(n => !isCurrentEmbedding(n.embeddingModel, n.embedding));
+  let targets: Note[] = [];
+  let totalCount = 0;
 
-  // 이미 현재 모델 임베딩을 보유한 문서는 로컬 IndexedDB에 채워 넣음
-  const existingVecRecords: LocalVectorRecord[] = [];
-  for (const n of allDocs) {
-    if (n.id && isCurrentEmbedding(n.embeddingModel, n.embedding) && !vectorMap.has(n.id)) {
-      const rec = toVectorRecord(n.id, uid, n);
-      if (rec) {
-        vectorMap.set(n.id, rec);
-        existingVecRecords.push(rec);
+  if (appState.isAllNotesComplete && indexItems.length > 0) {
+    // 인덱스가 온전히 로드된 경우 전체 컬렉션 조회 없이 미변환·구버전 문서 ID만 선별하여 단건 조회
+    totalCount = indexItems.length;
+    const missingIds = indexItems
+      .filter(item => item.embeddingModel !== EMBEDDING_VERSION || !vectorMap.has(item.id))
+      .map(item => item.id);
+
+    const FETCH_CONCURRENCY = 10;
+    for (let i = 0; i < missingIds.length; i += FETCH_CONCURRENCY) {
+      const chunk = missingIds.slice(i, i + FETCH_CONCURRENCY);
+      const docs = await Promise.all(
+        chunk.map(async (id) => {
+          try {
+            const snap = await getDoc(doc(db, 'notes', id));
+            return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) } as Note) : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const n of docs) {
+        if (!n) continue;
+        if (!isCurrentEmbedding(n.embeddingModel, n.embedding)) {
+          targets.push(n);
+        } else if (n.id && !vectorMap.has(n.id)) {
+          const rec = toVectorRecord(n.id, uid, n);
+          if (rec) {
+            vectorMap.set(n.id, rec);
+            await putVectorsToIdb([rec]);
+          }
+        }
       }
     }
-  }
-  if (existingVecRecords.length > 0) {
-    await putVectorsToIdb(existingVecRecords);
+  } else {
+    // 초기 캐시가 없는 경우 전체 컬렉션 조회로 폴백
+    const q = query(collection(db, 'notes'), where('uid', '==', uid));
+    const snap = await getDocs(q);
+    const allDocs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Note));
+    totalCount = allDocs.length;
+    targets = allDocs.filter(n => !isCurrentEmbedding(n.embeddingModel, n.embedding));
+
+    // 이미 현재 모델 임베딩을 보유한 문서는 로컬 IndexedDB에 채워 넣음
+    const existingVecRecords: LocalVectorRecord[] = [];
+    for (const n of allDocs) {
+      if (n.id && isCurrentEmbedding(n.embeddingModel, n.embedding) && !vectorMap.has(n.id)) {
+        const rec = toVectorRecord(n.id, uid, n);
+        if (rec) {
+          vectorMap.set(n.id, rec);
+          existingVecRecords.push(rec);
+        }
+      }
+    }
+    if (existingVecRecords.length > 0) {
+      await putVectorsToIdb(existingVecRecords);
+    }
   }
 
   let updated = 0;
   let failed = 0;
-  const skipped = allDocs.length - targets.length;
+  const skipped = Math.max(0, totalCount - targets.length);
   const touchedCategories = new Set<string>();
 
   // 배치 단위로 묶어서 일괄 임베딩 (API 왕복 횟수 및 소요 시간 1/10 절감)
