@@ -251,14 +251,46 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
               <div class="ai-rag-title"><span>🤖</span><span>AI 종합 및 추론 답변</span></div>
               <span class="ai-rag-badge">상위 ${unlockedRefCount}개 메모 참조 중...</span>
             </div>
-            <div class="ai-rag-body" style="color:var(--text-light)">
-              ✍️ 추출된 상위 ${unlockedRefCount}개 메모의 본문을 바탕으로 요약·비교·추론 답변을 작성하고 있습니다...
+            <div class="ai-rag-body" id="ai-rag-stream-body" style="color:var(--text-light)">
+              ✍️ 추출된 상위 ${unlockedRefCount}개 메모를 바탕으로 답변을 실시간 작성 중입니다...
             </div>
           </div>
         `;
       }
 
-      const answerMarkdown = await ai.generateRagAnswer(queryText, results);
+      let lastStreamRenderAt = 0;
+      let streamRenderPending = false;
+      let latestStreamText = '';
+
+      const renderStreamBody = async (markdownText: string) => {
+        if (token !== aiSearchSessionToken) return;
+        const cleanPartial = markdownText.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
+        if (!cleanPartial) return;
+        const html = await parseMarkdownBody(cleanPartial);
+        if (token !== aiSearchSessionToken) return;
+        const streamBodyEl = $('ai-rag-stream-body');
+        if (streamBodyEl) {
+          streamBodyEl.style.color = '';
+          streamBodyEl.innerHTML = html;
+        }
+      };
+
+      const answerMarkdown = await ai.generateRagAnswerStream(queryText, results, (accumulated) => {
+        if (token !== aiSearchSessionToken) return;
+        latestStreamText = accumulated;
+        const now = Date.now();
+        if (!streamRenderPending && now - lastStreamRenderAt >= 80) {
+          lastStreamRenderAt = now;
+          renderStreamBody(accumulated).catch(() => {});
+        } else if (!streamRenderPending) {
+          streamRenderPending = true;
+          setTimeout(() => {
+            streamRenderPending = false;
+            lastStreamRenderAt = Date.now();
+            if (latestStreamText) renderStreamBody(latestStreamText).catch(() => {});
+          }, 80);
+        }
+      });
       if (token !== aiSearchSessionToken) return;
 
       const cleanAnswer = answerMarkdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
@@ -424,6 +456,9 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       searchWrap.style.display = isHidden ? 'block' : 'none';
       if (isHidden) {
         searchInput?.focus();
+        // 검색창을 열 때 로컬 IndexedDB 벡터 맵을 백그라운드로 미리 메모리에 올려두어
+        // 이후 AI 시맨틱 검색 실행 시 대기 시간을 줄임 (Firestore 읽기 0회)
+        deps.getAi().then(ai => ai.preloadVectorCache()).catch(() => {});
       } else {
         resetSearchUI();
       }

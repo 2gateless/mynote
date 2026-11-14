@@ -676,12 +676,41 @@ export function removeVectorNoteCache(noteId: string) {
 }
 
 /**
+ * 검색창을 열 때 로컬 IndexedDB에 저장된 벡터 맵을 미리 메모리로 올려두어
+ * 실제 AI 시맨틱 검색 버튼 클릭 시 IndexedDB 로딩 지연을 0ms로 단축합니다.
+ * (Firestore 네트워크 읽기 0회, 추가 저장 용량 0바이트)
+ */
+let preloadPromise: Promise<void> | null = null;
+export function preloadVectorCache(): Promise<void> {
+  const uid = appState.currentUser?.uid;
+  if (!uid) return Promise.resolve();
+  if (memoryVectorMap && memoryVectorUid === uid) return Promise.resolve();
+  if (preloadPromise) return preloadPromise;
+
+  preloadPromise = (async () => {
+    try {
+      const loaded = await loadVectorsFromIdb(uid);
+      if (!memoryVectorMap || memoryVectorUid !== uid) {
+        memoryVectorMap = loaded;
+        memoryVectorUid = uid;
+      }
+    } catch {
+      // 프리로드 실패는 무시 (실제 검색 시 ensureLocalVectorsSynced에서 재시도)
+    } finally {
+      preloadPromise = null;
+    }
+  })();
+  return preloadPromise;
+}
+
+/**
  * 전체 문서를 매번 Firestore에서 반복 조회하지 않도록:
  * 1) IndexedDB에 영구 저장된 로컬 벡터 맵을 먼저 불러오고 (Firestore 읽기 0건),
  * 2) 이미 메모리에 로드된 인덱스(appState.allNotesCache)의 embeddingUpdatedAt과 비교하여
  *    다른 기기에서 새로 추가/수정되어 로컬 캐시에 없거나 구버전인 메모 ID만 단건 조회(Delta Fetch)합니다.
  */
 async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord>> {
+  if (preloadPromise) await preloadPromise;
   if (syncPromise) return syncPromise;
   syncPromise = doEnsureLocalVectorsSynced().finally(() => {
     syncPromise = null;
@@ -1034,12 +1063,16 @@ function buildRagBodyExcerpt(rawBody: string, queryTermGroups: string[][], maxCh
 // 4. 요구사항 3: AI 종합 및 추론 모드 (RAG — Gemini Flash)
 // ─────────────────────────────────────────────
 
-export async function generateRagAnswer(
+function buildRagPromptPayload(
   userQuery: string,
   topResults: SemanticSearchResult[]
-): Promise<string> {
+): {
+  earlyReturn?: string;
+  systemInstruction?: string;
+  promptText?: string;
+} {
   if (topResults.length === 0) {
-    return '연관된 메모를 찾지 못해 종합 답변을 생성할 수 없습니다.';
+    return { earlyReturn: '연관된 메모를 찾지 못해 종합 답변을 생성할 수 없습니다.' };
   }
 
   const allUnlocked = topResults.filter(r => !r.note.locked);
@@ -1047,7 +1080,9 @@ export async function generateRagAnswer(
   const unlockedResults = allUnlocked.slice(0, 5);
 
   if (unlockedResults.length === 0 && lockedCount > 0) {
-    return '검색된 상위 메모가 모두 🔒 잠금 상태입니다. 아래 검색 결과에서 메모를 눌러 잠금을 해제한 뒤 확인해 주세요.';
+    return {
+      earlyReturn: '검색된 상위 메모가 모두 🔒 잠금 상태입니다. 아래 검색 결과에서 메모를 눌러 잠금을 해제한 뒤 확인해 주세요.'
+    };
   }
 
   const queryTermGroups = extractQueryTermGroups(userQuery);
@@ -1066,7 +1101,8 @@ export async function generateRagAnswer(
     const tags = getNoteTags(n).map(t => `#${t}`).join(' ');
     const simPct = Math.round(item.score * 100);
     const dateStr = fmtDate(n.createdAt) || '날짜 정보 없음';
-    const bodyText = buildRagBodyExcerpt(n.body || '', queryTermGroups, 3200);
+    // 질문 키워드 중심 1,800자 발췌로 입력 토큰을 최적화하여 TTFT(첫 응답 지연) 및 생성 속도 단축
+    const bodyText = buildRagBodyExcerpt(n.body || '', queryTermGroups, 1800);
     return [
       `[메모 ${idx + 1}] (유사도: ${simPct}%)`,
       `- 제목: ${n.title || '제목 없음'}`,
@@ -1095,6 +1131,196 @@ export async function generateRagAnswer(
     `\n[참고 메모 컨텍스트 (상위 ${unlockedResults.length}개 메모)]\n${contextBlocks}`,
     '\n위 메모들 중 질문과 실제로 연관된 내용만을 바탕으로 요약·비교·추론한 답변을 작성해 주세요.'
   ].join('\n');
+
+  return { systemInstruction, promptText };
+}
+
+function buildRagGenerationConfig(cleanModel: string, disableThinking = true): Record<string, any> {
+  const cfg: Record<string, any> = {
+    temperature: 0.25,
+    maxOutputTokens: 4096
+  };
+  // Gemini 2.5 Flash 계열은 기본 thinking 모드가 켜져 있어 수 초 이상 지연되므로 thinkingBudget=0으로 즉시 응답 유도
+  if (disableThinking && cleanModel.includes('2.5')) {
+    cfg.thinkingConfig = { thinkingBudget: 0 };
+  }
+  return cfg;
+}
+
+function extractVisibleTextFromParts(parts: any[]): string {
+  const visibleText = parts
+    .filter((p: any) => !p?.thought && typeof p?.text === 'string')
+    .map((p: any) => p.text)
+    .join('');
+  if (visibleText) return visibleText;
+  return parts.map((p: any) => p?.text || '').join('');
+}
+
+export async function generateRagAnswerStream(
+  userQuery: string,
+  topResults: SemanticSearchResult[],
+  onChunk?: (accumulatedText: string) => void
+): Promise<string> {
+  const payload = buildRagPromptPayload(userQuery, topResults);
+  if (payload.earlyReturn) {
+    onChunk?.(payload.earlyReturn);
+    return payload.earlyReturn;
+  }
+
+  const systemInstruction = payload.systemInstruction!;
+  const promptText = payload.promptText!;
+
+  const proxyUrl = getAiProxyUrl();
+  if (proxyUrl) {
+    const idToken = await auth.currentUser?.getIdToken();
+    const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(idToken ? { Authorization: `Bearer ${idToken}` } : {})
+      },
+      body: JSON.stringify({ systemInstruction, prompt: promptText })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`AI 추론 프록시 오류 (${res.status}): ${errText}`);
+    }
+    const data = await res.json();
+    const answer = data?.text || data?.answer || '답변을 생성하지 못했습니다.';
+    onChunk?.(answer);
+    return answer;
+  }
+
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    throw new Error('Gemini API 키가 설정되지 않았습니다.');
+  }
+
+  const tryStreamWithModel = async (
+    modelName: string
+  ): Promise<{ ok: boolean; status: number; answer?: string; errorMsg?: string; fatal?: boolean }> => {
+    const cleanModel = modelName.replace(/^models\//, '');
+    const url = `${GEMINI_API_BASE}/models/${cleanModel}:streamGenerateContent?alt=sse`;
+
+    let useThinkingDisabled = true;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents: [{ role: 'user', parts: [{ text: promptText }] }],
+          generationConfig: buildRagGenerationConfig(cleanModel, useThinkingDisabled)
+        })
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const errorMsg = errJson?.error?.message || `HTTP ${res.status}`;
+        if (res.status === 400 && useThinkingDisabled && /thinking/i.test(errorMsg)) {
+          useThinkingDisabled = false;
+          continue;
+        }
+        if ((res.status === 429 || res.status === 503) && attempt === 0) {
+          await sleep(1200);
+          continue;
+        }
+        const fatal = res.status === 401 || res.status === 403;
+        return { ok: false, status: res.status, errorMsg, fatal };
+      }
+
+      if (!res.body) {
+        return { ok: false, status: 500, errorMsg: '스트리밍 응답 본문이 없습니다.' };
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let accumulated = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr || jsonStr === '[DONE]') continue;
+          try {
+            const chunkJson = JSON.parse(jsonStr);
+            const parts = chunkJson?.candidates?.[0]?.content?.parts || [];
+            const delta = extractVisibleTextFromParts(parts);
+            if (delta) {
+              accumulated += delta;
+              onChunk?.(accumulated);
+            }
+          } catch {
+            // 불완전 청크는 무시
+          }
+        }
+      }
+
+      const finalAnswer = accumulated.trim();
+      if (!finalAnswer) {
+        return {
+          ok: false,
+          status: 200,
+          errorMsg: `모델(${cleanModel})이 빈 응답을 반환했습니다.`
+        };
+      }
+      return { ok: true, status: 200, answer: finalAnswer };
+    }
+
+    return { ok: false, status: 503, errorMsg: `${cleanModel} 재시도 초과` };
+  };
+
+  const candidateModels = cachedWorkingFlashModel
+    ? [cachedWorkingFlashModel, ...FLASH_MODELS.filter(m => m !== cachedWorkingFlashModel)]
+    : [...FLASH_MODELS];
+
+  const errors: string[] = [];
+
+  for (const model of candidateModels) {
+    try {
+      const result = await tryStreamWithModel(model);
+      if (result.ok && result.answer) {
+        cachedWorkingFlashModel = model.replace(/^models\//, '');
+        return result.answer;
+      }
+      if (result.errorMsg) {
+        errors.push(`${model}: ${result.errorMsg}`);
+      }
+      if (result.fatal) {
+        throw new Error(`Gemini API 인증 오류: ${result.errorMsg}`);
+      }
+    } catch (e: any) {
+      if (e?.message?.includes('인증 오류')) throw e;
+      errors.push(`${model}: ${e?.message || String(e)}`);
+    }
+  }
+
+  // 정적 후보 모델들이 모두 실패한 경우 동적 모델 탐색 후 비스트리밍 폴백 호출
+  return generateRagAnswer(userQuery, topResults);
+}
+
+export async function generateRagAnswer(
+  userQuery: string,
+  topResults: SemanticSearchResult[]
+): Promise<string> {
+  const payload = buildRagPromptPayload(userQuery, topResults);
+  if (payload.earlyReturn) {
+    return payload.earlyReturn;
+  }
+
+  const systemInstruction = payload.systemInstruction!;
+  const promptText = payload.promptText!;
 
   const proxyUrl = getAiProxyUrl();
   if (proxyUrl) {
@@ -1130,6 +1356,7 @@ export async function generateRagAnswer(
     const cleanModel = modelName.replace(/^models\//, '');
     const url = `${GEMINI_API_BASE}/models/${cleanModel}:generateContent`;
 
+    let useThinkingDisabled = true;
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await fetch(url, {
         method: 'POST',
@@ -1147,16 +1374,17 @@ export async function generateRagAnswer(
               parts: [{ text: promptText }]
             }
           ],
-          generationConfig: {
-            temperature: 0.25,
-            maxOutputTokens: 8192
-          }
+          generationConfig: buildRagGenerationConfig(cleanModel, useThinkingDisabled)
         })
       });
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
         const errorMsg = errJson?.error?.message || `HTTP ${res.status}`;
+        if (res.status === 400 && useThinkingDisabled && /thinking/i.test(errorMsg)) {
+          useThinkingDisabled = false;
+          continue;
+        }
         if ((res.status === 429 || res.status === 503) && attempt === 0) {
           await sleep(1500);
           continue;
@@ -1173,17 +1401,7 @@ export async function generateRagAnswer(
 
       const json = await res.json();
       const parts = json?.candidates?.[0]?.content?.parts || [];
-      // thought(내부 추론) 파트를 제외하고 실제 텍스트 파트만 결합
-      const visibleText = parts
-        .filter((p: any) => !p?.thought && typeof p?.text === 'string')
-        .map((p: any) => p.text)
-        .join('')
-        .trim();
-      const fallbackText = parts
-        .map((p: any) => p?.text || '')
-        .join('')
-        .trim();
-      const answer = visibleText || fallbackText;
+      const answer = extractVisibleTextFromParts(parts).trim();
 
       if (!answer) {
         return {
