@@ -363,7 +363,20 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     appState.existingImages = (note.images || []).map(i => ({ ...i }));
     sessionUploadedInlineImages = [];
     resetInlineImgBtn(true);
-    fillNoteForm(note.title || '', note.body || '', note.keywords || '', '메모 수정');
+
+    // 구버전 메모 중 note.images에만 보관되고 본문(note.body)에 마크다운이 없던 첨부 이미지가 있는 경우,
+    // 사용자가 '메모 수정'을 열었을 때 본문 하단에 자동으로 ![이미지](url) 마크다운을 통합 삽입하여
+    // 이후 저장 시 화면 중앙 및 최적화된 마크다운 이미지로 일관되게 렌더링되도록 보정
+    let initialBody = note.body || '';
+    const unreferencedExisting = (note.images || []).filter(i => i?.url && !initialBody.includes(i.url));
+    if (unreferencedExisting.length > 0) {
+      const inlineAppend = unreferencedExisting
+        .map(i => `\n\n![이미지](${i.url})`)
+        .join('');
+      initialBody = (initialBody ? initialBody.trimEnd() : '') + inlineAppend + '\n';
+    }
+
+    fillNoteForm(note.title || '', initialBody, note.keywords || '', '메모 수정');
     const editCats = getNoteCategories(note);
     renderCategorySelect(editCats);
     renderTagOptions(editCats, getNoteTags(note));
@@ -575,7 +588,9 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
       btn.disabled = true;
     }
     try {
-      const allImages = [...appState.existingImages];
+      // 본문에 실제로 남아 있는 기존 첨부 이미지만 유지 (수정 시 본문에서 지운 이미지는 images 목록·스토리지에서도 정리되어
+      // 다음 수정 시 본문 하단에 다시 자동 삽입되지 않도록 보장)
+      const allImages = appState.existingImages.filter(img => img?.url && body.includes(img.url));
       const isEdit = !!appState.editingNoteId;
       const prevPinned = isEdit ? !!appState.currentNote?.pinned : false;
       const pinnedAt = pinned

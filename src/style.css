@@ -434,17 +434,25 @@
   .detail-body code { background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 4px; font-family: monospace; }
   .detail-body pre { background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin-bottom: 10px; }
   .detail-body pre code { background: transparent; padding: 0; }
-  /* 마크다운으로 삽입된 이미지 스타일 */
+  /* 마크다운으로 삽입된 이미지 스타일 (중앙 정렬 및 화면 최적화) */
   .detail-body img {
-    width: auto; max-width: 100%; max-height: 62vh; height: auto; object-fit: contain; box-sizing: border-box; border-radius: 10px;
+    width: auto;
+    max-width: 100%;
+    max-height: 72vh;
+    height: auto;
+    object-fit: contain;
+    box-sizing: border-box;
+    border-radius: 12px;
     border: 1.5px solid var(--sky-mid);
-    margin: 10px 0; display: block;
+    margin: 14px auto;
+    display: block;
     cursor: zoom-in;
+    box-shadow: 0 4px 18px rgba(90, 144, 176, 0.16);
     transition: transform 0.18s ease, box-shadow 0.18s ease;
   }
   .detail-body img:hover {
     transform: scale(1.008);
-    box-shadow: 0 4px 16px rgba(90,144,176,0.25);
+    box-shadow: 0 6px 22px rgba(90, 144, 176, 0.28);
   }
 
   /* 동영상 임베드 플레이어 (YouTube 등 iframe 방식) */
@@ -557,10 +565,30 @@
     border: 2px dashed var(--sky); border-radius: 12px; padding: 18px;
     text-align: center; cursor: pointer; background: #D8EED8;
   }
-  .detail-images { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 10px; }
+  .detail-images {
+    margin-top: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+  }
   .detail-img {
-    width: calc(50% - 5px); border-radius: 12px; object-fit: cover;
-    max-height: 220px; border: 1.5px solid var(--sky-mid); cursor: pointer;
+    width: auto;
+    max-width: 100%;
+    max-height: 72vh;
+    height: auto;
+    object-fit: contain;
+    border-radius: 12px;
+    border: 1.5px solid var(--sky-mid);
+    cursor: zoom-in;
+    margin: 4px auto;
+    display: block;
+    box-shadow: 0 4px 18px rgba(90, 144, 176, 0.16);
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+  }
+  .detail-img:hover {
+    transform: scale(1.008);
+    box-shadow: 0 6px 22px rgba(90, 144, 176, 0.28);
   }
   
   /* Image Viewer */
@@ -1173,13 +1201,15 @@
   }
   .ai-rag-body img {
     max-width: 100%;
-    max-height: 200px;
+    max-height: 50vh;
     width: auto;
     height: auto;
     object-fit: contain;
     border-radius: 10px;
-    margin: 6px 0;
+    margin: 8px auto;
     display: block;
+    border: 1.5px solid var(--sky-mid);
+    box-shadow: 0 3px 12px rgba(90, 144, 176, 0.15);
   }
   .search-result-body {
     display: -webkit-box;
