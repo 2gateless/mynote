@@ -15,5 +15,5 @@
     "esModuleInterop": true,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "src/**/*.js", "backups/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.js"]
 }
