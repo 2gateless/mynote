@@ -75,6 +75,22 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
   let imeEnterLockUntil = 0;
   let lastEnterHandledAt = 0;
   let aiSearchSessionToken = 0;
+  let activeAiAbortController: AbortController | null = null;
+
+  function resetAiSearchButton() {
+    if (btnAiSearch) {
+      btnAiSearch.disabled = false;
+      btnAiSearch.innerHTML = '<span>✨</span><span>AI 의미 검색 · 추론</span>';
+    }
+  }
+
+  function abortActiveAiSearch() {
+    aiSearchSessionToken++;
+    if (activeAiAbortController) {
+      activeAiAbortController.abort();
+      activeAiAbortController = null;
+    }
+  }
 
   function setHomeListVisible(visible: boolean) {
     const fl = $('folders-list');
@@ -84,6 +100,8 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
   }
 
   function resetSearchUI() {
+    abortActiveAiSearch();
+    resetAiSearchButton();
     deps.setSavedSearchScrollY(0);
     deps.clearDetailHistory();
     if (searchTimeout) clearTimeout(searchTimeout);
@@ -153,7 +171,12 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       return;
     }
 
-    const token = ++aiSearchSessionToken;
+    abortActiveAiSearch();
+    const token = aiSearchSessionToken;
+    const abortController = new AbortController();
+    activeAiAbortController = abortController;
+    const { signal } = abortController;
+
     isAiSearchActive = true;
     lastSearchedQuery = queryText;
     imeEnterLockedRaw = queryText;
@@ -189,8 +212,12 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     }
 
     try {
-      const { results, embeddedNotesCount } = await ai.semanticSearchNotes(queryText, 5);
-      if (token !== aiSearchSessionToken) return;
+      // 1단계: 본문 단건 조회 없이 로컬 벡터 + 인덱스 스니펫만으로 즉시 상위 메모 추출
+      const { results, embeddedNotesCount } = await ai.semanticSearchNotes(queryText, 5, {
+        skipHydration: true,
+        signal
+      });
+      if (token !== aiSearchSessionToken || signal.aborted) return;
 
       if (results.length === 0) {
         if (aiRagContainer) {
@@ -213,6 +240,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         return;
       }
 
+      // 2단계: 검색 결과 카드를 먼저 화면에 즉시 렌더링 (네트워크 대기 제거)
       const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
         <span style="font-size:12px;color:#4338CA;font-weight:700">✨ 시맨틱 연관 상위 ${results.length}개 메모 (코사인 유사도순)</span>
         <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
@@ -243,31 +271,37 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         searchResults.innerHTML = header + items;
       }
 
-      const unlockedRefCount = Math.min(5, results.filter(r => !r.note.locked).length);
+      const initialUnlockedCount = Math.min(5, results.filter(r => !r.note.locked).length);
       if (aiRagContainer) {
         aiRagContainer.innerHTML = `
           <div class="ai-rag-card">
             <div class="ai-rag-header">
               <div class="ai-rag-title"><span>🤖</span><span>AI 종합 및 추론 답변</span></div>
-              <span class="ai-rag-badge">상위 ${unlockedRefCount}개 메모 참조 중...</span>
+              <span class="ai-rag-badge">상위 ${initialUnlockedCount}개 메모 참조 중...</span>
             </div>
             <div class="ai-rag-body" id="ai-rag-stream-body" style="color:var(--text-light)">
-              ✍️ 추출된 상위 ${unlockedRefCount}개 메모를 바탕으로 답변을 실시간 작성 중입니다...
+              ✍️ 추출된 상위 ${initialUnlockedCount}개 메모를 바탕으로 답변을 실시간 작성 중입니다...
             </div>
           </div>
         `;
       }
+
+      // 3단계: AI 종합 답변 생성에 필요한 긴 메모 본문만 보충 조회(Hydration)
+      await ai.hydrateTopSearchResults(results, signal);
+      if (token !== aiSearchSessionToken || signal.aborted) return;
+
+      const unlockedRefCount = Math.min(5, results.filter(r => !r.note.locked).length);
 
       let lastStreamRenderAt = 0;
       let streamRenderPending = false;
       let latestStreamText = '';
 
       const renderStreamBody = async (markdownText: string) => {
-        if (token !== aiSearchSessionToken) return;
+        if (token !== aiSearchSessionToken || signal.aborted) return;
         const cleanPartial = markdownText.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
         if (!cleanPartial) return;
         const html = await parseMarkdownBody(cleanPartial);
-        if (token !== aiSearchSessionToken) return;
+        if (token !== aiSearchSessionToken || signal.aborted) return;
         const streamBodyEl = $('ai-rag-stream-body');
         if (streamBodyEl) {
           streamBodyEl.style.color = '';
@@ -275,27 +309,32 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         }
       };
 
-      const answerMarkdown = await ai.generateRagAnswerStream(queryText, results, (accumulated) => {
-        if (token !== aiSearchSessionToken) return;
-        latestStreamText = accumulated;
-        const now = Date.now();
-        if (!streamRenderPending && now - lastStreamRenderAt >= 80) {
-          lastStreamRenderAt = now;
-          renderStreamBody(accumulated).catch(() => {});
-        } else if (!streamRenderPending) {
-          streamRenderPending = true;
-          setTimeout(() => {
-            streamRenderPending = false;
-            lastStreamRenderAt = Date.now();
-            if (latestStreamText) renderStreamBody(latestStreamText).catch(() => {});
-          }, 80);
-        }
-      });
-      if (token !== aiSearchSessionToken) return;
+      const answerMarkdown = await ai.generateRagAnswerStream(
+        queryText,
+        results,
+        (accumulated) => {
+          if (token !== aiSearchSessionToken || signal.aborted) return;
+          latestStreamText = accumulated;
+          const now = Date.now();
+          if (!streamRenderPending && now - lastStreamRenderAt >= 80) {
+            lastStreamRenderAt = now;
+            renderStreamBody(accumulated).catch(() => {});
+          } else if (!streamRenderPending) {
+            streamRenderPending = true;
+            setTimeout(() => {
+              streamRenderPending = false;
+              lastStreamRenderAt = Date.now();
+              if (latestStreamText) renderStreamBody(latestStreamText).catch(() => {});
+            }, 80);
+          }
+        },
+        signal
+      );
+      if (token !== aiSearchSessionToken || signal.aborted) return;
 
       const cleanAnswer = answerMarkdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
       const renderedHtml = await parseMarkdownBody(cleanAnswer);
-      if (token !== aiSearchSessionToken) return;
+      if (token !== aiSearchSessionToken || signal.aborted) return;
 
       if (aiRagContainer) {
         aiRagContainer.innerHTML = `
@@ -309,7 +348,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         `;
       }
     } catch (e: any) {
-      if (token !== aiSearchSessionToken) return;
+      if (ai.isAbortError(e, signal) || token !== aiSearchSessionToken) return;
       if (aiRagContainer) {
         aiRagContainer.innerHTML = `
           <div class="ai-rag-card" style="border-color:var(--danger)">
@@ -321,9 +360,11 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         `;
       }
     } finally {
-      if (token === aiSearchSessionToken && btnAiSearch) {
-        btnAiSearch.disabled = false;
-        btnAiSearch.innerHTML = '<span>✨</span><span>AI 의미 검색 · 추론</span>';
+      if (activeAiAbortController === abortController) {
+        activeAiAbortController = null;
+      }
+      if (token === aiSearchSessionToken) {
+        resetAiSearchButton();
       }
     }
   }
@@ -331,6 +372,8 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
   function doSearch(keyword: string, fromCacheSync = false) {
     if (!searchResults) return;
     if (!fromCacheSync) {
+      abortActiveAiSearch();
+      resetAiSearchButton();
       isAiSearchActive = false;
       if (aiRagContainer) {
         aiRagContainer.style.display = 'none';
@@ -494,9 +537,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       if (searchClear) searchClear.style.display = v ? 'block' : 'none';
       if (searchTimeout) clearTimeout(searchTimeout);
       if (!v) {
+        abortActiveAiSearch();
+        resetAiSearchButton();
         lastSearchedQuery = '';
         isAiSearchActive = false;
         lastRenderedSearchSignature = '';
+        if (aiRagContainer) {
+          aiRagContainer.style.display = 'none';
+          aiRagContainer.innerHTML = '';
+        }
         if (searchResults) {
           searchResults.style.display = 'none';
           searchResults.innerHTML = '';

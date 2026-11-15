@@ -82,6 +82,8 @@ interface LocalVectorRecord {
   embeddingUpdatedMs: number;
   model?: string; // EMBEDDING_VERSION (구버전 레코드에는 없음 → 로드 시 폐기)
   body?: string; // 상위 매칭된 메모의 본문 캐시 (반복 조회 시 읽기 비용 0, 잠금 메모는 저장하지 않음)
+  normVec?: Float32Array; // 런타임 코사인 유사도 고속 계산용 단위 벡터 (IndexedDB 미저장)
+  bodyLower?: string; // 런타임 하이브리드 키워드 매칭용 본문 소문자 캐시 (IndexedDB 미저장)
 }
 
 // Firestore 메모 데이터 → 로컬 벡터 레코드 (현재 버전 임베딩이 아니면 null, 잠금 메모는 본문 미보관)
@@ -214,7 +216,15 @@ async function putVectorsToIdb(records: LocalVectorRecord[]): Promise<void> {
       const tx = idb.transaction(IDB_STORE, 'readwrite');
       const store = tx.objectStore(IDB_STORE);
       for (const r of records) {
-        store.put(r);
+        // 런타임 전용 캐시(normVec, bodyLower)는 제외하고 직렬화 가능한 필드만 IndexedDB에 저장
+        store.put({
+          id: r.id,
+          uid: r.uid,
+          embedding: r.embedding,
+          embeddingUpdatedMs: r.embeddingUpdatedMs,
+          ...(r.model !== undefined ? { model: r.model } : {}),
+          ...(r.body !== undefined ? { body: r.body } : {})
+        });
       }
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
@@ -419,8 +429,35 @@ type EmbedTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
-function sleep(ms: number) {
-  return new Promise(r => setTimeout(r, ms));
+function createAbortError(): Error {
+  const err = new Error('요청이 취소되었습니다.');
+  err.name = 'AbortError';
+  return err;
+}
+
+export function isAbortError(err: any, signal?: AbortSignal): boolean {
+  return err?.name === 'AbortError' || Boolean(signal?.aborted);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // 429 응답의 RetryInfo(예: "retryDelay": "23s")에서 대기 시간을 읽어옴 (없으면 null)
@@ -437,13 +474,15 @@ function parseRetryDelayMs(errJson: any): number | null {
   return null;
 }
 
-// 429(할당량 초과)/503(일시 과부하)에 한해 지수 백오프로 재시도. 그 외 오류는 즉시 throw
-async function postGeminiWithRetry(url: string, body: unknown, apiKey: string): Promise<any> {
+// 429(할당량 초과)/503(일시 과부하)에 한해 지수 백오프로 재시도. 취소 및 그 외 오류는 즉시 throw
+async function postGeminiWithRetry(url: string, body: unknown, apiKey: string, signal?: AbortSignal): Promise<any> {
   for (let attempt = 0; ; attempt++) {
+    throwIfAborted(signal);
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
     if (res.ok) return res.json();
 
@@ -457,7 +496,7 @@ async function postGeminiWithRetry(url: string, body: unknown, apiKey: string): 
     }
     const waitMs = parseRetryDelayMs(errJson) ?? Math.min(60000, 5000 * 2 ** attempt);
     console.warn(`임베딩 API ${res.status} — ${Math.round(waitMs / 1000)}초 후 재시도 (${attempt + 1}/${EMBED_MAX_RETRIES})`);
-    await sleep(waitMs);
+    await sleep(waitMs, signal);
   }
 }
 
@@ -471,9 +510,11 @@ function assertEmbeddingValues(values: unknown): number[] {
   return values as number[];
 }
 
-async function embedViaProxy(cleaned: string, taskType: EmbedTaskType, title?: string): Promise<number[]> {
+async function embedViaProxy(cleaned: string, taskType: EmbedTaskType, title?: string, signal?: AbortSignal): Promise<number[]> {
+  throwIfAborted(signal);
   const proxyUrl = getAiProxyUrl();
   const idToken = await auth.currentUser?.getIdToken();
+  throwIfAborted(signal);
   const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/embed`, {
     method: 'POST',
     headers: {
@@ -486,7 +527,8 @@ async function embedViaProxy(cleaned: string, taskType: EmbedTaskType, title?: s
       text: cleaned,
       taskType,
       ...(taskType === 'RETRIEVAL_DOCUMENT' && title ? { title } : {})
-    })
+    }),
+    signal
   });
   if (!res.ok) {
     const errText = await res.text();
@@ -504,30 +546,43 @@ function requireApiKey(): string {
   return apiKey;
 }
 
+// 질문 LRU 캐시 적중률 향상을 위해 대소문자, 문장 끝 문장부호, 중복 공백을 정규화
+function normalizeQueryCacheKey(cleaned: string): string {
+  const normalized = cleaned
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[?!.,;:'"“”‘’~…]+$/g, '')
+    .trim();
+  return normalized || cleaned.toLowerCase();
+}
+
 export async function generateTextEmbedding(
   text: string,
   taskType: EmbedTaskType = 'RETRIEVAL_DOCUMENT',
-  title?: string
+  title?: string,
+  signal?: AbortSignal
 ): Promise<number[]> {
+  throwIfAborted(signal);
   const cleaned = cleanTextForEmbedding(text);
   if (!cleaned) {
     throw new Error('임베딩할 텍스트가 비어 있습니다.');
   }
 
-  // 질문(RETRIEVAL_QUERY) 임베딩은 LRU 캐시에서 먼저 확인하여 중복 호출 차단
+  // 질문(RETRIEVAL_QUERY) 임베딩은 정규화된 키로 LRU 캐시에서 먼저 확인하여 중복 호출 차단
+  const cacheKey = taskType === 'RETRIEVAL_QUERY' ? normalizeQueryCacheKey(cleaned) : '';
   if (taskType === 'RETRIEVAL_QUERY') {
-    const cached = queryEmbeddingCache.get(cleaned);
+    const cached = queryEmbeddingCache.get(cacheKey);
     if (cached) {
       // 최근 사용 순으로 갱신
-      queryEmbeddingCache.delete(cleaned);
-      queryEmbeddingCache.set(cleaned, cached);
+      queryEmbeddingCache.delete(cacheKey);
+      queryEmbeddingCache.set(cacheKey, cached);
       return cached;
     }
   }
 
   let values: number[];
   if (getAiProxyUrl()) {
-    values = await embedViaProxy(cleaned, taskType, title);
+    values = await embedViaProxy(cleaned, taskType, title, signal);
   } else {
     const apiKey = requireApiKey();
     const cleanTitle = title?.trim();
@@ -540,7 +595,8 @@ export async function generateTextEmbedding(
         ...(taskType === 'RETRIEVAL_DOCUMENT' && cleanTitle ? { title: cleanTitle } : {}),
         outputDimensionality: EMBEDDING_DIM
       },
-      apiKey
+      apiKey,
+      signal
     );
     values = assertEmbeddingValues(json?.embedding?.values);
   }
@@ -550,7 +606,7 @@ export async function generateTextEmbedding(
       const oldestKey = queryEmbeddingCache.keys().next().value;
       if (oldestKey !== undefined) queryEmbeddingCache.delete(oldestKey);
     }
-    queryEmbeddingCache.set(cleaned, values);
+    queryEmbeddingCache.set(cacheKey, values);
   }
 
   return values;
@@ -615,8 +671,57 @@ export async function tryGenerateNoteEmbedding(noteData: Partial<Note>): Promise
 }
 
 // ─────────────────────────────────────────────
-// 3. 코사인 유사도 & 최소 읽기(Delta Sync + 로컬 캐시) 벡터 검색
+// 3. 코사인 유사도 (L2 정규화 Float32Array 고속 내적) & 최소 읽기(Delta Sync + 로컬 캐시) 벡터 검색
 // ─────────────────────────────────────────────
+
+// 벡터를 단위 벡터(L2 정규화) Float32Array로 변환하여 유사도 계산 시 나눗셈·제곱근 연산 제거 및 메모리 절감
+function toNormalizedFloat32(vec: ArrayLike<number>): Float32Array {
+  const len = vec.length;
+  const out = new Float32Array(len);
+  let normSq = 0;
+  for (let i = 0; i < len; i++) {
+    const v = vec[i];
+    normSq += v * v;
+  }
+  if (normSq === 0) return out;
+  const invNorm = 1 / Math.sqrt(normSq);
+  for (let i = 0; i < len; i++) {
+    out[i] = vec[i] * invNorm;
+  }
+  return out;
+}
+
+function getRecordNormVec(rec: LocalVectorRecord): Float32Array {
+  if (!rec.normVec || rec.normVec.length !== rec.embedding.length) {
+    rec.normVec = toNormalizedFloat32(rec.embedding);
+  }
+  return rec.normVec;
+}
+
+function dotProductNormalized(vecA: Float32Array, vecB: Float32Array): number {
+  const len = vecA.length;
+  if (len === 0 || len !== vecB.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < len; i++) {
+    dot += vecA[i] * vecB[i];
+  }
+  return dot;
+}
+
+// 하이브리드 어근 매칭용 소문자 캐시 (인덱스 항목 객체 참조가 바뀌면 자동 GC 및 갱신)
+const indexLexicalCache = new WeakMap<NoteIndexItem, { metaLower: string; snippetLower: string }>();
+
+function getIndexLexicalEntry(item: NoteIndexItem): { metaLower: string; snippetLower: string } {
+  let cached = indexLexicalCache.get(item);
+  if (!cached) {
+    cached = {
+      metaLower: `${item.title || ''} ${getNoteTags(item).join(' ')} ${item.keywords || ''}`.toLowerCase(),
+      snippetLower: item.locked ? '' : (item.snippet || '').toLowerCase()
+    };
+    indexLexicalCache.set(item, cached);
+  }
+  return cached;
+}
 
 export function cosineSimilarity(vecA?: number[] | null, vecB?: number[] | null): number {
   if (!Array.isArray(vecA) || !Array.isArray(vecB)) return 0;
@@ -770,6 +875,7 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
       // 잠금 메모에 평문 본문이 남아 있으면 즉시 제거 (보안 강화)
       if (localRec && item.locked && localRec.body !== undefined) {
         delete localRec.body;
+        delete localRec.bodyLower;
         lockedSanitizedRecords.push(localRec);
       }
 
@@ -829,21 +935,109 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
   return memoryVectorMap;
 }
 
+export interface SemanticSearchOptions {
+  skipHydration?: boolean;
+  signal?: AbortSignal;
+}
+
+/**
+ * 상위 일치 메모들 중 아직 로컬 캐시에 전체 본문이 없는 긴 메모만 단건 조회해 채워 넣습니다.
+ * (검색 결과 카드 선(先) 렌더링 후 AI 종합 추론 직전에만 호출하여 체감 속도를 최적화합니다.)
+ */
+export async function hydrateTopSearchResults(
+  topResults: SemanticSearchResult[],
+  signal?: AbortSignal
+): Promise<void> {
+  throwIfAborted(signal);
+  if (topResults.length === 0) return;
+
+  const vectorMap = memoryVectorMap || (await ensureLocalVectorsSynced());
+  throwIfAborted(signal);
+
+  const updatedForIdb: LocalVectorRecord[] = [];
+  await Promise.all(
+    topResults.map(async (resItem) => {
+      if (signal?.aborted) return;
+      const n = resItem.note;
+      if (!n.id || n.locked) return;
+      const vecRec = vectorMap.get(n.id);
+      if (vecRec?.body !== undefined) {
+        n.body = vecRec.body;
+        return;
+      }
+      // 인덱스 스니펫이 200자 미만이면 잘린 부분이 없으므로 Firestore 조회 불필요
+      if ((n.body || '').length < 200) {
+        if (vecRec) {
+          vecRec.body = n.body;
+          delete vecRec.bodyLower;
+          updatedForIdb.push(vecRec);
+        }
+        return;
+      }
+      // 상위 매칭된 긴 메모만 단건 조회 (getSingleNote는 Firestore persistentLocalCache도 활용)
+      try {
+        const fullNote = await getSingleNote(n.id);
+        if (signal?.aborted) return;
+        if (fullNote && typeof fullNote.body === 'string') {
+          if (fullNote.locked) {
+            n.locked = true;
+            n.body = '';
+            if (vecRec) {
+              delete vecRec.body;
+              delete vecRec.bodyLower;
+              updatedForIdb.push(vecRec);
+            }
+            return;
+          }
+          n.body = fullNote.body;
+          if (vecRec) {
+            vecRec.body = fullNote.body;
+            delete vecRec.bodyLower;
+            updatedForIdb.push(vecRec);
+          } else if (isCurrentEmbedding(fullNote.embeddingModel, fullNote.embedding)) {
+            const newRec: LocalVectorRecord = {
+              id: n.id,
+              uid: fullNote.uid || appState.currentUser?.uid || '',
+              embedding: fullNote.embedding,
+              embeddingUpdatedMs: toMillis(fullNote.embeddingUpdatedAt) || Date.now(),
+              model: EMBEDDING_VERSION,
+              body: fullNote.body
+            };
+            vectorMap.set(n.id, newRec);
+            updatedForIdb.push(newRec);
+          }
+        }
+      } catch (e) {
+        console.warn(`상위 메모 본문 단건 조회 실패 (${n.id}):`, e);
+      }
+    })
+  );
+
+  if (updatedForIdb.length > 0) {
+    putVectorsToIdb(updatedForIdb).catch(() => {});
+  }
+  throwIfAborted(signal);
+}
+
 /**
  * 요구사항 2 (읽기 비용 극대화 절감 + 한국어 하이브리드 보정 + 적응형 커트라인):
  * - 전체 문서를 Firestore에서 읽지 않고 로컬 캐시(allNotesCache + IndexedDB 벡터)만으로
- *   100% 로컬에서 코사인 유사도를 고속 계산하여 상위 topK 메모를 추출합니다.
+ *   100% 로컬에서 L2 정규화 Float32Array 내적을 통해 코사인 유사도를 고속 계산하여 상위 topK 메모를 추출합니다.
  * - 잠금 메모가 상위권에 포함된 경우에도 RAG 추론에 사용할 일반(비잠금) 메모가 부족하지 않도록
  *   후보를 보충하고, 잠금 메모의 본문은 절대 로컬 캐시나 스니펫에 노출하지 않습니다.
  */
 export async function semanticSearchNotes(
   queryText: string,
-  topK = 5
+  topK = 5,
+  options?: SemanticSearchOptions
 ): Promise<{
   results: SemanticSearchResult[];
   totalNotesCount: number;
   embeddedNotesCount: number;
 }> {
+  const signal = options?.signal;
+  throwIfAborted(signal);
+
   const cleanQuery = queryText.trim();
   if (!cleanQuery) {
     return { results: [], totalNotesCount: 0, embeddedNotesCount: 0 };
@@ -851,10 +1045,12 @@ export async function semanticSearchNotes(
 
   // 1) 질문 임베딩 생성 + 로컬 벡터 캐시 증분 확인 (변경분 없으면 Firestore 읽기 0회)
   const [queryVector, vectorMap] = await Promise.all([
-    generateTextEmbedding(cleanQuery, 'RETRIEVAL_QUERY'),
+    generateTextEmbedding(cleanQuery, 'RETRIEVAL_QUERY', undefined, signal),
     ensureLocalVectorsSynced()
   ]);
+  throwIfAborted(signal);
 
+  const queryNormVec = toNormalizedFloat32(queryVector);
   const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
   const queryTermGroups = extractQueryTermGroups(cleanQuery);
 
@@ -869,22 +1065,33 @@ export async function semanticSearchNotes(
     // 보안: 잠금 메모에 혹시라도 로컬 본문 캐시가 남아 있다면 즉시 삭제
     if (isLocked && vecRec && vecRec.body !== undefined) {
       delete vecRec.body;
+      delete vecRec.bodyLower;
       sanitizedLockedForIdb.push(vecRec);
     }
 
-    const hasEmb = Boolean(vecRec && vecRec.embedding.length === queryVector.length);
+    const hasEmb = Boolean(vecRec && vecRec.embedding.length === queryNormVec.length);
     if (hasEmb) embeddedNotesCount++;
 
-    let score = hasEmb ? cosineSimilarity(queryVector, vecRec!.embedding) : 0;
+    let score = hasEmb ? dotProductNormalized(queryNormVec, getRecordNormVec(vecRec!)) : 0;
     let matchedTerms = 0;
 
     if (queryTermGroups.length > 0) {
-      const hayTitle = `${idxItem.title || ''} ${getNoteTags(idxItem).join(' ')} ${idxItem.keywords || ''}`.toLowerCase();
+      const { metaLower, snippetLower } = getIndexLexicalEntry(idxItem);
       // 잠금 메모는 본문/스니펫 텍스트를 키워드 매칭에 사용하지 않음
-      const haySnippet = isLocked ? '' : (vecRec?.body || idxItem.snippet || '').toLowerCase();
+      let haySnippet = '';
+      if (!isLocked) {
+        if (vecRec?.body !== undefined) {
+          if (vecRec.bodyLower === undefined) {
+            vecRec.bodyLower = vecRec.body.toLowerCase();
+          }
+          haySnippet = vecRec.bodyLower;
+        } else {
+          haySnippet = snippetLower;
+        }
+      }
 
       for (const variants of queryTermGroups) {
-        if (variants.some(v => hayTitle.includes(v))) {
+        if (variants.some(v => metaLower.includes(v))) {
           matchedTerms += 1.0;
         } else if (haySnippet && variants.some(v => haySnippet.includes(v))) {
           matchedTerms += 0.45;
@@ -961,61 +1168,9 @@ export async function semanticSearchNotes(
     if (!item.note.locked) unlockedCount++;
   }
 
-  // 4) 상위 일치 문서만 본문 최소 조회 (On-Demand Top-K Hydration)
-  //    - 잠금 메모(locked)는 RAG에 본문을 보내지 않으므로 조회 생략 (0건)
-  //    - 이미 로컬 캐시에 본문이 있거나, snippet 길이가 200자 미만(즉 snippet이 곧 전문)이면 조회 생략 (0건)
-  const updatedForIdb: LocalVectorRecord[] = [];
-  await Promise.all(
-    topResults.map(async (resItem) => {
-      const n = resItem.note;
-      if (!n.id || n.locked) return;
-      const vecRec = vectorMap.get(n.id);
-      if (vecRec?.body !== undefined) {
-        n.body = vecRec.body;
-        return;
-      }
-      // 인덱스 스니펫이 200자 미만이면 잘린 부분이 없으므로 Firestore 조회 불필요
-      if ((n.body || '').length < 200) {
-        if (vecRec) {
-          vecRec.body = n.body;
-          updatedForIdb.push(vecRec);
-        }
-        return;
-      }
-      // 상위 매칭된 긴 메모만 단건 조회 (getSingleNote는 Firestore persistentLocalCache도 활용)
-      try {
-        const fullNote = await getSingleNote(n.id);
-        if (fullNote && typeof fullNote.body === 'string') {
-          if (fullNote.locked) {
-            n.locked = true;
-            n.body = '';
-            return;
-          }
-          n.body = fullNote.body;
-          if (vecRec) {
-            vecRec.body = fullNote.body;
-            updatedForIdb.push(vecRec);
-          } else if (isCurrentEmbedding(fullNote.embeddingModel, fullNote.embedding)) {
-            const newRec: LocalVectorRecord = {
-              id: n.id,
-              uid: fullNote.uid || appState.currentUser?.uid || '',
-              embedding: fullNote.embedding,
-              embeddingUpdatedMs: toMillis(fullNote.embeddingUpdatedAt) || Date.now(),
-              model: EMBEDDING_VERSION,
-              body: fullNote.body
-            };
-            vectorMap.set(n.id, newRec);
-            updatedForIdb.push(newRec);
-          }
-        }
-      } catch (e) {
-        console.warn(`상위 메모 본문 단건 조회 실패 (${n.id}):`, e);
-      }
-    })
-  );
-
-  if (updatedForIdb.length > 0) {
-    putVectorsToIdb(updatedForIdb).catch(() => {});
+  // 4) 상위 일치 문서만 본문 최소 조회 (skipHydration=true인 경우 호출측에서 카드 선 렌더링 후 별도 호출)
+  if (!options?.skipHydration) {
+    await hydrateTopSearchResults(topResults, signal);
   }
 
   return {
@@ -1159,8 +1314,10 @@ function extractVisibleTextFromParts(parts: any[]): string {
 export async function generateRagAnswerStream(
   userQuery: string,
   topResults: SemanticSearchResult[],
-  onChunk?: (accumulatedText: string) => void
+  onChunk?: (accumulatedText: string) => void,
+  signal?: AbortSignal
 ): Promise<string> {
+  throwIfAborted(signal);
   const payload = buildRagPromptPayload(userQuery, topResults);
   if (payload.earlyReturn) {
     onChunk?.(payload.earlyReturn);
@@ -1173,13 +1330,15 @@ export async function generateRagAnswerStream(
   const proxyUrl = getAiProxyUrl();
   if (proxyUrl) {
     const idToken = await auth.currentUser?.getIdToken();
+    throwIfAborted(signal);
     const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(idToken ? { Authorization: `Bearer ${idToken}` } : {})
       },
-      body: JSON.stringify({ systemInstruction, prompt: promptText })
+      body: JSON.stringify({ systemInstruction, prompt: promptText }),
+      signal
     });
     if (!res.ok) {
       const errText = await res.text();
@@ -1187,6 +1346,7 @@ export async function generateRagAnswerStream(
     }
     const data = await res.json();
     const answer = data?.text || data?.answer || '답변을 생성하지 못했습니다.';
+    throwIfAborted(signal);
     onChunk?.(answer);
     return answer;
   }
@@ -1204,6 +1364,7 @@ export async function generateRagAnswerStream(
 
     let useThinkingDisabled = true;
     for (let attempt = 0; attempt < 2; attempt++) {
+      throwIfAborted(signal);
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -1214,7 +1375,8 @@ export async function generateRagAnswerStream(
           systemInstruction: { parts: [{ text: systemInstruction }] },
           contents: [{ role: 'user', parts: [{ text: promptText }] }],
           generationConfig: buildRagGenerationConfig(cleanModel, useThinkingDisabled)
-        })
+        }),
+        signal
       });
 
       if (!res.ok) {
@@ -1225,7 +1387,7 @@ export async function generateRagAnswerStream(
           continue;
         }
         if ((res.status === 429 || res.status === 503) && attempt === 0) {
-          await sleep(1200);
+          await sleep(1200, signal);
           continue;
         }
         const fatal = res.status === 401 || res.status === 403;
@@ -1241,30 +1403,43 @@ export async function generateRagAnswerStream(
       let buffer = '';
       let accumulated = '';
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() ?? '';
+      try {
+        while (true) {
+          if (signal?.aborted) {
+            await reader.cancel().catch(() => {});
+            throw createAbortError();
+          }
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (signal?.aborted) {
+            await reader.cancel().catch(() => {});
+            throw createAbortError();
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() ?? '';
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const jsonStr = trimmed.slice(5).trim();
-          if (!jsonStr || jsonStr === '[DONE]') continue;
-          try {
-            const chunkJson = JSON.parse(jsonStr);
-            const parts = chunkJson?.candidates?.[0]?.content?.parts || [];
-            const delta = extractVisibleTextFromParts(parts);
-            if (delta) {
-              accumulated += delta;
-              onChunk?.(accumulated);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const jsonStr = trimmed.slice(5).trim();
+            if (!jsonStr || jsonStr === '[DONE]') continue;
+            try {
+              const chunkJson = JSON.parse(jsonStr);
+              const parts = chunkJson?.candidates?.[0]?.content?.parts || [];
+              const delta = extractVisibleTextFromParts(parts);
+              if (delta) {
+                accumulated += delta;
+                onChunk?.(accumulated);
+              }
+            } catch {
+              // 불완전 청크는 무시
             }
-          } catch {
-            // 불완전 청크는 무시
           }
         }
+      } catch (readErr) {
+        await reader.cancel().catch(() => {});
+        throw readErr;
       }
 
       const finalAnswer = accumulated.trim();
@@ -1288,6 +1463,7 @@ export async function generateRagAnswerStream(
   const errors: string[] = [];
 
   for (const model of candidateModels) {
+    throwIfAborted(signal);
     try {
       const result = await tryStreamWithModel(model);
       if (result.ok && result.answer) {
@@ -1301,19 +1477,23 @@ export async function generateRagAnswerStream(
         throw new Error(`Gemini API 인증 오류: ${result.errorMsg}`);
       }
     } catch (e: any) {
+      if (isAbortError(e, signal)) throw e;
       if (e?.message?.includes('인증 오류')) throw e;
       errors.push(`${model}: ${e?.message || String(e)}`);
     }
   }
 
   // 정적 후보 모델들이 모두 실패한 경우 동적 모델 탐색 후 비스트리밍 폴백 호출
-  return generateRagAnswer(userQuery, topResults);
+  throwIfAborted(signal);
+  return generateRagAnswer(userQuery, topResults, signal);
 }
 
 export async function generateRagAnswer(
   userQuery: string,
-  topResults: SemanticSearchResult[]
+  topResults: SemanticSearchResult[],
+  signal?: AbortSignal
 ): Promise<string> {
+  throwIfAborted(signal);
   const payload = buildRagPromptPayload(userQuery, topResults);
   if (payload.earlyReturn) {
     return payload.earlyReturn;
@@ -1325,6 +1505,7 @@ export async function generateRagAnswer(
   const proxyUrl = getAiProxyUrl();
   if (proxyUrl) {
     const idToken = await auth.currentUser?.getIdToken();
+    throwIfAborted(signal);
     const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/generate`, {
       method: 'POST',
       headers: {
@@ -1334,7 +1515,8 @@ export async function generateRagAnswer(
       body: JSON.stringify({
         systemInstruction,
         prompt: promptText
-      })
+      }),
+      signal
     });
     if (!res.ok) {
       const errText = await res.text();
@@ -1358,6 +1540,7 @@ export async function generateRagAnswer(
 
     let useThinkingDisabled = true;
     for (let attempt = 0; attempt < 2; attempt++) {
+      throwIfAborted(signal);
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -1375,7 +1558,8 @@ export async function generateRagAnswer(
             }
           ],
           generationConfig: buildRagGenerationConfig(cleanModel, useThinkingDisabled)
-        })
+        }),
+        signal
       });
 
       if (!res.ok) {
@@ -1386,7 +1570,7 @@ export async function generateRagAnswer(
           continue;
         }
         if ((res.status === 429 || res.status === 503) && attempt === 0) {
-          await sleep(1500);
+          await sleep(1500, signal);
           continue;
         }
         // 401(잘못된 키) 또는 403(권한 없음)은 다른 모델을 시도해도 해결되지 않으므로 치명적 오류로 즉시 중단
@@ -1425,6 +1609,7 @@ export async function generateRagAnswer(
   const errors: string[] = [];
 
   for (const model of candidateModels) {
+    throwIfAborted(signal);
     try {
       const result = await tryGenerateWithModel(model);
       if (result.ok && result.answer) {
@@ -1438,6 +1623,7 @@ export async function generateRagAnswer(
         throw new Error(`Gemini API 인증 오류: ${result.errorMsg}`);
       }
     } catch (e: any) {
+      if (isAbortError(e, signal)) throw e;
       if (e?.message?.includes('인증 오류')) throw e;
       errors.push(`${model}: ${e?.message || String(e)}`);
     }
@@ -1446,9 +1632,11 @@ export async function generateRagAnswer(
   // 정적 후보 모델들이 모두 실패한 경우: Google API의 ListModels를 직접 호출하여
   // 현재 API 키에서 사용 가능한 generateContent 지원 모델을 동적으로 찾아 재시도
   try {
+    throwIfAborted(signal);
     const listUrl = `${GEMINI_API_BASE}/models`;
     const listRes = await fetch(listUrl, {
-      headers: { 'x-goog-api-key': apiKey }
+      headers: { 'x-goog-api-key': apiKey },
+      signal
     });
     if (listRes.ok) {
       const listJson = await listRes.json();
@@ -1473,6 +1661,7 @@ export async function generateRagAnswer(
       });
 
       for (const dynModel of availableModels) {
+        throwIfAborted(signal);
         if (candidateModels.includes(dynModel)) continue;
         const result = await tryGenerateWithModel(dynModel);
         if (result.ok && result.answer) {
@@ -1485,6 +1674,7 @@ export async function generateRagAnswer(
       }
     }
   } catch (e: any) {
+    if (isAbortError(e, signal)) throw e;
     if (e?.message?.includes('인증 오류')) throw e;
     console.warn('동적 모델 목록 조회(ListModels) 실패:', e);
   }
