@@ -836,9 +836,10 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
   const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
   const bootstrapKey = `${BOOTSTRAP_FLAG_PREFIX}${uid}`;
   const isBootstrapped = localStorage.getItem(bootstrapKey) === '1';
+  const hasAnyIndexedEmbedding = indexItems.some(item => Boolean(toMillis(item.embeddingUpdatedAt)));
 
-  // 로컬 캐시가 완전히 비어 있는 경우(기기 최초 1회 또는 브라우저 캐시 삭제 후): 전체 1회 일괄 조회로 초기화
-  if (memoryVectorMap.size === 0) {
+  // 로컬 캐시가 비어 있고 최초 부트스트랩 전이거나 인덱스에 임베딩된 메모가 있는 경우에만 전체 1회 조회
+  if (memoryVectorMap.size === 0 && (!isBootstrapped || hasAnyIndexedEmbedding)) {
     const q = query(collection(db, 'notes'), where('uid', '==', uid));
     const snap = await getDocs(q);
     const toSave: LocalVectorRecord[] = [];
@@ -1058,7 +1059,8 @@ export async function semanticSearchNotes(
   const sanitizedLockedForIdb: LocalVectorRecord[] = [];
 
   // 2) 전체 메모 스코어링은 Firestore 조회 없이 100% 로컬 메모리에서 수행
-  const scored: (SemanticSearchResult & { lexicalMatched: number })[] = indexItems.map(idxItem => {
+  //    (정렬·필터링 단계에서는 경량 구조만 유지하고, 최종 선택된 상위 메모에 대해서만 Note 객체 생성)
+  const scored = indexItems.map(idxItem => {
     const vecRec = vectorMap.get(idxItem.id);
     const isLocked = !!idxItem.locked;
 
@@ -1107,24 +1109,10 @@ export async function semanticSearchNotes(
       }
     }
 
-    const candidateNote: Note = {
-      id: idxItem.id,
-      uid: appState.currentUser?.uid || '',
-      title: idxItem.title || '',
-      category: idxItem.category || '',
-      categories: getNoteCategories(idxItem),
-      tag: idxItem.tag || '',
-      tags: getNoteTags(idxItem),
-      // 잠금 메모는 본문을 비워 두고, 일반 메모는 로컬 캐시 본문 우선 → 없으면 인덱스 snippet(200자) 사용
-      body: isLocked ? '' : (vecRec?.body ?? (idxItem.snippet || '')),
-      keywords: idxItem.keywords || '',
-      locked: isLocked,
-      pinned: !!idxItem.pinned,
-      createdAt: idxItem.createdAt || undefined
-    };
-
     return {
-      note: candidateNote,
+      idxItem,
+      vecRec,
+      isLocked,
       score,
       hasEmbedding: hasEmb,
       lexicalMatched: matchedTerms
@@ -1156,16 +1144,33 @@ export async function semanticSearchNotes(
   const topResults: SemanticSearchResult[] = [];
   let unlockedCount = 0;
   const maxTotalResults = topK + 3;
+  const currentUid = appState.currentUser?.uid || '';
 
   for (const item of filteredCandidates) {
     if (topResults.length >= maxTotalResults) break;
     if (topResults.length >= topK && unlockedCount >= topK) break;
+    const { idxItem, vecRec, isLocked } = item;
+    const candidateNote: Note = {
+      id: idxItem.id,
+      uid: currentUid,
+      title: idxItem.title || '',
+      category: idxItem.category || '',
+      categories: getNoteCategories(idxItem),
+      tag: idxItem.tag || '',
+      tags: getNoteTags(idxItem),
+      // 잠금 메모는 본문을 비워 두고, 일반 메모는 로컬 캐시 본문 우선 → 없으면 인덱스 snippet(200자) 사용
+      body: isLocked ? '' : (vecRec?.body ?? (idxItem.snippet || '')),
+      keywords: idxItem.keywords || '',
+      locked: isLocked,
+      pinned: !!idxItem.pinned,
+      createdAt: idxItem.createdAt || undefined
+    };
     topResults.push({
-      note: item.note,
+      note: candidateNote,
       score: item.score,
       hasEmbedding: item.hasEmbedding
     });
-    if (!item.note.locked) unlockedCount++;
+    if (!isLocked) unlockedCount++;
   }
 
   // 4) 상위 일치 문서만 본문 최소 조회 (skipHydration=true인 경우 호출측에서 카드 선 렌더링 후 별도 호출)
