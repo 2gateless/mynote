@@ -256,3 +256,56 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
 
   return parsedBody;
 }
+
+// ─────────────────────────────────────────────
+// 검색 텍스트 정제 및 영문·숫자 단어 경계 매칭 유틸리티
+// ─────────────────────────────────────────────
+
+const tokenBoundaryRegexCache = new Map<string, RegExp>();
+
+/**
+ * 마크다운 이미지(data URI 포함), 링크 URL, HTML 태그를 제거하여 순수 텍스트만 추출합니다.
+ * (HTML 속성이나 URL/base64 문자열 내부의 영문·숫자가 우연히 검색되는 현상 방지)
+ */
+export function stripMarkupForSearch(raw: string): string {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, ' $1 ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, ' $1 ')
+    .replace(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+/gi, ' ')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExpStr(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 영문·숫자(기호 ._ - 포함)로만 이루어진 토큰인지 판별 */
+export function isAlnumSearchToken(token: string): boolean {
+  const t = token.trim();
+  return t.length > 0 && /^[a-z0-9][a-z0-9._-]*$/i.test(t);
+}
+
+/**
+ * 정제된 소문자 텍스트에서 검색 토큰이 매칭되는지 판별합니다.
+ * - 영문/숫자 토큰(예: a4, ai, api)은 앞뒤에 다른 영문/숫자가 붙지 않은 단어 경계만 허용합니다.
+ *   (예: 'a4'는 'A4 용지', 'a4용지'와 매칭되지만 'ba4c', 'base64' 등 단어 중간 일치는 제외)
+ */
+export function matchesSearchToken(plainTextLower: string, tokenLower: string): boolean {
+  if (!plainTextLower || !tokenLower) return false;
+  if (!isAlnumSearchToken(tokenLower)) {
+    return plainTextLower.includes(tokenLower);
+  }
+  let re = tokenBoundaryRegexCache.get(tokenLower);
+  if (!re) {
+    re = new RegExp(`(?<![a-z0-9])${escapeRegExpStr(tokenLower)}(?![a-z0-9])`);
+    if (tokenBoundaryRegexCache.size > 200) {
+      tokenBoundaryRegexCache.clear();
+    }
+    tokenBoundaryRegexCache.set(tokenLower, re);
+  }
+  return re.test(plainTextLower);
+}

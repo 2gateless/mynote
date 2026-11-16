@@ -1,6 +1,6 @@
 import { appState, SearchIndexEntry } from '../state';
 import { CATEGORIES, getNoteCategories, getNoteTags } from '../services/database';
-import { escHtml, parseMarkdownBody } from '../utils/formatter';
+import { escHtml, matchesSearchToken, parseMarkdownBody } from '../utils/formatter';
 import { showToast } from '../utils/toast';
 import { currentScreen, showAppScreen } from '../pwa';
 import { NoteIndexItem } from '../types';
@@ -395,9 +395,27 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         return;
       }
 
-      const results = searchIdx
-        .filter(entry => keywords.every(kw => entry.text.includes(kw)))
-        .map(entry => entry.note);
+      const cleanQueryLower = keyword.trim().toLowerCase();
+      const matchedScored = searchIdx
+        .filter(entry => keywords.every(kw => matchesSearchToken(entry.text, kw)))
+        .map(entry => {
+          const n = entry.note;
+          const titleLower = (n.title || '').toLowerCase();
+          const metaLower = `${n.keywords || ''} ${getNoteTags(n).join(' ')}`.toLowerCase();
+          let rank = 0;
+          if (titleLower.trim() === cleanQueryLower) {
+            rank += 200;
+          }
+          for (const kw of keywords) {
+            if (matchesSearchToken(titleLower, kw)) rank += 100;
+            else if (matchesSearchToken(metaLower, kw)) rank += 50;
+            else rank += 10;
+          }
+          return { note: n, rank };
+        });
+
+      matchedScored.sort((a, b) => b.rank - a.rank);
+      const results = matchedScored.map(item => item.note);
 
       const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${getNoteTags(n).join(',')}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
       if (fromCacheSync && signature === lastRenderedSearchSignature) {

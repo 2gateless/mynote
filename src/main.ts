@@ -9,6 +9,7 @@ import {
   subscribeAllNotes
 } from './services/database';
 import { showToast } from './utils/toast';
+import { stripMarkupForSearch } from './utils/formatter';
 import {
   initPinModal,
   scheduleInitialPinSetupCheck,
@@ -118,7 +119,8 @@ function getSearchIndex(): SearchIndexEntry[] {
     const notes = appState.allNotesCache || [];
     appState.searchIndex = notes.map(n => ({
       note: n,
-      text: `${n.title || ''}\n${n.locked ? '' : (n.snippet || '')}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
+      // HTML 태그·URL·이미지 마크업을 제거한 순수 텍스트 기준으로 키워드 색인 생성
+      text: `${n.title || ''}\n${n.locked ? '' : stripMarkupForSearch(n.snippet || '')}\n${n.keywords || ''}\n${getNoteTags(n).join(' ')}`.toLowerCase()
     }));
     isSearchIndexDirty = false;
   }

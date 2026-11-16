@@ -19,7 +19,7 @@ import {
    getSingleNote,
   rebuildCategoryIndex
 } from './database';
-import { fmtDate, toMillis } from '../utils/formatter';
+import { fmtDate, isAlnumSearchToken, matchesSearchToken, stripMarkupForSearch, toMillis } from '../utils/formatter';
 import { Note, NoteIndexItem } from '../types';
 
 // ─────────────────────────────────────────────
@@ -709,14 +709,15 @@ function dotProductNormalized(vecA: Float32Array, vecB: Float32Array): number {
 }
 
 // 하이브리드 어근 매칭용 소문자 캐시 (인덱스 항목 객체 참조가 바뀌면 자동 GC 및 갱신)
-const indexLexicalCache = new WeakMap<NoteIndexItem, { metaLower: string; snippetLower: string }>();
+const indexLexicalCache = new WeakMap<NoteIndexItem, { titleLower: string; metaLower: string; snippetLower: string }>();
 
-function getIndexLexicalEntry(item: NoteIndexItem): { metaLower: string; snippetLower: string } {
+function getIndexLexicalEntry(item: NoteIndexItem): { titleLower: string; metaLower: string; snippetLower: string } {
   let cached = indexLexicalCache.get(item);
   if (!cached) {
     cached = {
+      titleLower: (item.title || '').toLowerCase(),
       metaLower: `${item.title || ''} ${getNoteTags(item).join(' ')} ${item.keywords || ''}`.toLowerCase(),
-      snippetLower: item.locked ? '' : (item.snippet || '').toLowerCase()
+      snippetLower: item.locked ? '' : stripMarkupForSearch(item.snippet || '').toLowerCase()
     };
     indexLexicalCache.set(item, cached);
   }
@@ -1054,6 +1055,11 @@ export async function semanticSearchNotes(
   const queryNormVec = toNormalizedFloat32(queryVector);
   const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
   const queryTermGroups = extractQueryTermGroups(cleanQuery);
+  const cleanQueryLower = cleanQuery.toLowerCase();
+  // 영문/숫자 중심 쿼리(예: a4, api, usb c) 여부: 짧은 영문 토큰의 임베딩 왜곡 보정용
+  const isAlnumQuery =
+    isAlnumSearchToken(cleanQuery) ||
+    (queryTermGroups.length > 0 && queryTermGroups.every(g => g.some(v => isAlnumSearchToken(v))));
 
   let embeddedNotesCount = 0;
   const sanitizedLockedForIdb: LocalVectorRecord[] = [];
@@ -1078,13 +1084,13 @@ export async function semanticSearchNotes(
     let matchedTerms = 0;
 
     if (queryTermGroups.length > 0) {
-      const { metaLower, snippetLower } = getIndexLexicalEntry(idxItem);
+      const { titleLower, metaLower, snippetLower } = getIndexLexicalEntry(idxItem);
       // 잠금 메모는 본문/스니펫 텍스트를 키워드 매칭에 사용하지 않음
       let haySnippet = '';
       if (!isLocked) {
         if (vecRec?.body !== undefined) {
           if (vecRec.bodyLower === undefined) {
-            vecRec.bodyLower = vecRec.body.toLowerCase();
+            vecRec.bodyLower = stripMarkupForSearch(vecRec.body).toLowerCase();
           }
           haySnippet = vecRec.bodyLower;
         } else {
@@ -1093,19 +1099,36 @@ export async function semanticSearchNotes(
       }
 
       for (const variants of queryTermGroups) {
-        if (variants.some(v => metaLower.includes(v))) {
+        if (variants.some(v => matchesSearchToken(metaLower, v))) {
           matchedTerms += 1.0;
-        } else if (haySnippet && variants.some(v => haySnippet.includes(v))) {
+        } else if (haySnippet && variants.some(v => matchesSearchToken(haySnippet, v))) {
           matchedTerms += 0.45;
         }
       }
 
       const matchRatio = matchedTerms / queryTermGroups.length;
-      const lexicalBoost = Math.min(0.10, matchRatio * 0.10);
-      if (hasEmb) {
-        score = Math.min(0.999, score + lexicalBoost);
-      } else if (matchedTerms > 0) {
-        score = Math.min(0.58, 0.38 + matchRatio * 0.20);
+      if (isAlnumQuery) {
+        // 영문/숫자 쿼리는 벡터 유사도 비중을 낮추고 단어 경계 키워드 매칭·제목 일치 가중치를 대폭 상향
+        if (matchedTerms > 0) {
+          const titleMatched = queryTermGroups.some(g => g.some(v => matchesSearchToken(titleLower, v)));
+          const titleExact = titleLower.trim() === cleanQueryLower;
+          const lexicalBoost = Math.min(0.42, matchRatio * 0.34 + (titleMatched ? 0.08 : 0));
+          if (hasEmb) {
+            score = Math.min(0.999, score * 0.68 + lexicalBoost + (titleExact ? 0.12 : 0));
+          } else {
+            score = Math.min(0.88, 0.48 + matchRatio * 0.28 + (titleExact ? 0.12 : 0));
+          }
+        } else if (hasEmb) {
+          // 영문 토큰이 전혀 포함되지 않은 한글 문서의 의미적 노이즈 점수 억제
+          score *= 0.65;
+        }
+      } else {
+        const lexicalBoost = Math.min(0.10, matchRatio * 0.10);
+        if (hasEmb) {
+          score = Math.min(0.999, score + lexicalBoost);
+        } else if (matchedTerms > 0) {
+          score = Math.min(0.58, 0.38 + matchRatio * 0.20);
+        }
       }
     }
 
