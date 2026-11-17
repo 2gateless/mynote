@@ -407,8 +407,11 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
             rank += 200;
           }
           for (const kw of keywords) {
-            if (matchesSearchToken(titleLower, kw)) rank += 100;
-            else if (matchesSearchToken(metaLower, kw)) rank += 50;
+            if (matchesSearchToken(titleLower, kw, true)) rank += 120;
+            else if (matchesSearchToken(titleLower, kw)) rank += 90;
+            else if (matchesSearchToken(metaLower, kw, true)) rank += 60;
+            else if (matchesSearchToken(metaLower, kw)) rank += 45;
+            else if (matchesSearchToken(entry.text, kw, true)) rank += 20;
             else rank += 10;
           }
           return { note: n, rank };

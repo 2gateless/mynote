@@ -291,21 +291,31 @@ export function isAlnumSearchToken(token: string): boolean {
 
 /**
  * 정제된 소문자 텍스트에서 검색 토큰이 매칭되는지 판별합니다.
- * - 영문/숫자 토큰(예: a4, ai, api)은 앞뒤에 다른 영문/숫자가 붙지 않은 단어 경계만 허용합니다.
- *   (예: 'a4'는 'A4 용지', 'a4용지'와 매칭되지만 'ba4c', 'base64' 등 단어 중간 일치는 제외)
+ * - 영문/숫자 2글자 이하(예: a4, ai): 앞뒤 모두 영문/숫자가 붙지 않은 완전 단어 경계만 허용
+ * - 영문/숫자 3글자 이상(예: cal, obs): 앞쪽 단어 경계만 적용하여 3글자만 쳐도 접두어 매칭으로 즉시 검색 가능
+ *   (exactBoundary=true 전달 시 길이에 관계없이 완전 단어 일치 여부를 판별하여 순위 정렬에 활용)
  */
-export function matchesSearchToken(plainTextLower: string, tokenLower: string): boolean {
+export function matchesSearchToken(
+  plainTextLower: string,
+  tokenLower: string,
+  exactBoundary = false
+): boolean {
   if (!plainTextLower || !tokenLower) return false;
   if (!isAlnumSearchToken(tokenLower)) {
     return plainTextLower.includes(tokenLower);
   }
-  let re = tokenBoundaryRegexCache.get(tokenLower);
+  const useExact = exactBoundary || tokenLower.length < 3;
+  const cacheKey = `${useExact ? 'E:' : 'P:'}${tokenLower}`;
+  let re = tokenBoundaryRegexCache.get(cacheKey);
   if (!re) {
-    re = new RegExp(`(?<![a-z0-9])${escapeRegExpStr(tokenLower)}(?![a-z0-9])`);
+    const escaped = escapeRegExpStr(tokenLower);
+    re = useExact
+      ? new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`)
+      : new RegExp(`(?<![a-z0-9])${escaped}`);
     if (tokenBoundaryRegexCache.size > 200) {
       tokenBoundaryRegexCache.clear();
     }
-    tokenBoundaryRegexCache.set(tokenLower, re);
+    tokenBoundaryRegexCache.set(cacheKey, re);
   }
   return re.test(plainTextLower);
 }
