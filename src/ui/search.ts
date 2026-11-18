@@ -26,6 +26,7 @@ export interface SearchModuleApi {
   restoreSearchScreenIfHasContent: () => boolean;
   isSearchVisibleOnHome: () => boolean;
   isSearchWrapOpen: () => boolean;
+  openSearchWrapAndFocus: () => void;
   closeSearchWrap: () => void;
   shouldSyncSearchOnCacheUpdate: () => string | null;
   syncSearchResultOnNoteUpdated: (
@@ -925,6 +926,16 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       (aiRagContainer && aiRagContainer.style.display !== 'none' && aiRagContainer.innerHTML.trim() !== '')
     ),
     isSearchWrapOpen: () => Boolean(searchWrap && searchWrap.style.display !== 'none'),
+    openSearchWrapAndFocus: () => {
+      deps.ensureSearchIndexReady();
+      deps.ensureAllNotesCache();
+      if (searchWrap) searchWrap.style.display = 'block';
+      if (searchInput) {
+        searchInput.focus();
+        searchInput.select();
+      }
+      deps.getAi().then(ai => ai.preloadVectorCache()).catch(() => {});
+    },
     closeSearchWrap: () => {
       if (searchWrap) searchWrap.style.display = 'none';
       resetSearchUI();

@@ -210,6 +210,7 @@
     <div class="list-header">
       <button class="btn-back" id="list-back">←</button>
       <span class="list-header-title" id="list-title"></span>
+      <button class="btn-sort-sm" id="btn-sort-list" title="정렬 순서 전환">최신순</button>
       <button class="btn-add-sm" id="btn-add-note">✏️ 추가</button>
     </div>
     <div class="list-tag-filter" id="list-tag-filter" style="display:none"></div>
@@ -316,34 +317,6 @@
       <button class="btn-secondary" id="del-cancel">취소</button>
       <button class="btn-primary" id="del-confirm" style="background:linear-gradient(135deg,#E07070,#C05050)">삭제</button>
     </div>
-  </div>
-</div>
-
-<!-- Share Modal -->
-<div class="modal-overlay" id="share-modal" style="display:none">
-  <div class="share-modal">
-    <div class="modal-handle"></div>
-    <h2 style="margin-bottom:4px;font-size:20px">메모 공유하기</h2>
-    <p style="font-size:13px;color:var(--text-light);margin-bottom:4px">공유할 앱을 선택하세요</p>
-    <div class="share-app-list">
-      <button class="share-app-btn" id="share-gmail">
-        <div class="share-app-icon share-gmail-bg">📧</div>
-        <span>Gmail / 이메일</span>
-      </button>
-      <button class="share-app-btn" id="share-kakao">
-        <div class="share-app-icon share-kakao-bg" style="color:#3A2929">💬</div>
-        <span>카카오톡</span>
-      </button>
-      <button class="share-app-btn" id="share-telegram">
-        <div class="share-app-icon share-telegram-bg">✈️</div>
-        <span>Telegram</span>
-      </button>
-      <button class="share-app-btn" id="share-native">
-        <div class="share-app-icon share-native-bg">📤</div>
-        <span>다른 앱으로 공유</span>
-      </button>
-    </div>
-    <button class="btn-secondary" id="share-cancel" style="margin-top:20px;width:100%">취소</button>
   </div>
 </div>
 

@@ -21,7 +21,6 @@ import { $, setDisplay, tagChipHtml, handleTagLink } from './dom';
 
 export interface ListDetailDeps {
   getAi: () => Promise<typeof import('../services/ai')>;
-  getShare: () => Promise<typeof import('../utils/share')>;
   getImage: () => Promise<typeof import('../utils/image')>;
   ensureSearchIndexReady: () => boolean;
   ensureAllNotesCache: () => void;
@@ -56,6 +55,10 @@ export interface ListDetailApi {
 }
 
 export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
+  const koCollator = new Intl.Collator('ko');
+  const LIST_SORT_STORAGE_KEY = 'mynote_list_sort';
+  let listSortMode: 'date' | 'title' = (localStorage.getItem(LIST_SORT_STORAGE_KEY) === 'title' ? 'title' : 'date');
+
   let listUnsubscribe: (() => void) | null = null;
   let listCatId: string | null = null;
   let listNotesCache: NoteIndexItem[] = [];
@@ -67,6 +70,21 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   let savedSearchScrollY = 0;
   let detailHistoryStack: { noteId: string; from: string }[] = [];
   let detailRenderToken = 0;
+
+  function syncSortButtonUI() {
+    const btn = $('btn-sort-list');
+    if (!btn) return;
+    btn.textContent = listSortMode === 'title' ? '가나다순' : '최신순';
+    btn.classList.toggle('active', listSortMode === 'title');
+    btn.title = listSortMode === 'title' ? '현재 가나다순 (클릭 시 최신순으로 전환)' : '현재 최신순 (클릭 시 가나다순으로 전환)';
+  }
+
+  function syncPinButtonUI(isPinned: boolean) {
+    const btn = $('btn-pin-detail');
+    if (!btn) return;
+    btn.classList.toggle('active', isPinned);
+    btn.title = isPinned ? '핀 고정 해제' : '핀 고정';
+  }
 
   function renderListTagFilter(catId: string, activeTag: string | null) {
     const filterBar = $('list-tag-filter');
@@ -115,7 +133,13 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       return;
     }
     const pinned = notes.filter(n => n.pinned).sort((a, b) => toMillis(b.pinnedAt) - toMillis(a.pinnedAt));
-    const unpinned = notes.filter(n => !n.pinned).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+    const unpinned = notes.filter(n => !n.pinned).sort((a, b) => {
+      if (listSortMode === 'title') {
+        const cmp = koCollator.compare((a.title || '').trim(), (b.title || '').trim());
+        if (cmp !== 0) return cmp;
+      }
+      return toMillis(b.createdAt) - toMillis(a.createdAt);
+    });
 
     content.innerHTML = [...pinned, ...unpinned].map(note => `
       <div class="note-list-item${note.pinned ? ' pinned' : ''}" data-id="${escHtml(note.id)}">
@@ -225,6 +249,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     if (listTitle) listTitle.textContent = cat.icon + ' ' + cat.name;
 
     renderListTagFilter(catId, tag);
+    syncSortButtonUI();
     showAppScreen('list');
     loadList(catId);
   }
@@ -269,9 +294,15 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     if (noteTitleTrimmed) {
       const allNotes = appState.allNotesCache || [];
       const linkPatternLower = `[[${noteTitleTrimmed.toLowerCase()}]]`;
+      let getCachedBodyFn: ((id: string) => string | undefined) | null = null;
+      try {
+        const aiMod = await deps.getAi();
+        getCachedBodyFn = aiMod.getCachedNoteBody;
+      } catch {}
       const referencingNotes = allNotes.filter(n => {
-        if (!n?.id || n.id === note.id) return false;
-        const textToSearch = `${n.body || ''} ${n.snippet || ''}`.toLowerCase();
+        if (!n?.id || n.id === note.id || n.locked) return false;
+        const cachedBody = getCachedBodyFn ? (getCachedBodyFn(n.id) || '') : '';
+        const textToSearch = `${cachedBody} ${n.snippet || ''}`.toLowerCase();
         return textToSearch.includes(linkPatternLower);
       });
       if (referencingNotes.length > 0) {
@@ -300,12 +331,19 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
     }).join('');
     const tagTargetCat = appState.currentCat && noteCats.includes(appState.currentCat) ? appState.currentCat : (noteCats[0] || note.category);
+    const createdStr = fmtDate(note.createdAt);
+    const updatedStr = fmtDate(note.updatedAt);
+    const dateDisplay = updatedStr && updatedStr !== createdStr
+      ? `${createdStr} · 수정 ${updatedStr}`
+      : createdStr;
+
+    syncPinButtonUI(!!note.pinned);
     content.innerHTML = `
       <div class="detail-meta">
         ${catBadgesHtml}
         ${getNoteTags(note).map(t => tagChipHtml(resolveCategoryForTag(note, t, tagTargetCat), t, 'detail-tag-badge')).join('')}
         ${note.locked ? '<span class="detail-lock-badge">🔒 잠금</span>' : ''}
-        <span class="detail-date">${fmtDate(note.createdAt)}</span>
+        <span class="detail-date">${dateDisplay}</span>
       </div>
       <div class="detail-body" style="background: ${note.pinned ? '#F2EFE6' : 'var(--white)'}">${parsedBody}</div>
       ${imgHtml}
@@ -567,6 +605,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
         await updateNoteWithIndex(note.id, updatePayload, oldNote);
         note.pinned = nextPinned;
         note.pinnedAt = nextPinnedAt;
+        syncPinButtonUI(nextPinned);
         const detailBodyEl = document.querySelector('.detail-body') as HTMLElement | null;
         if (detailBodyEl) {
           detailBodyEl.style.background = nextPinned ? '#F2EFE6' : 'var(--white)';
@@ -634,63 +673,27 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     };
   }
 
-  // 공유 액션
-  const btnShareDetail = $('btn-share-detail');
-  if (btnShareDetail) {
-    btnShareDetail.onclick = () => {
-      const note = appState.currentNote;
-      const title = note?.title || '제목 없음';
-      const body = note?.body || '';
-      if (navigator.share) {
-        navigator.share({ title, text: body }).catch(err => {
-          if (err.name !== 'AbortError') setDisplay('share-modal', 'flex');
-        });
-      } else {
-        setDisplay('share-modal', 'flex');
-      }
+  // 목록 정렬 전환 버튼 (최신순 ↔ 가나다순)
+  const btnSortList = $('btn-sort-list');
+  if (btnSortList) {
+    syncSortButtonUI();
+    btnSortList.onclick = () => {
+      listSortMode = listSortMode === 'date' ? 'title' : 'date';
+      try {
+        localStorage.setItem(LIST_SORT_STORAGE_KEY, listSortMode);
+      } catch {}
+      syncSortButtonUI();
+      renderList();
+      showToast(listSortMode === 'title' ? '가나다순으로 정렬했어요' : '최신순으로 정렬했어요');
     };
   }
 
-  const shareCancel = $('share-cancel');
-  if (shareCancel) shareCancel.onclick = () => setDisplay('share-modal', 'none');
-
-  const shareNativeBtn = $('share-native');
-  if (shareNativeBtn) {
-    shareNativeBtn.onclick = () => {
-      const note = appState.currentNote;
-      const title = note?.title || '제목 없음';
-      const body = note?.body || '';
-      setDisplay('share-modal', 'none');
-      if (navigator.share) {
-        navigator.share({ title, text: body }).catch(console.error);
-      } else {
-        showToast('이 브라우저에서는 공유 기능을 지원하지 않아요');
-      }
-    };
+  const delModal = $('del-modal');
+  if (delModal) {
+    delModal.addEventListener('click', e => {
+      if ((e.target as HTMLElement).id === 'del-modal') delModal.style.display = 'none';
+    });
   }
-
-  function bindShare(id: string, fn: (share: typeof import('../utils/share'), title: string, body: string) => void) {
-    const el = $(id);
-    if (!el) return;
-    el.onclick = async () => {
-      const share = await deps.getShare();
-      const { title, body } = share.getShareText(appState.currentNote);
-      setDisplay('share-modal', 'none');
-      fn(share, title, body);
-    };
-  }
-  bindShare('share-gmail', (share, t, b) => share.shareViaEmail(t, b));
-  bindShare('share-kakao', (share, t, b) => share.shareViaKakao(t, b, showToast));
-  bindShare('share-telegram', (share, t, b) => share.shareViaTelegram(t, b));
-
-  ['del-modal', 'share-modal'].forEach(id => {
-    const modal = $(id);
-    if (modal) {
-      modal.addEventListener('click', e => {
-        if ((e.target as HTMLElement).id === id) modal.style.display = 'none';
-      });
-    }
-  });
 
   return {
     openList,

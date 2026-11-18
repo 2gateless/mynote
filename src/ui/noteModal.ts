@@ -18,6 +18,7 @@ import { Note, NoteIndexItem } from '../types';
 import { $, setDisplay, insertAtCursor } from './dom';
 
 export const NOTE_DRAFT_KEY = 'mynote_new_note_draft_v1';
+export const NOTE_EDIT_DRAFT_PREFIX = 'mynote_edit_draft_v1_';
 
 export interface NoteModalDeps {
   getAi: () => Promise<typeof import('../services/ai')>;
@@ -244,23 +245,41 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     return false;
   }
 
-  function clearDraft() {
+  function getActiveDraftKey(noteId?: string | null): string {
+    const targetId = noteId !== undefined ? noteId : appState.editingNoteId;
+    return targetId ? `${NOTE_EDIT_DRAFT_PREFIX}${targetId}` : NOTE_DRAFT_KEY;
+  }
+
+  function clearDraft(noteId?: string | null) {
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     try {
-      localStorage.removeItem(NOTE_DRAFT_KEY);
+      localStorage.removeItem(getActiveDraftKey(noteId));
     } catch {}
   }
 
   function scheduleSaveDraft() {
-    if (appState.editingNoteId) return;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     draftSaveTimer = setTimeout(() => {
       try {
+        const key = getActiveDraftKey();
         const snap = takeCurrentFormSnapshot();
-        if (snap.title || snap.body || snap.keywords) {
-          localStorage.setItem(NOTE_DRAFT_KEY, JSON.stringify(snap));
+        // 잠금 메모는 보안을 위해 로컬 임시저장에 남기지 않음
+        if (snap.locked) {
+          localStorage.removeItem(key);
+          return;
+        }
+        if (appState.editingNoteId) {
+          if (isNoteFormDirty()) {
+            localStorage.setItem(key, JSON.stringify(snap));
+          } else {
+            localStorage.removeItem(key);
+          }
         } else {
-          localStorage.removeItem(NOTE_DRAFT_KEY);
+          if (snap.title || snap.body || snap.keywords) {
+            localStorage.setItem(key, JSON.stringify(snap));
+          } else {
+            localStorage.removeItem(key);
+          }
         }
       } catch {}
     }, 400);
@@ -384,6 +403,31 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     setPinToggleUI(!!note.pinned);
     setLockToggleUI(!!note.locked);
     initialNoteFormSnapshot = takeCurrentFormSnapshot();
+
+    // 기존 메모 수정 중 비정상 종료된 임시저장본이 있다면 복구 제안
+    if (note.id && !note.locked) {
+      try {
+        const rawEditDraft = localStorage.getItem(getActiveDraftKey(note.id));
+        if (rawEditDraft) {
+          const draft = JSON.parse(rawEditDraft);
+          if (draft && (draft.title !== undefined || draft.body !== undefined)) {
+            if (confirm('이 메모의 저장되지 않은 수정 내용이 있습니다. 복구할까요?')) {
+              fillNoteForm(draft.title || '', draft.body || '', draft.keywords || '', '메모 수정 (임시저장 복구)');
+              const draftCats = Array.isArray(draft.categories) && draft.categories.length > 0 ? draft.categories : editCats;
+              renderCategorySelect(draftCats);
+              renderTagOptions(draftCats, Array.isArray(draft.tags) ? draft.tags : getNoteTags(note));
+              setPinToggleUI(!!draft.pinned);
+              setLockToggleUI(!!draft.locked);
+            } else {
+              clearDraft(note.id);
+            }
+          }
+        }
+      } catch {
+        clearDraft(note.id);
+      }
+    }
+
     setDisplay('note-modal', 'flex');
   }
 

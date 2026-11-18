@@ -110,9 +110,9 @@ function toIndexItem(id: string, data: any, shardCategory?: string): NoteIndexIt
     categories: cats.length > 0 ? cats : (primaryCat ? [primaryCat] : []),
     tag: tags[0] || '',
     tags,
-    // 잠금 메모는 본문 미리보기를 인덱스(및 이를 캐싱하는 localStorage/검색 텍스트)에 남기지 않음
+    // 잠금 메모는 본문 미리보기를 인덱스(및 이를 캐싱하는 로컬 DB/검색 텍스트)에 남기지 않음
+    // Firestore 단일 문서 1MiB 제한을 지키기 위해 전체 본문(body)은 인덱스에 저장하지 않음
     snippet: data.locked ? '' : (data.body || '').substring(0, SNIPPET_LEN),
-    body: !data.locked && typeof data.body === 'string' ? data.body : undefined,
     keywords: data.keywords || '',
     createdAt: data.createdAt || null,
     pinned: !!data.pinned,

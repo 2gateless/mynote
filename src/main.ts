@@ -23,19 +23,13 @@ import { saveNotesToLocalDb, loadNotesFromLocalDb, clearNotesLocalDb } from './s
 import { $, setDisplay, renderUserBar, renderFoldersList } from './ui/dom';
 import { initSearchModule, SearchModuleApi } from './ui/search';
 import { initListDetailModule, ListDetailApi } from './ui/listDetail';
-import { initNoteModalModule, NoteModalApi, NOTE_DRAFT_KEY } from './ui/noteModal';
+import { initNoteModalModule, NoteModalApi, NOTE_DRAFT_KEY, NOTE_EDIT_DRAFT_PREFIX } from './ui/noteModal';
 
 // 동적 임포트 지연 로더
 let aiModulePromise: Promise<typeof import('./services/ai')> | null = null;
 function getAi() {
   if (!aiModulePromise) aiModulePromise = import('./services/ai');
   return aiModulePromise;
-}
-
-let shareModulePromise: Promise<typeof import('./utils/share')> | null = null;
-function getShare() {
-  if (!shareModulePromise) shareModulePromise = import('./utils/share');
-  return shareModulePromise;
 }
 
 let imageModulePromise: Promise<typeof import('./utils/image')> | null = null;
@@ -307,6 +301,9 @@ function clearAuthCache() {
     localStorage.removeItem('mynote_counts_cache');
     localStorage.removeItem('mynote_search_cache');
     localStorage.removeItem(NOTE_DRAFT_KEY);
+    Object.keys(localStorage).forEach(k => {
+      if (k.startsWith(NOTE_EDIT_DRAFT_PREFIX)) localStorage.removeItem(k);
+    });
   } catch {}
   document.documentElement.classList.remove('has-cached-auth');
   clearNotesLocalDb().catch(() => {});
@@ -325,7 +322,6 @@ function stopAllSubscriptions() {
   searchApi?.closeAiConfigModal();
   noteModalApi?.closeNoteLinkModal();
   setDisplay('del-modal', 'none');
-  setDisplay('share-modal', 'none');
   appState.closeImageViewer?.();
 }
 
@@ -345,7 +341,6 @@ searchApi = initSearchModule({
 
 listDetailApi = initListDetailModule({
   getAi,
-  getShare,
   getImage,
   ensureSearchIndexReady,
   ensureAllNotesCache,
@@ -592,7 +587,7 @@ initPwaNavigation((screen) => {
     history.pushState(null, '', location.href);
     return;
   }
-  if (screen === 'del-modal' || screen === 'share-modal') {
+  if (screen === 'del-modal') {
     setDisplay(screen, 'none');
     history.pushState(null, '', location.href);
     return;
@@ -642,5 +637,80 @@ window.addEventListener('pageshow', handleForegroundResume);
 window.addEventListener('online', () => {
   if (appState.currentUser && currentScreen() === 'list' && appState.currentCat) {
     listDetailApi.loadList(appState.currentCat, true);
+  }
+});
+
+// ── PC 사용자를 위한 전역 키보드 단축키 (Ctrl+S 저장, Ctrl+K 또는 / 검색, Esc 닫기/뒤로가기)
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (!appState.currentUser) return;
+  const screen = currentScreen();
+  const target = e.target as HTMLElement | null;
+  const isTypingInInput = Boolean(
+    target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+  );
+
+  // Ctrl+S / Cmd+S: 메모 작성·수정 모달에서 즉시 저장
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    if (screen === 'modal') {
+      e.preventDefault();
+      const saveBtn = $('btn-save') as HTMLButtonElement | null;
+      if (saveBtn && !saveBtn.disabled) saveBtn.click();
+    }
+    return;
+  }
+
+  // Ctrl+K / Cmd+K: 검색창 즉시 열기 및 포커스
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    if (screen === 'home' || screen === 'list' || screen === 'detail') {
+      e.preventDefault();
+      if (screen !== 'home') {
+        listDetailApi.stopListSubscription();
+        showAppScreen('home');
+      }
+      searchApi.openSearchWrapAndFocus();
+    }
+    return;
+  }
+
+  // '/' 키: 입력 중이 아닐 때 홈·목록 화면에서 검색창 열기
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingInInput) {
+    if (screen === 'home' || screen === 'list') {
+      e.preventDefault();
+      if (screen === 'list') {
+        listDetailApi.stopListSubscription();
+        showAppScreen('home');
+      }
+      searchApi.openSearchWrapAndFocus();
+    }
+    return;
+  }
+
+  // Esc: 모달 닫기 또는 상세 화면 뒤로가기
+  if (e.key === 'Escape') {
+    if (screen === 'ai-config-modal') {
+      e.preventDefault();
+      searchApi.closeAiConfigModal();
+    } else if (screen === 'pin-modal') {
+      e.preventDefault();
+      closePinModalByBack();
+    } else if (screen === 'img-viewer') {
+      e.preventDefault();
+      appState.closeImageViewer?.();
+    } else if (screen === 'note-link-modal') {
+      e.preventDefault();
+      noteModalApi.closeNoteLinkModal();
+    } else if (screen === 'modal') {
+      e.preventDefault();
+      noteModalApi.requestCloseModal(false);
+    } else if (screen === 'del-modal') {
+      e.preventDefault();
+      setDisplay('del-modal', 'none');
+    } else if (screen === 'detail') {
+      e.preventDefault();
+      listDetailApi.goBackFromDetail();
+    } else if (screen === 'home' && searchApi.isSearchWrapOpen()) {
+      e.preventDefault();
+      searchApi.closeSearchWrap();
+    }
   }
 });

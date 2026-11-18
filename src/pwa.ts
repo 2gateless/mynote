@@ -12,7 +12,6 @@ export function currentScreen(): string {
   if (isShown('note-link-modal')) return 'note-link-modal';
   if (isShown('note-modal')) return 'modal';
   if (isShown('del-modal')) return 'del-modal';
-  if (isShown('share-modal')) return 'share-modal';
   const active = document.querySelector('.screen.active');
   return active ? active.id.replace('screen-', '') : 'home';
 }
