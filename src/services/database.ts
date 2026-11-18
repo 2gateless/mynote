@@ -112,6 +112,7 @@ function toIndexItem(id: string, data: any, shardCategory?: string): NoteIndexIt
     tags,
     // 잠금 메모는 본문 미리보기를 인덱스(및 이를 캐싱하는 localStorage/검색 텍스트)에 남기지 않음
     snippet: data.locked ? '' : (data.body || '').substring(0, SNIPPET_LEN),
+    body: !data.locked && typeof data.body === 'string' ? data.body : undefined,
     keywords: data.keywords || '',
     createdAt: data.createdAt || null,
     pinned: !!data.pinned,

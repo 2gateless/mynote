@@ -48,6 +48,32 @@ function isMobileImeTrailingDuplicate(newRaw: string, prevRaw: string, inputType
   return newRaw === prevRaw + lastChar;
 }
 
+/**
+ * 검색 결과의 제목 또는 미리보기 텍스트에서 검색 키워드를 <mark class="search-hl">로 하이라이트
+ * XSS 및 HTML 태그 깨짐 방지를 위해 원본 텍스트를 정규식으로 분할 후 안전하게 이스케이프 결합
+ */
+function highlightKeywords(rawText: string, keywords: string[]): string {
+  if (!rawText) return '';
+  const validTokens = Array.from(new Set(keywords.map(k => k.trim()).filter(k => k.length > 0)));
+  if (validTokens.length === 0) return escHtml(rawText);
+
+  const escapedTokens = validTokens.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  escapedTokens.sort((a, b) => b.length - a.length);
+
+  const regex = new RegExp(`(${escapedTokens.join('|')})`, 'gi');
+  const parts = rawText.split(regex);
+
+  return parts
+    .map(part => {
+      if (!part) return '';
+      if (validTokens.some(t => t.toLowerCase() === part.toLowerCase())) {
+        return `<mark class="search-hl">${escHtml(part)}</mark>`;
+      }
+      return escHtml(part);
+    })
+    .join('');
+}
+
 export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
   const searchInput = $('search-input') as HTMLInputElement | null;
   const searchClear = $('search-clear') as HTMLElement | null;
@@ -246,6 +272,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
       </div>`;
 
+      const searchTokens = queryText.toLowerCase().split(/\s+/).filter(Boolean);
       const items = results.map(({ note, score, hasEmbedding }) => {
         const noteCats = getNoteCategories(note);
         const catBadgesHtml = noteCats.map(cid => {
@@ -259,11 +286,18 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
           .replace(/\s+/g, ' ')
           .trim()
           .substring(0, 120);
+        const titleHtml = note.locked
+          ? '🔒 ' + escHtml(note.title || '제목 없음')
+          : highlightKeywords(note.title || '제목 없음', searchTokens);
+        const snippetHtml = note.locked
+          ? '🔒 잠긴 메모입니다'
+          : highlightKeywords(snippet, searchTokens);
+
         return `<div class="search-result-item" data-id="${escHtml(note.id || '')}" data-cat="${escHtml(note.category)}">
-          <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}${simBadge}</div>
+          <div class="search-result-title">${titleHtml}${simBadge}</div>
           ${catBadgesHtml}
           ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
-          <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml(snippet)}</div>
+          <div class="search-result-body">${snippetHtml}</div>
         </div>`;
       }).join('');
 
@@ -447,11 +481,22 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
           const c = CATEGORIES[cid];
           return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
         }).join('');
+        const titleHtml = note.locked
+          ? '🔒 ' + escHtml(note.title || '제목 없음')
+          : highlightKeywords(note.title || '제목 없음', keywords);
+        const rawSnippet = (note.snippet || '')
+          .replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const snippetHtml = note.locked
+          ? '🔒 잠긴 메모입니다'
+          : highlightKeywords(rawSnippet, keywords);
+
         return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
-          <div class="search-result-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
+          <div class="search-result-title">${titleHtml}</div>
           ${catBadgesHtml}
           ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
-          <div class="search-result-body">${note.locked ? '🔒 잠긴 메모입니다' : escHtml((note.snippet || '').replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ').replace(/\s+/g, ' ').trim())}</div>
+          <div class="search-result-body">${snippetHtml}</div>
         </div>`;
       }).join('');
       searchResults.innerHTML = header + items;

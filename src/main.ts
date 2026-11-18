@@ -279,6 +279,12 @@ function loadAllCounts() {
         categoryCount._total = lastCounts._total;
       }
       ensureAllNotesCache();
+    } else if (
+      Array.isArray(appState.allNotesCache) &&
+      appState.allNotesCache.length !== categoryCount._total
+    ) {
+      // 다른 기기에서 메모가 추가되거나 삭제되어 총 개수가 달라진 경우 즉시 동기화
+      ensureAllNotesCache();
     }
 
     lastCounts = categoryCount;
@@ -356,8 +362,40 @@ listDetailApi = initListDetailModule({
     }
     searchApi.syncSearchResultOnNoteDeleted(noteId, detailFrom);
   },
+  onCacheNoteUpdated: (noteId, updated, detailFrom) => {
+    handleCacheNoteUpdated(noteId, updated, detailFrom);
+  },
   onInvalidateEmbeddingPipeline: (noteId) => noteModalApi.invalidateEmbeddingPipeline(noteId),
 });
+
+function handleCacheNoteUpdated(
+  noteId: string,
+  updated: Partial<NoteIndexItem> & { body?: string; locked?: boolean; title?: string },
+  detailFrom: string
+) {
+  if (Array.isArray(appState.allNotesCache)) {
+    const idx = appState.allNotesCache.findIndex(n => n.id === noteId);
+    if (idx !== -1) {
+      const prev = appState.allNotesCache[idx];
+      appState.allNotesCache[idx] = {
+        ...prev,
+        title: updated.title ?? prev.title,
+        category: updated.category ?? prev.category,
+        categories: updated.categories ?? prev.categories,
+        tag: updated.tag ?? prev.tag,
+        tags: updated.tags ?? prev.tags,
+        keywords: updated.keywords ?? prev.keywords,
+        pinned: updated.pinned ?? prev.pinned,
+        locked: updated.locked ?? prev.locked,
+        snippet: updated.locked ? '' : (typeof updated.body === 'string' ? updated.body.substring(0, 200) : prev.snippet),
+      };
+      isSearchIndexDirty = true;
+      isNotesByTitleDirty = true;
+      appState.sortedNotesByTitle = null;
+    }
+  }
+  searchApi.syncSearchResultOnNoteUpdated(noteId, updated, detailFrom);
+}
 
 noteModalApi = initNoteModalModule({
   getAi,
@@ -369,28 +407,7 @@ noteModalApi = initNoteModalModule({
   openDetail: (note, from) => listDetailApi.openDetail(note, from),
   getDetailFrom: () => listDetailApi.getDetailFrom(),
   onCacheNoteUpdated: (noteId, updated, detailFrom) => {
-    if (Array.isArray(appState.allNotesCache)) {
-      const idx = appState.allNotesCache.findIndex(n => n.id === noteId);
-      if (idx !== -1) {
-        const prev = appState.allNotesCache[idx];
-        appState.allNotesCache[idx] = {
-          ...prev,
-          title: updated.title ?? prev.title,
-          category: updated.category ?? prev.category,
-          categories: updated.categories ?? prev.categories,
-          tag: updated.tag ?? prev.tag,
-          tags: updated.tags ?? prev.tags,
-          keywords: updated.keywords ?? prev.keywords,
-          pinned: updated.pinned ?? prev.pinned,
-          locked: updated.locked ?? prev.locked,
-          snippet: updated.locked ? '' : (typeof updated.body === 'string' ? updated.body.substring(0, 200) : prev.snippet),
-        };
-        isSearchIndexDirty = true;
-        isNotesByTitleDirty = true;
-        appState.sortedNotesByTitle = null;
-      }
-    }
-    searchApi.syncSearchResultOnNoteUpdated(noteId, updated, detailFrom);
+    handleCacheNoteUpdated(noteId, updated, detailFrom);
   },
 });
 
@@ -485,11 +502,11 @@ initAuthListener(
       bgAllNotesTimer = setTimeout(() => {
         bgAllNotesTimer = null;
         if ('requestIdleCallback' in window) {
-          (window as any).requestIdleCallback(() => ensureAllNotesCache(), { timeout: 4000 });
+          (window as any).requestIdleCallback(() => ensureAllNotesCache(), { timeout: 1500 });
         } else {
           ensureAllNotesCache();
         }
-      }, 3000);
+      }, 600);
     }
   },
   (email) => {
@@ -611,6 +628,8 @@ registerServiceWorker();
 // ── 모바일 백그라운드 복귀 & 네트워크 재연결 리스너
 const handleForegroundResume = () => {
   if (document.visibilityState === 'visible' && appState.currentUser) {
+    // 폰 등 다른 기기에서 추가된 메모를 즉시 반영할 수 있도록 인덱스 동기화 상태 점검
+    ensureAllNotesCache();
     if (currentScreen() === 'list' && appState.currentCat) {
       if (listDetailApi.getListNotesCache().length === 0 || !listDetailApi.hasActiveListSubscription()) {
         listDetailApi.loadList(appState.currentCat, true);

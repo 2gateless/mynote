@@ -665,6 +665,25 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
           oldNote
         });
       } else {
+        // 빠른 단일 트랜잭션 최적화: 자격 증명이 있고 본문이 짧다면 650ms 이내에 임베딩을 선행 시도
+        let precomputedEmbedding: number[] | null = null;
+        let precomputedModel: string | null = null;
+        let precomputedUpdatedAt: Timestamp | null = null;
+
+        try {
+          const ai = await deps.getAi();
+          if (ai.hasAiCredentials()) {
+            const prePromise = ai.tryGenerateNoteEmbedding(candidateForEmbedding);
+            const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 650));
+            const emb = await Promise.race([prePromise, timeoutPromise]);
+            if (emb) {
+              precomputedEmbedding = emb;
+              precomputedModel = ai.EMBEDDING_VERSION;
+              precomputedUpdatedAt = Timestamp.now();
+            }
+          }
+        } catch {}
+
         const newNotePayload: Partial<Note> = {
           category,
           categories,
@@ -677,11 +696,25 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
           pinnedAt,
           locked,
           keywords,
-          embedding: null,
-          embeddingModel: null,
-          embeddingUpdatedAt: null
+          embedding: precomputedEmbedding,
+          embeddingModel: precomputedModel,
+          embeddingUpdatedAt: precomputedUpdatedAt
         };
         const newNoteId = await createNoteWithIndex(newNotePayload);
+
+        if (precomputedEmbedding && precomputedModel && precomputedUpdatedAt) {
+          try {
+            const ai = await deps.getAi();
+            ai.upsertVectorNoteCache({
+              id: newNoteId,
+              uid: appState.currentUser?.uid || '',
+              ...candidateForEmbedding,
+              embedding: precomputedEmbedding,
+              embeddingModel: precomputedModel,
+              embeddingUpdatedAt: precomputedUpdatedAt
+            });
+          } catch {}
+        }
 
         if (unusedSessionInlinePaths.length) {
           deps.getImage().then(m => m.deleteImagesFromStorage(unusedSessionInlinePaths)).catch(console.error);
@@ -693,12 +726,15 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
         }
         showToast(pinned ? '메모가 저장되었어요 📌' : '메모가 저장되었어요 ✅');
 
-        runBackgroundEmbeddingPipeline({
-          noteId: newNoteId,
-          uid: appState.currentUser?.uid || '',
-          candidate: candidateForEmbedding,
-          isEdit: false
-        });
+        // 선행 임베딩이 성공했다면 중복 Firestore 트랜잭션을 생략
+        if (!precomputedEmbedding) {
+          runBackgroundEmbeddingPipeline({
+            noteId: newNoteId,
+            uid: appState.currentUser?.uid || '',
+            candidate: candidateForEmbedding,
+            isEdit: false
+          });
+        }
       }
       sessionUploadedInlineImages = [];
       requestCloseModal(true);

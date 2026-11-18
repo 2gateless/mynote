@@ -1,6 +1,7 @@
 import {
   collection,
   doc,
+  documentId,
   getDoc,
   getDocs,
   query,
@@ -99,7 +100,13 @@ function toVectorRecord(id: string, uid: string, data: any): LocalVectorRecord |
   };
 }
 
-// 세션 인메모리 캐시 (IndexedDB와 1:1 동기화)
+export function getCachedNoteBody(noteId: string): string | undefined {
+  if (memoryVectorMap) {
+    const rec = memoryVectorMap.get(noteId);
+    if (rec && typeof rec.body === 'string') return rec.body;
+  }
+  return undefined;
+}
 let memoryVectorMap: Map<string, LocalVectorRecord> | null = null;
 let memoryVectorUid: string | null = null;
 let idbPromise: Promise<IDBDatabase | null> | null = null;
@@ -909,25 +916,38 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
 
   if (staleNoteIds.length > 0) {
     const fetchedRecords: LocalVectorRecord[] = [];
-    // 과도한 동시 요청 방지를 위해 10개 단위로 나누어 조회
-    const FETCH_CONCURRENCY = 10;
+    // Firestore where(documentId(), 'in', chunk)로 최대 30개 단위 일괄 배치 조회하여 RTT 대폭 절감
+    const FETCH_CONCURRENCY = 30;
     for (let i = 0; i < staleNoteIds.length; i += FETCH_CONCURRENCY) {
       const chunk = staleNoteIds.slice(i, i + FETCH_CONCURRENCY);
-      await Promise.all(
-        chunk.map(async (noteId) => {
-          try {
-            const snap = await getDoc(doc(db, 'notes', noteId));
-            if (!snap.exists()) return;
-            const rec = toVectorRecord(snap.id, uid, snap.data());
-            if (rec) {
-              memoryVectorMap!.set(snap.id, rec);
-              fetchedRecords.push(rec);
-            }
-          } catch (e) {
-            console.warn(`벡터 증분 동기화 실패 (${noteId}):`, e);
+      try {
+        const qDocs = query(collection(db, 'notes'), where(documentId(), 'in', chunk));
+        const snap = await getDocs(qDocs);
+        snap.docs.forEach(d => {
+          const rec = toVectorRecord(d.id, uid, d.data());
+          if (rec) {
+            memoryVectorMap!.set(d.id, rec);
+            fetchedRecords.push(rec);
           }
-        })
-      );
+        });
+      } catch (e) {
+        console.warn('배치 벡터 증분 동기화 실패, 단건으로 폴백:', e);
+        await Promise.all(
+          chunk.map(async (noteId) => {
+            try {
+              const s = await getDoc(doc(db, 'notes', noteId));
+              if (!s.exists()) return;
+              const r = toVectorRecord(s.id, uid, s.data());
+              if (r) {
+                memoryVectorMap!.set(s.id, r);
+                fetchedRecords.push(r);
+              }
+            } catch (singleErr) {
+              console.warn(`벡터 단건 동기화 실패 (${noteId}):`, singleErr);
+            }
+          })
+        );
+      }
     }
     if (fetchedRecords.length > 0) {
       await putVectorsToIdb(fetchedRecords);
@@ -1733,19 +1753,26 @@ export async function backfillMissingEmbeddings(
       .filter(item => item.embeddingModel !== EMBEDDING_VERSION || !vectorMap.has(item.id))
       .map(item => item.id);
 
-    const FETCH_CONCURRENCY = 10;
+    const FETCH_CONCURRENCY = 30;
     for (let i = 0; i < missingIds.length; i += FETCH_CONCURRENCY) {
       const chunk = missingIds.slice(i, i + FETCH_CONCURRENCY);
-      const docs = await Promise.all(
-        chunk.map(async (id) => {
-          try {
-            const snap = await getDoc(doc(db, 'notes', id));
-            return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) } as Note) : null;
-          } catch {
-            return null;
-          }
-        })
-      );
+      let docs: (Note | null)[] = [];
+      try {
+        const qDocs = query(collection(db, 'notes'), where(documentId(), 'in', chunk));
+        const snap = await getDocs(qDocs);
+        docs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Note));
+      } catch (e) {
+        docs = await Promise.all(
+          chunk.map(async (id) => {
+            try {
+              const snap = await getDoc(doc(db, 'notes', id));
+              return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) } as Note) : null;
+            } catch {
+              return null;
+            }
+          })
+        );
+      }
       for (const n of docs) {
         if (!n) continue;
         if (!isCurrentEmbedding(n.embeddingModel, n.embedding)) {

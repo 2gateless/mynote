@@ -1,3 +1,4 @@
+import { Timestamp } from 'firebase/firestore';
 import { appState } from '../state';
 import {
   CATEGORIES,
@@ -7,7 +8,8 @@ import {
   subscribeCategoryIndex,
   rebuildCategoryIndex,
   getSingleNote,
-  deleteNoteWithIndex
+  deleteNoteWithIndex,
+  updateNoteWithIndex
 } from '../services/database';
 import { escHtml, fmtDate, toMillis, parseMarkdownBody } from '../utils/formatter';
 import { collectImagePaths } from '../utils/imagePaths';
@@ -28,6 +30,7 @@ export interface ListDetailDeps {
   restoreSearchScreenIfHasContent: () => boolean;
   resetSearchUI: () => void;
   onCacheNoteDeleted: (noteId: string, detailFrom: string) => void;
+  onCacheNoteUpdated?: (noteId: string, updated: Partial<NoteIndexItem> & { body?: string; locked?: boolean; title?: string }, detailFrom: string) => void;
   onInvalidateEmbeddingPipeline: (noteId: string) => void;
 }
 
@@ -260,6 +263,37 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     const parsedBody = await parseMarkdownBody(note.body || '');
     if (token !== detailRenderToken) return;
 
+    // ⑤ 역방향 링크(Backlinks): 현재 메모 제목을 [[제목]] 형식으로 인용한 다른 메모 탐색
+    let backlinksHtml = '';
+    const noteTitleTrimmed = (note.title || '').trim();
+    if (noteTitleTrimmed) {
+      const allNotes = appState.allNotesCache || [];
+      const linkPatternLower = `[[${noteTitleTrimmed.toLowerCase()}]]`;
+      const referencingNotes = allNotes.filter(n => {
+        if (!n?.id || n.id === note.id) return false;
+        const textToSearch = `${n.body || ''} ${n.snippet || ''}`.toLowerCase();
+        return textToSearch.includes(linkPatternLower);
+      });
+      if (referencingNotes.length > 0) {
+        backlinksHtml = `
+          <div class="detail-backlinks-section" style="margin-top:24px;padding-top:16px;border-top:1.5px dashed var(--sky-mid);">
+            <div style="font-size:12.5px;font-weight:700;color:var(--sky-deep);margin-bottom:8px;display:flex;align-items:center;gap:5px;">
+              <span>🔗</span><span>이 메모를 참조하는 메모 (${referencingNotes.length})</span>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              ${referencingNotes.map(rn => {
+                const cat = CATEGORIES[rn.category];
+                const icon = cat ? cat.icon : '📝';
+                return `<button type="button" class="backlink-chip" data-backlink-id="${escHtml(rn.id)}" style="display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:8px;border:1px solid var(--sky-dark);background:var(--sky-pale);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">
+                  <span>${icon}</span><span>${escHtml(rn.title || '제목 없음')}</span>
+                </button>`;
+              }).join('')}
+            </div>
+          </div>
+        `;
+      }
+    }
+
     const noteCats = getNoteCategories(note);
     const catBadgesHtml = noteCats.map(cid => {
       const c = CATEGORIES[cid];
@@ -274,7 +308,8 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
         <span class="detail-date">${fmtDate(note.createdAt)}</span>
       </div>
       <div class="detail-body" style="background: ${note.pinned ? '#F2EFE6' : 'var(--white)'}">${parsedBody}</div>
-      ${imgHtml}`;
+      ${imgHtml}
+      ${backlinksHtml}`;
     showAppScreen('detail');
   }
 
@@ -288,10 +323,64 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       verified = true;
     }
     const reqToken = ++detailRenderToken;
+
+    // Stale-While-Revalidate: 로컬 캐시(allNotesCache 스니펫 또는 IndexedDB 벡터 본문 캐시)에 본문이 있다면 즉시 1차 표시
+    let fastRendered = false;
+    const cachedItem = (appState.allNotesCache || []).find(n => n.id === noteId);
+    if (cachedItem && !cachedItem.locked) {
+      let cachedBody: string | undefined = undefined;
+      // snippet이 200자 미만이면 snippet이 곧 전문
+      if ((cachedItem.snippet || '').length > 0 && (cachedItem.snippet || '').length < 200) {
+        cachedBody = cachedItem.snippet;
+      }
+      if (!cachedBody) {
+        try {
+          const aiMod = await deps.getAi();
+          cachedBody = aiMod.getCachedNoteBody(noteId);
+        } catch {}
+      }
+      if (cachedBody !== undefined && reqToken === detailRenderToken) {
+        const optimisticNote: Note = {
+          id: cachedItem.id,
+          uid: appState.currentUser?.uid || '',
+          title: cachedItem.title || '',
+          category: cachedItem.category || '',
+          categories: getNoteCategories(cachedItem),
+          tag: cachedItem.tag || '',
+          tags: getNoteTags(cachedItem),
+          body: cachedBody,
+          keywords: cachedItem.keywords || '',
+          locked: false,
+          pinned: !!cachedItem.pinned,
+          pinnedAt: cachedItem.pinnedAt || undefined,
+          createdAt: cachedItem.createdAt || undefined,
+          embeddingUpdatedAt: cachedItem.embeddingUpdatedAt instanceof Timestamp ? cachedItem.embeddingUpdatedAt : undefined,
+          embeddingModel: cachedItem.embeddingModel || undefined,
+        };
+        if (pushCurrentToHistory && prevNoteId && prevNoteId !== noteId) {
+          detailHistoryStack.push({ noteId: prevNoteId, from: prevFrom });
+          pushCurrentToHistory = false; // 중복 push 방지
+        }
+        const noteCats = getNoteCategories(optimisticNote);
+        if (!appState.currentCat || !noteCats.includes(appState.currentCat)) {
+          appState.currentCat = noteCats[0] || optimisticNote.category;
+        }
+        const listTitle = $('list-title');
+        if (listTitle && appState.currentCat) {
+          listTitle.textContent = (CATEGORIES[appState.currentCat]?.icon || '') + ' ' + (CATEGORIES[appState.currentCat]?.name || '');
+        }
+        openDetail(optimisticNote, from, reqToken);
+        fastRendered = true;
+      }
+    }
+
     try {
       const note = await getSingleNote(noteId);
       if (reqToken !== detailRenderToken) return;
-      if (!note) { showToast('해당 메모를 찾을 수 없어요'); return; }
+      if (!note) {
+        if (!fastRendered) showToast('해당 메모를 찾을 수 없어요');
+        return;
+      }
       if (note.locked && !verified) {
         const ok = await verifyLockPinForNote();
         if (!ok || reqToken !== detailRenderToken) return;
@@ -309,7 +398,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       }
       await openDetail(note, from, reqToken);
     } catch {
-      if (reqToken === detailRenderToken) {
+      if (reqToken === detailRenderToken && !fastRendered) {
         showToast('메모를 불러오는 중 오류가 발생했어요');
       }
     }
@@ -379,6 +468,11 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   if (detailContentEl) {
     detailContentEl.addEventListener('click', e => {
       if (handleTagLink(e, openList)) return;
+      const backlinkBtn = (e.target as HTMLElement).closest('[data-backlink-id]') as HTMLElement | null;
+      if (backlinkBtn?.dataset.backlinkId) {
+        openNoteById(backlinkBtn.dataset.backlinkId, detailFrom || 'list', true);
+        return;
+      }
       const link = (e.target as HTMLElement).closest('.note-link[data-note-id]') as HTMLElement | null;
       if (link) appState.handleNoteLinkClick?.(link);
     });
@@ -386,6 +480,64 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
 
   const detailBack = $('detail-back');
   if (detailBack) detailBack.onclick = () => goBackFromDetail();
+
+  // ⑥ 복사 및 빠른 핀 토글
+  const btnCopyDetail = $('btn-copy-detail');
+  if (btnCopyDetail) {
+    btnCopyDetail.onclick = async () => {
+      const note = appState.currentNote;
+      if (!note) return;
+      const textToCopy = `${note.title || ''}\n\n${note.body || ''}`.trim();
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(textToCopy);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = textToCopy;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        showToast('메모 내용이 클립보드에 복사되었어요 📋');
+      } catch {
+        showToast('클립보드 복사에 실패했어요');
+      }
+    };
+  }
+
+  const btnPinDetail = $('btn-pin-detail');
+  if (btnPinDetail) {
+    btnPinDetail.onclick = async () => {
+      const note = appState.currentNote;
+      if (!note?.id) return;
+      const oldNote = { ...note };
+      const nextPinned = !note.pinned;
+      const nextPinnedAt = nextPinned ? (note.pinnedAt || Timestamp.now()) : null;
+      const updatePayload: Partial<Note> = {
+        pinned: nextPinned,
+        pinnedAt: nextPinnedAt
+      };
+      btnPinDetail.style.pointerEvents = 'none';
+      try {
+        await updateNoteWithIndex(note.id, updatePayload, oldNote);
+        note.pinned = nextPinned;
+        note.pinnedAt = nextPinnedAt;
+        const detailBodyEl = document.querySelector('.detail-body') as HTMLElement | null;
+        if (detailBodyEl) {
+          detailBodyEl.style.background = nextPinned ? '#F2EFE6' : 'var(--white)';
+        }
+        deps.onCacheNoteUpdated?.(note.id, updatePayload, detailFrom);
+        showToast(nextPinned ? '상단에 핀 고정되었어요 📌' : '핀 고정이 해제되었어요');
+      } catch (e: any) {
+        showToast('핀 설정 변경 실패: ' + e.message);
+      } finally {
+        btnPinDetail.style.pointerEvents = '';
+      }
+    };
+  }
 
   const btnEditDetail = $('btn-edit-detail');
   if (btnEditDetail) {
