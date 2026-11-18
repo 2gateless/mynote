@@ -419,12 +419,6 @@
     cursor: pointer; transition: all 0.15s; white-space: nowrap;
   }
   .btn-copy-detail:hover, .btn-pin-detail:hover { background: var(--sky-light); border-color: var(--sky); }
-  .btn-share-detail {
-    padding: 7px 11px; border-radius: 10px; border: 1.5px solid #C8E6C9;
-    background: #E8F5E9; color: #2E7D32; font-size: 13px; font-weight: 600;
-    cursor: pointer; transition: all 0.15s; white-space: nowrap;
-  }
-  .btn-share-detail:hover { background: #C8E6C9; }
   .btn-edit-detail {
     padding: 7px 11px; border-radius: 10px; border: 1.5px solid var(--border-color);
     background: var(--sky-light); color: var(--text); font-size: 13px; font-weight: 600;

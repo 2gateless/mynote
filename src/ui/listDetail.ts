@@ -487,24 +487,66 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     btnCopyDetail.onclick = async () => {
       const note = appState.currentNote;
       if (!note) return;
-      const textToCopy = `${note.title || ''}\n\n${note.body || ''}`.trim();
+
+      const title = (note.title || '').trim();
+      const rawBodyText = note.body || '';
+
+      // 1) 순수 텍스트(플레인 텍스트): 마크다운 이미지 문법 및 긴 URL 제거
+      const cleanBody = rawBodyText
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      const textToCopy = `${title}\n\n${cleanBody}`.trim();
+
+      // 2) 리치 텍스트(HTML): 마크다운 파싱 + 첨부 이미지 렌더링
+      let copied = false;
       try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(textToCopy);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = textToCopy;
-          ta.style.position = 'fixed';
-          ta.style.opacity = '0';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
+        const bodyHtml = await parseMarkdownBody(rawBodyText);
+        const imgs = (note.images || []).filter(i => i?.url && !rawBodyText.includes(i.url));
+        const extraImgHtml = imgs.length > 0
+          ? `<div style="margin-top:16px;">${imgs.map(i => `<div><img src="${escHtml(i.url)}" style="max-width:100%;height:auto;margin:6px 0;" alt="이미지"></div>`).join('')}</div>`
+          : '';
+        const fullHtml = `<div>${title ? `<h2 style="margin:0 0 12px 0;">${escHtml(title)}</h2>` : ''}${bodyHtml}${extraImgHtml}</div>`;
+
+        if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
+          const htmlBlob = new Blob([fullHtml], { type: 'text/html' });
+          const textBlob = new Blob([textToCopy], { type: 'text/plain' });
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'text/html': htmlBlob,
+              'text/plain': textBlob,
+            }),
+          ]);
+          copied = true;
         }
-        showToast('메모 내용이 클립보드에 복사되었어요 📋');
-      } catch {
-        showToast('클립보드 복사에 실패했어요');
+      } catch (e) {
+        console.warn('HTML clipboard write failed, falling back to plain text', e);
       }
+
+      // 3) 폴백: HTML 복사 미지원 또는 실패 시 순수 텍스트 복사
+      if (!copied) {
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(textToCopy);
+            copied = true;
+          } else {
+            const ta = document.createElement('textarea');
+            ta.value = textToCopy;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            copied = true;
+          }
+        } catch {
+          showToast('클립보드 복사에 실패했어요');
+          return;
+        }
+      }
+
+      showToast('메모 내용(그림 포함)이 복사되었어요 📋');
     };
   }
 
