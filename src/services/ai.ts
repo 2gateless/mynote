@@ -54,21 +54,66 @@ export function isCurrentEmbedding(model: unknown, embedding: unknown): embeddin
   return model === EMBEDDING_VERSION && Array.isArray(embedding) && embedding.length === EMBEDDING_DIM;
 }
 
-// 요구사항 3: Gemini Flash 모델 (최신 정식 식별자 및 -latest 별칭 우선 + 동적 ListModels 자동 탐색 지원)
+// 요구사항 3: 응답 속도(TTFT)가 가장 빠른 Flash-Lite 계열을 최우선으로 시도하고, 실패 시 상위 Flash 모델로 폴백
+const STORAGE_KEY_FLASH_MODEL = 'mynote_ai_working_flash_model_v1';
+const SESSION_KEY_QUERY_EMBED = 'mynote_query_embed_cache_v1';
 const FLASH_MODELS = [
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash-lite',
   'gemini-2.5-flash',
   'gemini-flash-latest',
-  'gemini-2.5-flash-lite',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite'
+  'gemini-2.0-flash'
 ];
 
-// 성공한 생성 모델을 세션 내 캐시하여 다음 호출 시 지연 없이 즉시 사용
-let cachedWorkingFlashModel: string | null = null;
+// 성공한 생성 모델을 localStorage에 영속 캐시하여 재접속 시에도 폴백 지연 없이 즉시 사용
+function loadCachedFlashModel(): string | null {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY_FLASH_MODEL);
+    return saved && FLASH_MODELS.includes(saved) ? saved : null;
+  } catch {
+    return null;
+  }
+}
 
-// 동일 질문 재검색 시 API 호출 및 지연을 0ms로 줄이기 위한 LRU 캐시 (최대 30개)
+function saveCachedFlashModel(model: string) {
+  cachedWorkingFlashModel = model;
+  try {
+    localStorage.setItem(STORAGE_KEY_FLASH_MODEL, model);
+  } catch {}
+}
+
+let cachedWorkingFlashModel: string | null = loadCachedFlashModel();
+
+// 동일 질문 재검색 시 API 호출 및 지연을 0ms로 줄이기 위한 LRU 캐시 (최대 30개, sessionStorage 영속화)
 const QUERY_EMBED_CACHE_MAX = 30;
 const queryEmbeddingCache = new Map<string, number[]>();
+
+function hydrateQueryEmbedCacheFromSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY_QUERY_EMBED);
+    if (!raw) return;
+    const entries = JSON.parse(raw);
+    if (!Array.isArray(entries)) return;
+    for (const [k, v] of entries) {
+      if (typeof k === 'string' && Array.isArray(v) && v.length === EMBEDDING_DIM) {
+        queryEmbeddingCache.set(k, v);
+      }
+    }
+  } catch {}
+}
+
+function persistQueryEmbedCacheToSession() {
+  try {
+    // 소수점 5자리로 반올림해 sessionStorage 용량을 절반으로 줄이면서 코사인 유사도 정밀도 유지
+    const compact = Array.from(queryEmbeddingCache.entries()).map(([k, vec]) => [
+      k,
+      vec.map(n => Math.round(n * 1e5) / 1e5)
+    ]);
+    sessionStorage.setItem(SESSION_KEY_QUERY_EMBED, JSON.stringify(compact));
+  } catch {}
+}
+
+hydrateQueryEmbedCacheFromSession();
 
 export interface SemanticSearchResult {
   note: Note;
@@ -141,6 +186,8 @@ export async function clearAiLocalCache(clearCredentials = false): Promise<void>
   }
 
   try {
+    localStorage.removeItem(STORAGE_KEY_FLASH_MODEL);
+    sessionStorage.removeItem(SESSION_KEY_QUERY_EMBED);
     Object.keys(localStorage).forEach(key => {
       if (key.startsWith(BOOTSTRAP_FLAG_PREFIX)) {
         localStorage.removeItem(key);
@@ -614,6 +661,7 @@ export async function generateTextEmbedding(
       if (oldestKey !== undefined) queryEmbeddingCache.delete(oldestKey);
     }
     queryEmbeddingCache.set(cacheKey, values);
+    persistQueryEmbedCacheToSession();
   }
 
   return values;
@@ -789,15 +837,58 @@ export function removeVectorNoteCache(noteId: string) {
 }
 
 /**
- * 검색창을 열 때 로컬 IndexedDB에 저장된 벡터 맵을 미리 메모리로 올려두어
- * 실제 AI 시맨틱 검색 버튼 클릭 시 IndexedDB 로딩 지연을 0ms로 단축합니다.
- * (Firestore 네트워크 읽기 0회, 추가 저장 용량 0바이트)
+ * 유휴 시간(requestIdleCallback)에 로컬 벡터의 L2 정규화(Float32Array)와
+ * 검색용 본문 소문자 정제(bodyLower)를 청크 단위로 미리 계산해 두어,
+ * 실제 검색 실행 시 메인 스레드 CPU 연산 시간을 5ms 미만으로 단축합니다.
+ */
+let warmToken = 0;
+function warmVectorMapInIdle(map: Map<string, LocalVectorRecord>) {
+  const token = ++warmToken;
+  const records = Array.from(map.values());
+  let idx = 0;
+  const CHUNK_SIZE = 40;
+
+  const processChunk = () => {
+    if (token !== warmToken || memoryVectorMap !== map) return;
+    const end = Math.min(idx + CHUNK_SIZE, records.length);
+    for (; idx < end; idx++) {
+      const rec = records[idx];
+      if (!rec.normVec) getRecordNormVec(rec);
+      if (rec.body !== undefined && rec.bodyLower === undefined) {
+        rec.bodyLower = stripMarkupForSearch(rec.body).toLowerCase();
+      }
+    }
+    if (idx < records.length) {
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        (window as any).requestIdleCallback(processChunk, { timeout: 1000 });
+      } else {
+        setTimeout(processChunk, 16);
+      }
+    }
+  };
+
+  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+    (window as any).requestIdleCallback(processChunk, { timeout: 600 });
+  } else {
+    setTimeout(processChunk, 16);
+  }
+}
+
+/**
+ * 검색창을 열 때 로컬 IndexedDB 벡터 맵을 메모리에 미리 올리고,
+ * 유휴 시간에 정규화·텍스트 정제 및 백그라운드 Firestore 증분 동기화를 선행 수행합니다.
  */
 let preloadPromise: Promise<void> | null = null;
 export function preloadVectorCache(): Promise<void> {
   const uid = appState.currentUser?.uid;
   if (!uid) return Promise.resolve();
-  if (memoryVectorMap && memoryVectorUid === uid) return Promise.resolve();
+  if (memoryVectorMap && memoryVectorUid === uid) {
+    // 이미 메모리에 올라와 있다면 백그라운드 증분 동기화만 가볍게 트리거
+    if (!syncPromise) {
+      ensureLocalVectorsSynced(false).catch(() => {});
+    }
+    return Promise.resolve();
+  }
   if (preloadPromise) return preloadPromise;
 
   preloadPromise = (async () => {
@@ -806,6 +897,13 @@ export function preloadVectorCache(): Promise<void> {
       if (!memoryVectorMap || memoryVectorUid !== uid) {
         memoryVectorMap = loaded;
         memoryVectorUid = uid;
+        if (loaded.size > 0) {
+          warmVectorMapInIdle(loaded);
+        }
+      }
+      // IndexedDB 로드 직후 Firestore 증분 변경분을 백그라운드에서 선행 동기화
+      if (!syncPromise) {
+        ensureLocalVectorsSynced(false).catch(() => {});
       }
     } catch {
       // 프리로드 실패는 무시 (실제 검색 시 ensureLocalVectorsSynced에서 재시도)
@@ -819,11 +917,35 @@ export function preloadVectorCache(): Promise<void> {
 /**
  * 전체 문서를 매번 Firestore에서 반복 조회하지 않도록:
  * 1) IndexedDB에 영구 저장된 로컬 벡터 맵을 먼저 불러오고 (Firestore 읽기 0건),
- * 2) 이미 메모리에 로드된 인덱스(appState.allNotesCache)의 embeddingUpdatedAt과 비교하여
- *    다른 기기에서 새로 추가/수정되어 로컬 캐시에 없거나 구버전인 메모 ID만 단건 조회(Delta Fetch)합니다.
+ * 2) allowStaleLocal=true(검색 실행 시)이고 로컬 캐시에 이미 벡터가 존재하면
+ *    Firestore 네트워크 대기를 건너뛰고 즉시(0ms) 로컬 맵을 반환한 뒤 증분 동기화는 백그라운드로 실행합니다.
  */
-async function ensureLocalVectorsSynced(): Promise<Map<string, LocalVectorRecord>> {
+async function ensureLocalVectorsSynced(allowStaleLocal = false): Promise<Map<string, LocalVectorRecord>> {
+  const uid = appState.currentUser?.uid;
+  if (!uid) throw new Error('로그인이 필요합니다.');
+
   if (preloadPromise) await preloadPromise;
+
+  // 인메모리 맵이 비어 있으면 먼저 로컬 IndexedDB에서 복원 (네트워크 읽기 0건)
+  if (!memoryVectorMap || memoryVectorUid !== uid) {
+    memoryVectorMap = await loadVectorsFromIdb(uid);
+    memoryVectorUid = uid;
+    if (memoryVectorMap.size > 0) {
+      warmVectorMapInIdle(memoryVectorMap);
+    }
+  }
+
+  // 핵심 속도 최적화: 검색 실행 시 로컬 벡터가 이미 있으면 Firestore 증분 동기화를 기다리지 않고 즉시 반환
+  if (allowStaleLocal && memoryVectorMap.size > 0) {
+    if (!syncPromise) {
+      syncPromise = doEnsureLocalVectorsSynced().finally(() => {
+        syncPromise = null;
+      });
+      syncPromise.catch(() => {});
+    }
+    return memoryVectorMap;
+  }
+
   if (syncPromise) return syncPromise;
   syncPromise = doEnsureLocalVectorsSynced().finally(() => {
     syncPromise = null;
@@ -968,17 +1090,18 @@ export interface SemanticSearchOptions {
  */
 export async function hydrateTopSearchResults(
   topResults: SemanticSearchResult[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs = 500
 ): Promise<void> {
   throwIfAborted(signal);
   if (topResults.length === 0) return;
 
-  const vectorMap = memoryVectorMap || (await ensureLocalVectorsSynced());
+  const vectorMap = memoryVectorMap || (await ensureLocalVectorsSynced(true));
   throwIfAborted(signal);
 
   const updatedForIdb: LocalVectorRecord[] = [];
-  await Promise.all(
-    topResults.map(async (resItem) => {
+  const hydrateAllPromise = Promise.all(
+    topResults.slice(0, 4).map(async (resItem) => {
       if (signal?.aborted) return;
       const n = resItem.note;
       if (!n.id || n.locked) return;
@@ -1035,9 +1158,23 @@ export async function hydrateTopSearchResults(
     })
   );
 
-  if (updatedForIdb.length > 0) {
-    putVectorsToIdb(updatedForIdb).catch(() => {});
+  // 느린 네트워크 환경에서 RAG 시작이 오래 지연되지 않도록 최대 timeoutMs까지만 대기
+  if (timeoutMs > 0) {
+    await Promise.race([
+      hydrateAllPromise,
+      sleep(timeoutMs, signal).catch(() => {})
+    ]);
+  } else {
+    await hydrateAllPromise;
   }
+
+  hydrateAllPromise
+    .then(() => {
+      if (updatedForIdb.length > 0) {
+        putVectorsToIdb(updatedForIdb).catch(() => {});
+      }
+    })
+    .catch(() => {});
   throwIfAborted(signal);
 }
 
@@ -1065,10 +1202,10 @@ export async function semanticSearchNotes(
     return { results: [], totalNotesCount: 0, embeddedNotesCount: 0 };
   }
 
-  // 1) 질문 임베딩 생성 + 로컬 벡터 캐시 증분 확인 (변경분 없으면 Firestore 읽기 0회)
+  // 1) 질문 임베딩 생성 + 로컬 벡터 즉시 로드 (로컬 캐시가 있으면 Firestore 대기 0ms, 증분 동기화는 백그라운드 실행)
   const [queryVector, vectorMap] = await Promise.all([
     generateTextEmbedding(cleanQuery, 'RETRIEVAL_QUERY', undefined, signal),
-    ensureLocalVectorsSynced()
+    ensureLocalVectorsSynced(true)
   ]);
   throwIfAborted(signal);
 
@@ -1280,7 +1417,8 @@ function buildRagPromptPayload(
 
   const allUnlocked = topResults.filter(r => !r.note.locked);
   const lockedCount = topResults.length - allUnlocked.length;
-  const unlockedResults = allUnlocked.slice(0, 5);
+  // 상위 4개 메모만 핵심 발췌하여 입력 토큰 및 TTFT(첫 글자 응답 지연)를 대폭 단축
+  const unlockedResults = allUnlocked.slice(0, 4);
 
   if (unlockedResults.length === 0 && lockedCount > 0) {
     return {
@@ -1304,8 +1442,8 @@ function buildRagPromptPayload(
     const tags = getNoteTags(n).map(t => `#${t}`).join(' ');
     const simPct = Math.round(item.score * 100);
     const dateStr = fmtDate(n.createdAt) || '날짜 정보 없음';
-    // 질문 키워드 중심 1,800자 발췌로 입력 토큰을 최적화하여 TTFT(첫 응답 지연) 및 생성 속도 단축
-    const bodyText = buildRagBodyExcerpt(n.body || '', queryTermGroups, 1800);
+    // 질문 키워드 중심 1,100자 발췌로 입력 토큰을 최적화하여 TTFT 및 생성 속도 대폭 단축
+    const bodyText = buildRagBodyExcerpt(n.body || '', queryTermGroups, 1100);
     return [
       `[메모 ${idx + 1}] (유사도: ${simPct}%)`,
       `- 제목: ${n.title || '제목 없음'}`,
@@ -1515,7 +1653,7 @@ export async function generateRagAnswerStream(
     try {
       const result = await tryStreamWithModel(model);
       if (result.ok && result.answer) {
-        cachedWorkingFlashModel = model.replace(/^models\//, '');
+        saveCachedFlashModel(model.replace(/^models\//, ''));
         return result.answer;
       }
       if (result.errorMsg) {
@@ -1661,7 +1799,7 @@ export async function generateRagAnswer(
     try {
       const result = await tryGenerateWithModel(model);
       if (result.ok && result.answer) {
-        cachedWorkingFlashModel = model.replace(/^models\//, '');
+        saveCachedFlashModel(model.replace(/^models\//, ''));
         return result.answer;
       }
       if (result.errorMsg) {
@@ -1713,7 +1851,7 @@ export async function generateRagAnswer(
         if (candidateModels.includes(dynModel)) continue;
         const result = await tryGenerateWithModel(dynModel);
         if (result.ok && result.answer) {
-          cachedWorkingFlashModel = dynModel;
+          saveCachedFlashModel(dynModel);
           return result.answer;
         }
         if (result.fatal) {

@@ -137,6 +137,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     imeEnterLockedRaw = null;
     imeEnterLockUntil = 0;
     isAiSearchActive = false;
+    pendingRagContext = null;
     lastRenderedSearchSignature = '';
     isSelectingSearchResult = false;
     isPointerDownOnSearchResults = false;
@@ -184,6 +185,144 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     if (aiConfigModal) aiConfigModal.style.display = 'none';
   }
 
+  const AI_AUTO_RAG_KEY = 'mynote_ai_auto_rag_v1';
+  let pendingRagContext: { queryText: string; results: any[]; token: number } | null = null;
+
+  function getAutoRagEnabled(): boolean {
+    try {
+      return localStorage.getItem(AI_AUTO_RAG_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function setAutoRagEnabled(enabled: boolean) {
+    try {
+      localStorage.setItem(AI_AUTO_RAG_KEY, enabled ? '1' : '0');
+    } catch {}
+  }
+
+  async function runRagAnswerForContext(
+    queryText: string,
+    results: any[],
+    token: number,
+    existingSignal?: AbortSignal
+  ) {
+    const ai = await deps.getAi();
+    let localAbortController: AbortController | null = null;
+    let signal = existingSignal;
+    if (!signal) {
+      localAbortController = new AbortController();
+      activeAiAbortController = localAbortController;
+      signal = localAbortController.signal;
+    }
+
+    const initialUnlockedCount = Math.min(4, results.filter(r => !r.note.locked).length);
+    if (aiRagContainer) {
+      aiRagContainer.style.display = 'block';
+      aiRagContainer.innerHTML = `
+        <div class="ai-rag-card">
+          <div class="ai-rag-header">
+            <div class="ai-rag-title"><span>🤖</span><span>AI 종합 및 추론 답변</span></div>
+            <label class="ai-auto-rag-toggle" title="체크 시 검색마다 AI 종합 답변을 자동으로 바로 생성합니다">
+              <input type="checkbox" id="cb-ai-auto-rag"${getAutoRagEnabled() ? ' checked' : ''}>
+              <span>자동 요약</span>
+            </label>
+          </div>
+          <div class="ai-rag-body" id="ai-rag-stream-body" style="color:var(--text-light)">
+            ✍️ 상위 ${initialUnlockedCount}개 메모를 바탕으로 핵심 답변을 작성 중입니다...
+          </div>
+        </div>
+      `;
+    }
+
+    try {
+      // 최대 500ms까지만 긴 메모 본문을 보충 조회하여 AI 스트리밍 시작 지연 최소화
+      await ai.hydrateTopSearchResults(results, signal, 500);
+      if (token !== aiSearchSessionToken || signal.aborted) return;
+
+      const unlockedRefCount = Math.min(4, results.filter(r => !r.note.locked).length);
+
+      let lastStreamRenderAt = 0;
+      let streamRenderPending = false;
+      let latestStreamText = '';
+
+      const renderStreamBody = async (markdownText: string) => {
+        if (token !== aiSearchSessionToken || signal.aborted) return;
+        const cleanPartial = markdownText.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
+        if (!cleanPartial) return;
+        const html = await parseMarkdownBody(cleanPartial);
+        if (token !== aiSearchSessionToken || signal.aborted) return;
+        const streamBodyEl = $('ai-rag-stream-body');
+        if (streamBodyEl) {
+          streamBodyEl.style.color = '';
+          streamBodyEl.innerHTML = html;
+        }
+      };
+
+      const answerMarkdown = await ai.generateRagAnswerStream(
+        queryText,
+        results,
+        (accumulated) => {
+          if (token !== aiSearchSessionToken || signal.aborted) return;
+          latestStreamText = accumulated;
+          const now = Date.now();
+          if (!streamRenderPending && now - lastStreamRenderAt >= 110) {
+            lastStreamRenderAt = now;
+            renderStreamBody(accumulated).catch(() => {});
+          } else if (!streamRenderPending) {
+            streamRenderPending = true;
+            setTimeout(() => {
+              streamRenderPending = false;
+              lastStreamRenderAt = Date.now();
+              if (latestStreamText) renderStreamBody(latestStreamText).catch(() => {});
+            }, 110);
+          }
+        },
+        signal
+      );
+      if (token !== aiSearchSessionToken || signal.aborted) return;
+
+      const cleanAnswer = answerMarkdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
+      const renderedHtml = await parseMarkdownBody(cleanAnswer);
+      if (token !== aiSearchSessionToken || signal.aborted) return;
+
+      if (aiRagContainer) {
+        aiRagContainer.innerHTML = `
+          <div class="ai-rag-card">
+            <div class="ai-rag-header">
+              <div class="ai-rag-title"><span>✨</span><span>AI 종합 및 추론 답변</span></div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="ai-rag-badge">참조 ${unlockedRefCount}건</span>
+                <label class="ai-auto-rag-toggle" title="체크 시 검색마다 AI 종합 답변을 자동으로 바로 생성합니다">
+                  <input type="checkbox" id="cb-ai-auto-rag"${getAutoRagEnabled() ? ' checked' : ''}>
+                  <span>자동 요약</span>
+                </label>
+              </div>
+            </div>
+            <div class="ai-rag-body">${renderedHtml}</div>
+          </div>
+        `;
+      }
+    } catch (e: any) {
+      if (ai.isAbortError(e, signal) || token !== aiSearchSessionToken) return;
+      if (aiRagContainer) {
+        aiRagContainer.innerHTML = `
+          <div class="ai-rag-card" style="border-color:var(--danger)">
+            <div class="ai-rag-header">
+              <div class="ai-rag-title" style="color:var(--danger)"><span>⚠️</span><span>AI 답변 생성 오류</span></div>
+            </div>
+            <div class="ai-rag-body" style="color:var(--danger)">${escHtml(e?.message || '알 수 없는 오류가 발생했습니다.')}</div>
+          </div>
+        `;
+      }
+    } finally {
+      if (localAbortController && activeAiAbortController === localAbortController) {
+        activeAiAbortController = null;
+      }
+    }
+  }
+
   async function runAiSemanticSearch(rawQuery: string) {
     const queryText = rawQuery.trim();
     if (!queryText) {
@@ -203,7 +342,9 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     const abortController = new AbortController();
     activeAiAbortController = abortController;
     const { signal } = abortController;
+    const startedAt = performance.now();
 
+    pendingRagContext = null;
     isAiSearchActive = true;
     lastSearchedQuery = queryText;
     imeEnterLockedRaw = queryText;
@@ -215,36 +356,33 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
 
     if (btnAiSearch) {
       btnAiSearch.disabled = true;
-      btnAiSearch.innerHTML = '<span>⏳</span><span>의미 분석 중...</span>';
+      btnAiSearch.innerHTML = '<span>⚡</span><span>의미 검색 중...</span>';
+    }
+
+    // 0ms 점진적 렌더링: 화면을 비우지 않고 즉시 로컬 키워드 결과를 선(先) 표시한 뒤 시맨틱 점수로 재정렬
+    if (searchResults && (searchResults.style.display === 'none' || !searchResults.querySelector('.search-result-item'))) {
+      doSearch(queryText, true);
     }
 
     if (aiRagContainer) {
       aiRagContainer.style.display = 'block';
       aiRagContainer.innerHTML = `
-        <div class="ai-rag-card">
-          <div class="ai-rag-header">
-            <div class="ai-rag-title"><span>✨</span><span>AI 시맨틱 검색 & 종합·추론</span></div>
-            <span class="ai-rag-badge">Gemini Flash</span>
-          </div>
-          <div class="ai-rag-body" style="color:var(--text-light)">
-            🧠 질문을 임베딩(<code>gemini-embedding-001</code>)하여 연관 메모를 탐색하고 있습니다...
-          </div>
+        <div class="ai-rag-compact-status">
+          <span>⚡</span>
+          <span>의미 기반 하이브리드 정밀 분석 중...</span>
         </div>
       `;
     }
 
-    if (searchResults) {
-      searchResults.style.display = 'block';
-      searchResults.innerHTML = `<div class="search-no-result" style="color:var(--text-light);font-size:13.5px;padding:20px 0">🔍 코사인 유사도 기반으로 연관 메모를 추출하는 중...</div>`;
-    }
-
     try {
-      // 1단계: 본문 단건 조회 없이 로컬 벡터 + 인덱스 스니펫만으로 즉시 상위 메모 추출
+      // 1단계: 로컬 벡터(0ms 비블로킹) + 질문 임베딩으로 초고속 하이브리드 상위 메모 추출
       const { results, embeddedNotesCount } = await ai.semanticSearchNotes(queryText, 5, {
         skipHydration: true,
         signal
       });
       if (token !== aiSearchSessionToken || signal.aborted) return;
+
+      const elapsedSec = Math.max(0.1, (performance.now() - startedAt) / 1000).toFixed(1);
 
       if (results.length === 0) {
         if (aiRagContainer) {
@@ -267,9 +405,9 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         return;
       }
 
-      // 2단계: 검색 결과 카드를 먼저 화면에 즉시 렌더링 (네트워크 대기 제거)
+      // 2단계: 하이브리드 검색 결과 카드를 즉시 렌더링
       const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
-        <span style="font-size:12px;color:#4338CA;font-weight:700">✨ 시맨틱 연관 상위 ${results.length}개 메모 (코사인 유사도순)</span>
+        <span style="font-size:12px;color:#4338CA;font-weight:700">✨ 하이브리드 연관 상위 ${results.length}개 메모 · ${elapsedSec}초</span>
         <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
       </div>`;
 
@@ -303,82 +441,31 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       }).join('');
 
       if (searchResults) {
+        searchResults.style.display = 'block';
         searchResults.innerHTML = header + items;
       }
 
-      const initialUnlockedCount = Math.min(5, results.filter(r => !r.note.locked).length);
-      if (aiRagContainer) {
-        aiRagContainer.innerHTML = `
-          <div class="ai-rag-card">
-            <div class="ai-rag-header">
-              <div class="ai-rag-title"><span>🤖</span><span>AI 종합 및 추론 답변</span></div>
-              <span class="ai-rag-badge">상위 ${initialUnlockedCount}개 메모 참조 중...</span>
-            </div>
-            <div class="ai-rag-body" id="ai-rag-stream-body" style="color:var(--text-light)">
-              ✍️ 추출된 상위 ${initialUnlockedCount}개 메모를 바탕으로 답변을 실시간 작성 중입니다...
-            </div>
-          </div>
-        `;
+      // 하이브리드 메모 목록 추출이 끝났으므로 검색 버튼을 즉시 활성화
+      if (token === aiSearchSessionToken) {
+        resetAiSearchButton();
       }
 
-      // 3단계: AI 종합 답변 생성에 필요한 긴 메모 본문만 보충 조회(Hydration)
-      await ai.hydrateTopSearchResults(results, signal);
-      if (token !== aiSearchSessionToken || signal.aborted) return;
+      pendingRagContext = { queryText, results, token };
+      const unlockedCount = Math.min(4, results.filter(r => !r.note.locked).length);
 
-      const unlockedRefCount = Math.min(5, results.filter(r => !r.note.locked).length);
-
-      let lastStreamRenderAt = 0;
-      let streamRenderPending = false;
-      let latestStreamText = '';
-
-      const renderStreamBody = async (markdownText: string) => {
-        if (token !== aiSearchSessionToken || signal.aborted) return;
-        const cleanPartial = markdownText.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
-        if (!cleanPartial) return;
-        const html = await parseMarkdownBody(cleanPartial);
-        if (token !== aiSearchSessionToken || signal.aborted) return;
-        const streamBodyEl = $('ai-rag-stream-body');
-        if (streamBodyEl) {
-          streamBodyEl.style.color = '';
-          streamBodyEl.innerHTML = html;
-        }
-      };
-
-      const answerMarkdown = await ai.generateRagAnswerStream(
-        queryText,
-        results,
-        (accumulated) => {
-          if (token !== aiSearchSessionToken || signal.aborted) return;
-          latestStreamText = accumulated;
-          const now = Date.now();
-          if (!streamRenderPending && now - lastStreamRenderAt >= 80) {
-            lastStreamRenderAt = now;
-            renderStreamBody(accumulated).catch(() => {});
-          } else if (!streamRenderPending) {
-            streamRenderPending = true;
-            setTimeout(() => {
-              streamRenderPending = false;
-              lastStreamRenderAt = Date.now();
-              if (latestStreamText) renderStreamBody(latestStreamText).catch(() => {});
-            }, 80);
-          }
-        },
-        signal
-      );
-      if (token !== aiSearchSessionToken || signal.aborted) return;
-
-      const cleanAnswer = answerMarkdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
-      const renderedHtml = await parseMarkdownBody(cleanAnswer);
-      if (token !== aiSearchSessionToken || signal.aborted) return;
-
-      if (aiRagContainer) {
+      // 3단계: '항상 자동 요약'이 켜져 있으면 즉시 RAG 답변 생성, 꺼져 있으면 초고속 1줄 요약 버튼 표시
+      if (getAutoRagEnabled()) {
+        await runRagAnswerForContext(queryText, results, token, signal);
+      } else if (aiRagContainer) {
         aiRagContainer.innerHTML = `
-          <div class="ai-rag-card">
-            <div class="ai-rag-header">
-              <div class="ai-rag-title"><span>✨</span><span>AI 종합 및 추론 답변</span></div>
-              <span class="ai-rag-badge">참조 메모 ${unlockedRefCount}건 · Gemini Flash</span>
-            </div>
-            <div class="ai-rag-body">${renderedHtml}</div>
+          <div class="ai-rag-prompt-bar">
+            <button type="button" class="btn-ai-rag-trigger" id="btn-run-rag-answer">
+              <span>✨</span><span>AI 종합 답변 보기${unlockedCount > 0 ? ` (${unlockedCount}건)` : ''}</span>
+            </button>
+            <label class="ai-auto-rag-toggle" title="체크 시 검색마다 AI 종합 답변을 자동으로 바로 생성합니다">
+              <input type="checkbox" id="cb-ai-auto-rag">
+              <span>항상 자동 요약</span>
+            </label>
           </div>
         `;
       }
@@ -627,7 +714,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         deps.ensureSearchIndexReady();
         deps.ensureAllNotesCache();
         doSearch(v);
-      }, 300);
+      }, 120);
     });
 
     searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -712,7 +799,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
 
   if (aiRagContainer) {
     aiRagContainer.addEventListener('click', (e: MouseEvent) => {
-      const linkEl = (e.target as HTMLElement).closest('.note-link') as HTMLElement | null;
+      const target = e.target as HTMLElement;
+      const ragTrigger = target.closest('#btn-run-rag-answer') as HTMLButtonElement | null;
+      if (ragTrigger && pendingRagContext) {
+        e.preventDefault();
+        const { queryText, results, token } = pendingRagContext;
+        runRagAnswerForContext(queryText, results, token).catch(() => {});
+        return;
+      }
+      const linkEl = target.closest('.note-link') as HTMLElement | null;
       if (linkEl && linkEl.dataset.noteId) {
         e.preventDefault();
         e.stopPropagation();
@@ -720,6 +815,19 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         deps.clearDetailHistory();
         deps.setDetailFrom('search');
         deps.openNoteById(linkEl.dataset.noteId, 'search');
+      }
+    });
+
+    aiRagContainer.addEventListener('change', (e: Event) => {
+      const target = e.target as HTMLInputElement | null;
+      if (target && target.id === 'cb-ai-auto-rag') {
+        setAutoRagEnabled(target.checked);
+        showToast(target.checked ? '앞으로 AI 종합 답변을 자동으로 표시해요 ✨' : '빠른 하이브리드 검색 모드로 전환했어요 ⚡');
+        // 사용자가 체크를 켰는데 아직 요약 버튼만 떠 있다면 즉시 요약 실행
+        if (target.checked && pendingRagContext && aiRagContainer.querySelector('#btn-run-rag-answer')) {
+          const { queryText, results, token } = pendingRagContext;
+          runRagAnswerForContext(queryText, results, token).catch(() => {});
+        }
       }
     });
   }
