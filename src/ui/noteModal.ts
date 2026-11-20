@@ -225,24 +225,25 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     };
   }
 
-  function isNoteFormDirty(): boolean {
-    const modal = $('note-modal');
-    if (!modal || modal.style.display === 'none' || !initialNoteFormSnapshot) return false;
-    if (sessionUploadedInlineImages.length > 0) return true;
-
-    const current = takeCurrentFormSnapshot();
+  function isSnapshotDirty(current: NoteFormSnapshot): boolean {
     const init = initialNoteFormSnapshot;
-
+    if (!init) return false;
+    if (sessionUploadedInlineImages.length > 0) return true;
     if (current.title !== init.title) return true;
     if (current.body !== init.body) return true;
     if (current.keywords !== init.keywords) return true;
     if (current.pinned !== init.pinned) return true;
     if (current.locked !== init.locked) return true;
-
     if (init.categories.slice().sort().join(',') !== current.categories.slice().sort().join(',')) return true;
     if (init.tags.slice().sort().join(',') !== current.tags.slice().sort().join(',')) return true;
-
     return false;
+  }
+
+  function isNoteFormDirty(): boolean {
+    const modal = $('note-modal');
+    if (!modal || modal.style.display === 'none' || !initialNoteFormSnapshot) return false;
+    if (sessionUploadedInlineImages.length > 0) return true;
+    return isSnapshotDirty(takeCurrentFormSnapshot());
   }
 
   function getActiveDraftKey(noteId?: string | null): string {
@@ -250,40 +251,76 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     return targetId ? `${NOTE_EDIT_DRAFT_PREFIX}${targetId}` : NOTE_DRAFT_KEY;
   }
 
+  function pruneOldEditDrafts(keepKey?: string) {
+    try {
+      const editKeys = Object.keys(localStorage).filter(
+        k => k.startsWith(NOTE_EDIT_DRAFT_PREFIX) && k !== keepKey
+      );
+      if (editKeys.length > 4) {
+        for (const k of editKeys.slice(0, editKeys.length - 4)) {
+          localStorage.removeItem(k);
+        }
+      }
+    } catch {}
+  }
+
   function clearDraft(noteId?: string | null) {
-    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
     try {
       localStorage.removeItem(getActiveDraftKey(noteId));
     } catch {}
   }
 
+  function flushDraftNow() {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    const modal = $('note-modal');
+    if (!modal || modal.style.display === 'none') return;
+    try {
+      const key = getActiveDraftKey();
+      const snap = takeCurrentFormSnapshot();
+      // 잠금 메모는 보안을 위해 로컬 임시저장에 남기지 않음
+      if (snap.locked) {
+        localStorage.removeItem(key);
+        return;
+      }
+      if (appState.editingNoteId) {
+        if (isSnapshotDirty(snap)) {
+          pruneOldEditDrafts(key);
+          localStorage.setItem(key, JSON.stringify(snap));
+        } else {
+          localStorage.removeItem(key);
+        }
+      } else {
+        if (snap.title || snap.body || snap.keywords) {
+          localStorage.setItem(key, JSON.stringify(snap));
+        } else {
+          localStorage.removeItem(key);
+        }
+      }
+    } catch {}
+  }
+
   function scheduleSaveDraft() {
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    // 타이핑 중 동기 localStorage 쓰기 빈도를 대폭 줄여 모바일 입력/스크롤 60fps 유지
     draftSaveTimer = setTimeout(() => {
-      try {
-        const key = getActiveDraftKey();
-        const snap = takeCurrentFormSnapshot();
-        // 잠금 메모는 보안을 위해 로컬 임시저장에 남기지 않음
-        if (snap.locked) {
-          localStorage.removeItem(key);
-          return;
-        }
-        if (appState.editingNoteId) {
-          if (isNoteFormDirty()) {
-            localStorage.setItem(key, JSON.stringify(snap));
-          } else {
-            localStorage.removeItem(key);
-          }
-        } else {
-          if (snap.title || snap.body || snap.keywords) {
-            localStorage.setItem(key, JSON.stringify(snap));
-          } else {
-            localStorage.removeItem(key);
-          }
-        }
-      } catch {}
-    }, 400);
+      draftSaveTimer = null;
+      flushDraftNow();
+    }, 2500);
   }
+
+  // 앱이 백그라운드로 내려갈 때 대기 중인 임시저장이 있으면 즉시 안전하게 저장
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && draftSaveTimer) {
+      flushDraftNow();
+    }
+  });
 
   function resetInlineImgBtn(force = false) {
     if (force) activeImageUploadCount = 0;

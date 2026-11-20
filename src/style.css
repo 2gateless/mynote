@@ -749,14 +749,15 @@
 
   /* ── MODALS ── */
   .modal-overlay {
-    position: fixed; inset: 0; background: rgba(44,74,90,0.45); backdrop-filter: blur(6px);
+    position: fixed; inset: 0; background: rgba(28, 36, 44, 0.5);
     z-index: 200; display: flex; align-items: flex-end; justify-content: center;
   }
   .modal {
     background: var(--white); border-radius: 24px 24px 0 0; padding: 28px 24px 40px;
     width: 100%; max-width: 640px; max-height: 96vh; overflow-y: auto;
+    -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
-    animation: slideUp 0.3s ease;
+    animation: slideUp 0.22s ease;
   }
   @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .modal-handle { width: 40px; height: 4px; background: var(--sky-mid); border-radius: 2px; margin: 0 auto 20px; }

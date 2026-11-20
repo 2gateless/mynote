@@ -290,43 +290,6 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     const parsedBody = await parseMarkdownBody(note.body || '');
     if (token !== detailRenderToken) return;
 
-    // ⑤ 역방향 링크(Backlinks): 현재 메모 제목을 [[제목]] 형식으로 인용한 다른 메모 탐색
-    let backlinksHtml = '';
-    const noteTitleTrimmed = (note.title || '').trim();
-    if (noteTitleTrimmed) {
-      const allNotes = appState.allNotesCache || [];
-      const linkPatternLower = `[[${noteTitleTrimmed.toLowerCase()}]]`;
-      let getCachedBodyFn: ((id: string) => string | undefined) | null = null;
-      try {
-        const aiMod = await deps.getAi();
-        getCachedBodyFn = aiMod.getCachedNoteBody;
-      } catch {}
-      const referencingNotes = allNotes.filter(n => {
-        if (!n?.id || n.id === note.id || n.locked) return false;
-        const cachedBody = getCachedBodyFn ? (getCachedBodyFn(n.id) || '') : '';
-        const textToSearch = `${cachedBody} ${n.snippet || ''}`.toLowerCase();
-        return textToSearch.includes(linkPatternLower);
-      });
-      if (referencingNotes.length > 0) {
-        backlinksHtml = `
-          <div class="detail-backlinks-section" style="margin-top:24px;padding-top:16px;border-top:1.5px dashed var(--sky-mid);">
-            <div style="font-size:12.5px;font-weight:700;color:var(--sky-deep);margin-bottom:8px;display:flex;align-items:center;gap:5px;">
-              <span>🔗</span><span>이 메모를 참조하는 메모 (${referencingNotes.length})</span>
-            </div>
-            <div style="display:flex;flex-wrap:wrap;gap:6px;">
-              ${referencingNotes.map(rn => {
-                const cat = CATEGORIES[rn.category];
-                const icon = cat ? cat.icon : '📝';
-                return `<button type="button" class="backlink-chip" data-backlink-id="${escHtml(rn.id)}" style="display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:8px;border:1px solid var(--sky-dark);background:var(--sky-pale);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">
-                  <span>${icon}</span><span>${escHtml(rn.title || '제목 없음')}</span>
-                </button>`;
-              }).join('')}
-            </div>
-          </div>
-        `;
-      }
-    }
-
     const noteCats = getNoteCategories(note);
     const catBadgesHtml = noteCats.map(cid => {
       const c = CATEGORIES[cid];
@@ -349,8 +312,42 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       </div>
       <div class="detail-body" style="background: ${note.pinned ? '#F2EFE6' : 'var(--white)'}">${parsedBody}</div>
       ${imgHtml}
-      ${backlinksHtml}`;
+      <div id="detail-backlinks-slot"></div>`;
     showAppScreen('detail');
+
+    // ⑤ 역방향 링크(Backlinks): 본문 표시와 UI 반응을 막지 않도록 비동기로 가벼운 인덱스(snippet)만 스캔
+    const noteTitleTrimmed = (note.title || '').trim();
+    if (noteTitleTrimmed) {
+      setTimeout(() => {
+        if (token !== detailRenderToken) return;
+        const slot = $('detail-backlinks-slot');
+        if (!slot) return;
+        const allNotes = appState.allNotesCache || [];
+        const linkPatternLower = `[[${noteTitleTrimmed.toLowerCase()}]]`;
+        const referencingNotes = allNotes.filter(n => {
+          if (!n?.id || n.id === note.id || n.locked) return false;
+          return (n.snippet || '').toLowerCase().includes(linkPatternLower);
+        });
+        if (referencingNotes.length > 0) {
+          slot.innerHTML = `
+            <div class="detail-backlinks-section" style="margin-top:24px;padding-top:16px;border-top:1.5px dashed var(--sky-mid);">
+              <div style="font-size:12.5px;font-weight:700;color:var(--sky-deep);margin-bottom:8px;display:flex;align-items:center;gap:5px;">
+                <span>🔗</span><span>이 메모를 참조하는 메모 (${referencingNotes.length})</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                ${referencingNotes.map(rn => {
+                  const cat = CATEGORIES[rn.category];
+                  const icon = cat ? cat.icon : '📝';
+                  return `<button type="button" class="backlink-chip" data-backlink-id="${escHtml(rn.id)}" style="display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:8px;border:1px solid var(--sky-dark);background:var(--sky-pale);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">
+                    <span>${icon}</span><span>${escHtml(rn.title || '제목 없음')}</span>
+                  </button>`;
+                }).join('')}
+              </div>
+            </div>
+          `;
+        }
+      }, 0);
+    }
   }
 
   async function openNoteById(noteId: string, from: string, pushCurrentToHistory = false) {
@@ -364,22 +361,14 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     }
     const reqToken = ++detailRenderToken;
 
-    // Stale-While-Revalidate: 로컬 캐시(allNotesCache 스니펫 또는 IndexedDB 벡터 본문 캐시)에 본문이 있다면 즉시 1차 표시
+    // Stale-While-Revalidate: 짧은 메모(snippet < 200자)만 ai 모듈 로드 없이 0ms 즉시 표시
     let fastRendered = false;
+    let fastRenderedBody = '';
+    let fastRenderedTitle = '';
     const cachedItem = (appState.allNotesCache || []).find(n => n.id === noteId);
     if (cachedItem && !cachedItem.locked) {
-      let cachedBody: string | undefined = undefined;
-      // snippet이 200자 미만이면 snippet이 곧 전문
-      if ((cachedItem.snippet || '').length > 0 && (cachedItem.snippet || '').length < 200) {
-        cachedBody = cachedItem.snippet;
-      }
-      if (!cachedBody) {
-        try {
-          const aiMod = await deps.getAi();
-          cachedBody = aiMod.getCachedNoteBody(noteId);
-        } catch {}
-      }
-      if (cachedBody !== undefined && reqToken === detailRenderToken) {
+      const snip = cachedItem.snippet || '';
+      if (snip.length > 0 && snip.length < 200 && reqToken === detailRenderToken) {
         const optimisticNote: Note = {
           id: cachedItem.id,
           uid: appState.currentUser?.uid || '',
@@ -388,12 +377,13 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
           categories: getNoteCategories(cachedItem),
           tag: cachedItem.tag || '',
           tags: getNoteTags(cachedItem),
-          body: cachedBody,
+          body: snip,
           keywords: cachedItem.keywords || '',
           locked: false,
           pinned: !!cachedItem.pinned,
           pinnedAt: cachedItem.pinnedAt || undefined,
           createdAt: cachedItem.createdAt || undefined,
+          updatedAt: cachedItem.updatedAt || undefined,
           embeddingUpdatedAt: cachedItem.embeddingUpdatedAt instanceof Timestamp ? cachedItem.embeddingUpdatedAt : undefined,
           embeddingModel: cachedItem.embeddingModel || undefined,
         };
@@ -409,8 +399,10 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
         if (listTitle && appState.currentCat) {
           listTitle.textContent = (CATEGORIES[appState.currentCat]?.icon || '') + ' ' + (CATEGORIES[appState.currentCat]?.name || '');
         }
-        openDetail(optimisticNote, from, reqToken);
         fastRendered = true;
+        fastRenderedBody = snip;
+        fastRenderedTitle = optimisticNote.title;
+        openDetail(optimisticNote, from, reqToken);
       }
     }
 
@@ -435,6 +427,17 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       const listTitle = $('list-title');
       if (listTitle && appState.currentCat) {
         listTitle.textContent = (CATEGORIES[appState.currentCat]?.icon || '') + ' ' + (CATEGORIES[appState.currentCat]?.name || '');
+      }
+      // 이미 1차 렌더링한 내용과 완전히 동일하고 첨부 이미지도 없으면 중복 2차 렌더링 생략
+      if (
+        fastRendered &&
+        !note.locked &&
+        (note.body || '') === fastRenderedBody &&
+        (note.title || '') === fastRenderedTitle &&
+        (!note.images || note.images.length === 0)
+      ) {
+        appState.currentNote = note;
+        return;
       }
       await openDetail(note, from, reqToken);
     } catch {

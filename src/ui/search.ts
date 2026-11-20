@@ -1,6 +1,6 @@
 import { appState, SearchIndexEntry } from '../state';
 import { CATEGORIES, getNoteCategories, getNoteTags } from '../services/database';
-import { countSearchTokenOccurrences, escHtml, matchesSearchToken, parseMarkdownBody } from '../utils/formatter';
+import { escHtml, matchesSearchToken, parseMarkdownBody } from '../utils/formatter';
 import { showToast } from '../utils/toast';
 import { currentScreen, showAppScreen } from '../pwa';
 import { NoteIndexItem } from '../types';
@@ -168,6 +168,9 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     imeEnterLockUntil = 0;
     isAiSearchActive = false;
     pendingRagContext = null;
+    lastKeywordResults = [];
+    lastKeywordTerms = [];
+    lastKeywordShownCount = 0;
     lastRenderedSearchSignature = '';
     isSelectingSearchResult = false;
     isPointerDownOnSearchResults = false;
@@ -559,6 +562,56 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     }
   }
 
+  const SEARCH_RENDER_LIMIT = 40;
+  let lastKeywordResults: NoteIndexItem[] = [];
+  let lastKeywordTerms: string[] = [];
+  let lastKeywordShownCount = 0;
+
+  function renderKeywordCardHtml(note: NoteIndexItem, keywords: string[]): string {
+    const noteCats = getNoteCategories(note);
+    const catBadgesHtml = noteCats.map(cid => {
+      const c = CATEGORIES[cid];
+      return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
+    }).join('');
+    const titleHtml = note.locked
+      ? '🔒 ' + escHtml(note.title || '제목 없음')
+      : highlightKeywords(note.title || '제목 없음', keywords);
+    const rawSnippet = (note.snippet || '')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const snippetHtml = note.locked
+      ? '🔒 잠긴 메모입니다'
+      : highlightKeywords(rawSnippet, keywords);
+
+    return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
+      <div class="search-result-title">${titleHtml}</div>
+      ${catBadgesHtml}
+      ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
+      <div class="search-result-body">${snippetHtml}</div>
+    </div>`;
+  }
+
+  function appendMoreKeywordResults() {
+    if (!searchResults || lastKeywordShownCount >= lastKeywordResults.length) return;
+    const moreBtn = searchResults.querySelector('#btn-search-more');
+    const nextEnd = Math.min(lastKeywordShownCount + SEARCH_RENDER_LIMIT, lastKeywordResults.length);
+    const chunkHtml = lastKeywordResults
+      .slice(lastKeywordShownCount, nextEnd)
+      .map(n => renderKeywordCardHtml(n, lastKeywordTerms))
+      .join('');
+    lastKeywordShownCount = nextEnd;
+    if (moreBtn) {
+      moreBtn.insertAdjacentHTML('beforebegin', chunkHtml);
+      const remaining = lastKeywordResults.length - lastKeywordShownCount;
+      if (remaining > 0) {
+        moreBtn.textContent = `더 보기 (남은 ${remaining}건)`;
+      } else {
+        moreBtn.remove();
+      }
+    }
+  }
+
   function doSearch(keyword: string, fromCacheSync = false) {
     if (!searchResults) return;
     if (!fromCacheSync) {
@@ -610,12 +663,6 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
             else if (matchesSearchToken(metaLower, kw)) rank += 45;
             else if (matchesSearchToken(entry.text, kw, true)) rank += 20;
             else rank += 10;
-
-            // 본문·제목 내 반복 출현 횟수(TF)에 따른 완만한 포화 가중치 부여
-            const tf = countSearchTokenOccurrences(entry.text, kw, 8);
-            if (tf > 1) {
-              rank += Math.min(24, (tf - 1) * 5);
-            }
           }
           return { note: n, rank };
         });
@@ -623,11 +670,16 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       matchedScored.sort((a, b) => b.rank - a.rank);
       const results = matchedScored.map(item => item.note);
 
-      const signature = `${scopeCatId || 'ALL'}::${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${getNoteTags(n).join(',')}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
+      // DOM 과부하 방지: 상위 SEARCH_RENDER_LIMIT(40건)만 우선 시그니처 비교 및 렌더링
+      const visibleSlice = results.slice(0, SEARCH_RENDER_LIMIT);
+      const signature = `${scopeCatId || 'ALL'}::${keyword}::${results.length}::${visibleSlice.map(n => `${n.id}|${n.title || ''}|${n.locked ? 1 : 0}`).join(';;')}`;
       if (fromCacheSync && signature === lastRenderedSearchSignature) {
         return;
       }
       lastRenderedSearchSignature = signature;
+      lastKeywordResults = results;
+      lastKeywordTerms = keywords;
+      lastKeywordShownCount = visibleSlice.length;
 
       if (results.length === 0) {
         searchResults.innerHTML = `<div class="search-no-result">
@@ -644,31 +696,12 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         <span style="font-size:12px;color:var(--text-light)">${scopeLabel ? `${escHtml(scopeLabel)} 내 ` : ''}${results.length}개 검색됨</span>
         <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">${getSearchExitLabel()}</button>
       </div>`;
-      const items = results.map(note => {
-        const noteCats = getNoteCategories(note);
-        const catBadgesHtml = noteCats.map(cid => {
-          const c = CATEGORIES[cid];
-          return c ? `<span class="detail-cat-badge">${c.icon} ${escHtml(c.name)}</span>` : '';
-        }).join('');
-        const titleHtml = note.locked
-          ? '🔒 ' + escHtml(note.title || '제목 없음')
-          : highlightKeywords(note.title || '제목 없음', keywords);
-        const rawSnippet = (note.snippet || '')
-          .replace(/!\[[^\]]*\]\([^)]*\)/g, '🖼️ ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        const snippetHtml = note.locked
-          ? '🔒 잠긴 메모입니다'
-          : highlightKeywords(rawSnippet, keywords);
-
-        return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
-          <div class="search-result-title">${titleHtml}</div>
-          ${catBadgesHtml}
-          ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
-          <div class="search-result-body">${snippetHtml}</div>
-        </div>`;
-      }).join('');
-      searchResults.innerHTML = header + items;
+      const items = visibleSlice.map(note => renderKeywordCardHtml(note, keywords)).join('');
+      const remaining = results.length - visibleSlice.length;
+      const moreBtnHtml = remaining > 0
+        ? `<button type="button" id="btn-search-more" style="width:100%;margin-top:6px;padding:10px;border-radius:10px;border:1.5px solid var(--border-color);background:var(--white);color:var(--text);font-size:13px;font-weight:600;cursor:pointer">더 보기 (남은 ${remaining}건)</button>`
+        : '';
+      searchResults.innerHTML = header + items + moreBtnHtml;
       if (fromCacheSync && prevScrollY > 0) {
         window.scrollTo(0, prevScrollY);
       }
@@ -737,9 +770,6 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         syncSearchInputPlaceholder();
         searchWrap.style.display = 'block';
         searchInput?.focus();
-        // 검색창을 열 때 로컬 IndexedDB 벡터 맵을 백그라운드로 미리 메모리에 올려두어
-        // 이후 AI 시맨틱 검색 실행 시 대기 시간을 줄임 (Firestore 읽기 0회)
-        deps.getAi().then(ai => ai.preloadVectorCache()).catch(() => {});
       } else {
         exitSearchAndReturn();
       }
@@ -798,7 +828,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         deps.ensureSearchIndexReady();
         deps.ensureAllNotesCache();
         doSearch(v);
-      }, 120);
+      }, 220);
     });
 
     searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -998,6 +1028,14 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         return;
       }
 
+      if (!isMoving && (e.target as HTMLElement).closest('#btn-search-more')) {
+        if (e.cancelable) e.preventDefault();
+        touchStartId = null;
+        touchStartItem = null;
+        appendMoreKeywordResults();
+        return;
+      }
+
       if (!isMoving && (e.target as HTMLElement).closest('#search-home-btn')) {
         if (e.cancelable) e.preventDefault();
         touchStartId = null;
@@ -1056,6 +1094,13 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         const q = searchInput ? searchInput.value.trim() : '';
         searchInput?.blur();
         runAiSemanticSearch(q);
+        return;
+      }
+
+      if ((e.target as HTMLElement).closest('#btn-search-more')) {
+        mouseDownId = null;
+        mouseDownItem = null;
+        appendMoreKeywordResults();
         return;
       }
 
@@ -1130,7 +1175,6 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         searchInput.focus();
         searchInput.select();
       }
-      deps.getAi().then(ai => ai.preloadVectorCache()).catch(() => {});
     },
     closeSearchWrap: () => {
       appState.searchReturnTarget = null;

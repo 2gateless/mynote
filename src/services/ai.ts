@@ -242,6 +242,9 @@ async function loadVectorsFromIdb(uid: string): Promise<Map<string, LocalVectorR
         for (const r of rows) {
           if (!r) continue;
           if (r.uid === uid && isCurrentEmbedding(r.model, r.embedding)) {
+            // 메모리 절감: 64비트 number[] 원본 대신 L2 정규화된 Float32Array 단일 포맷만 힙에 보관
+            r.normVec = toNormalizedFloat32(r.embedding);
+            r.embedding = [];
             map.set(r.id, r);
           } else if (r.uid === uid) {
             // 구버전 모델(text-embedding-004 등) 벡터는 현재 질문 벡터와 비교할 수 없으므로 폐기
@@ -270,11 +273,16 @@ async function putVectorsToIdb(records: LocalVectorRecord[]): Promise<void> {
       const tx = idb.transaction(IDB_STORE, 'readwrite');
       const store = tx.objectStore(IDB_STORE);
       for (const r of records) {
+        const embToStore =
+          Array.isArray(r.embedding) && r.embedding.length === EMBEDDING_DIM
+            ? r.embedding
+            : (r.normVec && r.normVec.length === EMBEDDING_DIM ? Array.from(r.normVec) : []);
+        if (embToStore.length !== EMBEDDING_DIM) continue;
         // 런타임 전용 캐시(normVec, bodyLower)는 제외하고 직렬화 가능한 필드만 IndexedDB에 저장
         store.put({
           id: r.id,
           uid: r.uid,
-          embedding: r.embedding,
+          embedding: embToStore,
           embeddingUpdatedMs: r.embeddingUpdatedMs,
           ...(r.model !== undefined ? { model: r.model } : {}),
           ...(r.body !== undefined ? { body: r.body } : {})
@@ -747,8 +755,10 @@ function toNormalizedFloat32(vec: ArrayLike<number>): Float32Array {
 }
 
 function getRecordNormVec(rec: LocalVectorRecord): Float32Array {
-  if (!rec.normVec || rec.normVec.length !== rec.embedding.length) {
+  if (!rec.normVec || rec.normVec.length !== EMBEDDING_DIM) {
     rec.normVec = toNormalizedFloat32(rec.embedding);
+    // 정규화 완료 후 64비트 원본 배열 참조 해제하여 메모리 50% 절감
+    rec.embedding = [];
   }
   return rec.normVec;
 }
@@ -836,82 +846,37 @@ export function removeVectorNoteCache(noteId: string) {
   deleteVectorFromIdb(noteId).catch(() => {});
 }
 
-/**
- * 유휴 시간(requestIdleCallback)에 로컬 벡터의 L2 정규화(Float32Array)와
- * 검색용 본문 소문자 정제(bodyLower)를 청크 단위로 미리 계산해 두어,
- * 실제 검색 실행 시 메인 스레드 CPU 연산 시간을 5ms 미만으로 단축합니다.
- */
-let warmToken = 0;
-function warmVectorMapInIdle(map: Map<string, LocalVectorRecord>) {
-  const token = ++warmToken;
-  const records = Array.from(map.values());
-  let idx = 0;
-  const CHUNK_SIZE = 40;
+// AI 검색 미사용 시 힙 메모리를 자동 반납하기 위한 유휴 해제 타이머 (2분)
+const VECTOR_EVICT_MS = 120_000;
+let vectorEvictTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const processChunk = () => {
-    if (token !== warmToken || memoryVectorMap !== map) return;
-    const end = Math.min(idx + CHUNK_SIZE, records.length);
-    for (; idx < end; idx++) {
-      const rec = records[idx];
-      if (!rec.normVec) getRecordNormVec(rec);
-      if (rec.body !== undefined && rec.bodyLower === undefined) {
-        rec.bodyLower = stripMarkupForSearch(rec.body).toLowerCase();
-      }
-    }
-    if (idx < records.length) {
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        (window as any).requestIdleCallback(processChunk, { timeout: 1000 });
-      } else {
-        setTimeout(processChunk, 16);
-      }
-    }
-  };
-
-  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-    (window as any).requestIdleCallback(processChunk, { timeout: 600 });
-  } else {
-    setTimeout(processChunk, 16);
-  }
+function scheduleVectorMemoryEviction() {
+  if (vectorEvictTimer) clearTimeout(vectorEvictTimer);
+  vectorEvictTimer = setTimeout(() => {
+    vectorEvictTimer = null;
+    releaseVectorMemoryCache();
+  }, VECTOR_EVICT_MS);
 }
 
 /**
- * 검색창을 열 때 로컬 IndexedDB 벡터 맵을 메모리에 미리 올리고,
- * 유휴 시간에 정규화·텍스트 정제 및 백그라운드 Firestore 증분 동기화를 선행 수행합니다.
+ * 메모리에 올려둔 벡터·본문 맵을 즉시 해제하여 모바일 RAM 점유를 최소화합니다.
+ * (IndexedDB 영구 캐시는 그대로 유지되므로 다음 AI 검색 시 Firestore 읽기 0회로 즉시 복원)
  */
-let preloadPromise: Promise<void> | null = null;
-export function preloadVectorCache(): Promise<void> {
-  const uid = appState.currentUser?.uid;
-  if (!uid) return Promise.resolve();
-  if (memoryVectorMap && memoryVectorUid === uid) {
-    // 이미 메모리에 올라와 있다면 백그라운드 증분 동기화만 가볍게 트리거
-    if (!syncPromise) {
-      ensureLocalVectorsSynced(false).catch(() => {});
-    }
-    return Promise.resolve();
+export function releaseVectorMemoryCache() {
+  if (vectorEvictTimer) {
+    clearTimeout(vectorEvictTimer);
+    vectorEvictTimer = null;
   }
-  if (preloadPromise) return preloadPromise;
+  memoryVectorMap = null;
+  memoryVectorUid = null;
+}
 
-  preloadPromise = (async () => {
-    try {
-      const loaded = await loadVectorsFromIdb(uid);
-      if (!memoryVectorMap || memoryVectorUid !== uid) {
-        memoryVectorMap = loaded;
-        memoryVectorUid = uid;
-        if (loaded.size > 0) {
-          warmVectorMapInIdle(loaded);
-        }
-      }
-      // IndexedDB 로드 직후 Firestore 증분 변경분을 백그라운드에서 선행 동기화
-      if (!syncPromise) {
-        ensureLocalVectorsSynced(false).catch(() => {});
-      }
-    } catch {
-      // 프리로드 실패는 무시 (실제 검색 시 ensureLocalVectorsSynced에서 재시도)
-    } finally {
-      preloadPromise = null;
-    }
-  })();
-  return preloadPromise;
+/**
+ * 검색창을 열 때 IndexedDB 핸들만 가볍게 열어둡니다.
+ * (기존의 전체 벡터·본문 메모리 선적재 및 16ms 강제 정규식 루프가 모바일 UI 프리징을 유발해 제거)
+ */
+export function preloadVectorCache(): Promise<void> {
+  return openVectorIdb().then(() => {}).catch(() => {});
 }
 
 /**
@@ -924,16 +889,12 @@ async function ensureLocalVectorsSynced(allowStaleLocal = false): Promise<Map<st
   const uid = appState.currentUser?.uid;
   if (!uid) throw new Error('로그인이 필요합니다.');
 
-  if (preloadPromise) await preloadPromise;
-
   // 인메모리 맵이 비어 있으면 먼저 로컬 IndexedDB에서 복원 (네트워크 읽기 0건)
   if (!memoryVectorMap || memoryVectorUid !== uid) {
     memoryVectorMap = await loadVectorsFromIdb(uid);
     memoryVectorUid = uid;
-    if (memoryVectorMap.size > 0) {
-      warmVectorMapInIdle(memoryVectorMap);
-    }
   }
+  scheduleVectorMemoryEviction();
 
   // 핵심 속도 최적화: 검색 실행 시 로컬 벡터가 이미 있으면 Firestore 증분 동기화를 기다리지 않고 즉시 반환
   if (allowStaleLocal && memoryVectorMap.size > 0) {
@@ -1367,23 +1328,13 @@ export async function semanticSearchNotes(
       sanitizedLockedForIdb.push(vecRec);
     }
 
-    const hasEmb = Boolean(vecRec && vecRec.embedding.length === queryNormVec.length);
+    const hasEmb = Boolean(
+      vecRec && (vecRec.normVec?.length === queryNormVec.length || vecRec.embedding.length === queryNormVec.length)
+    );
     if (hasEmb) embeddedNotesCount++;
 
     const denseScore = hasEmb ? Math.max(0, dotProductNormalized(queryNormVec, getRecordNormVec(vecRec!))) : 0;
     const { titleLower, metaLower, snippetLower } = getIndexLexicalEntry(idxItem);
-
-    let hayBody = '';
-    if (!isLocked) {
-      if (vecRec?.body !== undefined) {
-        if (vecRec.bodyLower === undefined) {
-          vecRec.bodyLower = stripMarkupForSearch(vecRec.body).toLowerCase();
-        }
-        hayBody = vecRec.bodyLower;
-      } else {
-        hayBody = snippetLower;
-      }
-    }
 
     // ① 제목·태그·키워드 서브인덱스 TF 집계
     const metaTfs = new Array<number>(queryTermGroups.length).fill(0);
@@ -1401,35 +1352,54 @@ export async function semanticSearchNotes(
       }
     }
 
-    // ② 본문 서브인덱스: 긴 본문을 600자 단위 청크로 나누어 Max-Sim 대표 청크 선택
-    const chunks = hayBody ? splitTextIntoSearchChunks(hayBody) : [];
+    // ② 본문 서브인덱스: 빠른 1차 포함 필터링 후 검색어가 실제로 포함된 소수 문서만 정제·청킹 수행
     let bestChunkText = '';
     let bestChunkTfs = new Array<number>(queryTermGroups.length).fill(0);
-    let bestChunkScore = -1;
+    let bestChunkLen = 20;
     const bodyMatchedSet = new Set<number>();
 
-    for (const chunk of chunks) {
-      const chunkTfs = new Array<number>(queryTermGroups.length).fill(0);
-      let matchedInChunk = 0;
-      let totalInChunk = 0;
-      for (let t = 0; t < queryTermGroups.length; t++) {
-        let best = 0;
-        for (const v of queryTermGroups[t]) {
-          const bc = countSearchTokenOccurrences(chunk, v, 12);
-          if (bc > best) best = bc;
+    if (!isLocked) {
+      const rawBody = vecRec?.body !== undefined ? vecRec.body : snippetLower;
+      if (rawBody) {
+        bestChunkLen = Math.min(600, Math.max(20, rawBody.length));
+        const rawLowerQuick = rawBody === snippetLower ? snippetLower : rawBody.toLowerCase();
+        const hasAnyCandidateTerm = queryTermGroups.some(variants =>
+          variants.some(v => rawLowerQuick.includes(v))
+        );
+
+        if (hasAnyCandidateTerm) {
+          const hayBody = rawBody === snippetLower
+            ? snippetLower
+            : stripMarkupForSearch(rawBody).toLowerCase();
+          const chunks = hayBody ? splitTextIntoSearchChunks(hayBody) : [];
+          let bestChunkScore = -1;
+
+          for (const chunk of chunks) {
+            const chunkTfs = new Array<number>(queryTermGroups.length).fill(0);
+            let matchedInChunk = 0;
+            let totalInChunk = 0;
+            for (let t = 0; t < queryTermGroups.length; t++) {
+              let best = 0;
+              for (const v of queryTermGroups[t]) {
+                const bc = countSearchTokenOccurrences(chunk, v, 12);
+                if (bc > best) best = bc;
+              }
+              chunkTfs[t] = best;
+              if (best > 0) {
+                bodyMatchedSet.add(t);
+                matchedInChunk++;
+                totalInChunk += Math.min(4, best);
+              }
+            }
+            const chunkRank = matchedInChunk * 10 + totalInChunk;
+            if (chunkRank > bestChunkScore) {
+              bestChunkScore = chunkRank;
+              bestChunkTfs = chunkTfs;
+              bestChunkText = chunk;
+              bestChunkLen = Math.max(20, chunk.length);
+            }
+          }
         }
-        chunkTfs[t] = best;
-        if (best > 0) {
-          bodyMatchedSet.add(t);
-          matchedInChunk++;
-          totalInChunk += Math.min(4, best);
-        }
-      }
-      const chunkRank = matchedInChunk * 10 + totalInChunk;
-      if (chunkRank > bestChunkScore) {
-        bestChunkScore = chunkRank;
-        bestChunkTfs = chunkTfs;
-        bestChunkText = chunk;
       }
     }
 
@@ -1453,7 +1423,7 @@ export async function semanticSearchNotes(
       metaLower,
       metaDocLen: Math.max(10, metaLower.length),
       metaTfs,
-      bodyDocLen: Math.max(20, bestChunkText.length || hayBody.length),
+      bodyDocLen: bestChunkLen,
       bodyTfs: bestChunkTfs,
       bestChunkText,
       matchedGroupCount: new Set([
