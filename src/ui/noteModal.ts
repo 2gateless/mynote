@@ -349,10 +349,48 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     }
   }
 
+  function syncNoteModalViewportHeight() {
+    const overlay = $('note-modal');
+    if (!overlay || overlay.style.display === 'none') return;
+    const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
+    const vv = window.visualViewport;
+    if (vv) {
+      overlay.style.height = `${vv.height}px`;
+      overlay.style.top = `${vv.offsetTop}px`;
+      overlay.style.bottom = 'auto';
+      if (modalBox) {
+        modalBox.style.maxHeight = `${Math.max(240, Math.floor(vv.height - 12))}px`;
+      }
+    }
+  }
+
+  function resetNoteModalViewportStyle() {
+    const overlay = $('note-modal');
+    if (!overlay) return;
+    overlay.style.height = '';
+    overlay.style.top = '';
+    overlay.style.bottom = '';
+    const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
+    if (modalBox) modalBox.style.maxHeight = '';
+  }
+
+  if (typeof window !== 'undefined' && window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncNoteModalViewportHeight);
+    window.visualViewport.addEventListener('scroll', syncNoteModalViewportHeight);
+  }
+
+  function showNoteModalOverlay() {
+    setDisplay('note-modal', 'flex');
+    syncNoteModalViewportHeight();
+    const modalBox = $('note-modal')?.querySelector('.modal') as HTMLElement | null;
+    if (modalBox) modalBox.scrollTop = 0;
+  }
+
   function closeModal(saved = false) {
     modalSessionToken++;
     initialNoteFormSnapshot = null;
     setDisplay('note-modal', 'none');
+    resetNoteModalViewportStyle();
     stopRecording();
     resetInlineImgBtn(true);
     if (!saved && sessionUploadedInlineImages.length > 0) {
@@ -393,7 +431,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
             setPinToggleUI(!!draft.pinned);
             setLockToggleUI(!!draft.locked);
             initialNoteFormSnapshot = takeCurrentFormSnapshot();
-            setDisplay('note-modal', 'flex');
+            showNoteModalOverlay();
             return;
           } else {
             clearDraft();
@@ -410,7 +448,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     setPinToggleUI(false);
     setLockToggleUI(false);
     initialNoteFormSnapshot = takeCurrentFormSnapshot();
-    setDisplay('note-modal', 'flex');
+    showNoteModalOverlay();
   }
 
   function openEditModal(note: Note) {
@@ -465,7 +503,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
       }
     }
 
-    setDisplay('note-modal', 'flex');
+    showNoteModalOverlay();
   }
 
   // ── 메모 링크 삽입 모달
