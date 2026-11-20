@@ -315,10 +315,105 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     }, 2500);
   }
 
-  // 앱이 백그라운드로 내려갈 때 대기 중인 임시저장이 있으면 즉시 안전하게 저장
+  let lastFocusedFieldId: string | null = null;
+  let savedEditCursor: {
+    modalScrollTop: number;
+    fieldId: string | null;
+    selectionStart: number;
+    selectionEnd: number;
+    textareaScrollTop: number;
+  } | null = null;
+  let lastViewportHeight = typeof window !== 'undefined' ? (window.visualViewport?.height || window.innerHeight) : 0;
+
+  ['note-title', 'note-body', 'note-keywords'].forEach(id => {
+    const el = $(id);
+    if (el) {
+      el.addEventListener('focus', () => {
+        lastFocusedFieldId = id;
+      });
+    }
+  });
+
+  function captureModalEditPosition() {
+    const overlay = $('note-modal');
+    if (!overlay || overlay.style.display === 'none') return;
+    const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
+    const activeId = (document.activeElement as HTMLElement | null)?.id || lastFocusedFieldId;
+    const fieldId = activeId === 'note-body' || activeId === 'note-title' || activeId === 'note-keywords'
+      ? activeId
+      : lastFocusedFieldId;
+    savedEditCursor = {
+      modalScrollTop: modalBox ? modalBox.scrollTop : 0,
+      fieldId,
+      selectionStart: noteBodyEl ? (noteBodyEl.selectionStart ?? 0) : 0,
+      selectionEnd: noteBodyEl ? (noteBodyEl.selectionEnd ?? 0) : 0,
+      textareaScrollTop: noteBodyEl ? noteBodyEl.scrollTop : 0
+    };
+  }
+
+  function ensureActiveFieldVisibleInModal(modalBox: HTMLElement, fieldEl: HTMLElement) {
+    const boxRect = modalBox.getBoundingClientRect();
+    const fieldRect = fieldEl.getBoundingClientRect();
+    // 하단 sticky 저장 버튼 영역(약 76px)을 제외한 실제 가시 영역 확인
+    const visibleBottom = boxRect.bottom - 76;
+    if (fieldRect.bottom < boxRect.top + 24 || fieldRect.top > visibleBottom - 24) {
+      fieldEl.scrollIntoView({ block: 'center' });
+    }
+  }
+
+  function restoreModalEditPosition() {
+    const overlay = $('note-modal');
+    if (!overlay || overlay.style.display === 'none' || !savedEditCursor) return;
+    const snapshot = savedEditCursor;
+    const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
+
+    syncNoteModalViewportHeight();
+    requestAnimationFrame(() => {
+      if (overlay.style.display === 'none') return;
+      if (modalBox && snapshot.modalScrollTop > 0) {
+        modalBox.scrollTop = snapshot.modalScrollTop;
+      }
+      if (snapshot.fieldId === 'note-body' && noteBodyEl) {
+        try {
+          noteBodyEl.focus({ preventScroll: true });
+          const len = noteBodyEl.value.length;
+          const s = Math.min(snapshot.selectionStart, len);
+          const e = Math.min(snapshot.selectionEnd, len);
+          noteBodyEl.setSelectionRange(s, e);
+          noteBodyEl.scrollTop = snapshot.textareaScrollTop;
+        } catch {}
+        if (modalBox) ensureActiveFieldVisibleInModal(modalBox, noteBodyEl);
+      } else if (snapshot.fieldId) {
+        const el = $(snapshot.fieldId) as HTMLInputElement | null;
+        if (el) {
+          try { el.focus({ preventScroll: true }); } catch {}
+          if (modalBox) ensureActiveFieldVisibleInModal(modalBox, el);
+        }
+      }
+    });
+  }
+
+  // 앱 전환(다른 앱에서 텍스트/이미지 복사 후 복귀) 시 커서와 스크롤 위치를 보존·복원
+  window.addEventListener('blur', () => {
+    captureModalEditPosition();
+  });
+
+  window.addEventListener('focus', () => {
+    if (savedEditCursor) {
+      restoreModalEditPosition();
+    }
+  });
+
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && draftSaveTimer) {
-      flushDraftNow();
+    if (document.visibilityState === 'hidden') {
+      captureModalEditPosition();
+      if (draftSaveTimer) {
+        flushDraftNow();
+      }
+    } else if (document.visibilityState === 'visible') {
+      if (savedEditCursor) {
+        restoreModalEditPosition();
+      }
     }
   });
 
@@ -355,11 +450,26 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
     const vv = window.visualViewport;
     if (vv) {
+      const prevHeight = lastViewportHeight;
+      const prevScrollTop = modalBox ? modalBox.scrollTop : 0;
+      lastViewportHeight = vv.height;
+
       overlay.style.height = `${vv.height}px`;
       overlay.style.top = `${vv.offsetTop}px`;
       overlay.style.bottom = 'auto';
       if (modalBox) {
         modalBox.style.maxHeight = `${Math.max(240, Math.floor(vv.height - 12))}px`;
+        // 키보드 열림/닫힘으로 뷰포트가 변해도 스크롤이 0으로 튀지 않도록 보정
+        if (prevScrollTop > 0 && modalBox.scrollTop === 0) {
+          modalBox.scrollTop = prevScrollTop;
+        }
+        // 키보드가 올라와 화면이 줄어들었을 때 포커스된 본문 입력칸이 가려지지 않도록 유지
+        if (prevHeight - vv.height > 80) {
+          const activeEl = document.activeElement as HTMLElement | null;
+          if (activeEl && (activeEl.id === 'note-body' || activeEl.id === 'note-title' || activeEl.id === 'note-keywords')) {
+            requestAnimationFrame(() => ensureActiveFieldVisibleInModal(modalBox, activeEl));
+          }
+        }
       }
     }
   }
@@ -389,6 +499,8 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   function closeModal(saved = false) {
     modalSessionToken++;
     initialNoteFormSnapshot = null;
+    savedEditCursor = null;
+    lastFocusedFieldId = null;
     setDisplay('note-modal', 'none');
     resetNoteModalViewportStyle();
     stopRecording();
