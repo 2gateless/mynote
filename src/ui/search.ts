@@ -155,6 +155,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     setHomeListVisible(true);
   }
 
+  function syncSearchInputPlaceholder() {
+    if (!searchInput) return;
+    const catId = appState.searchReturnTarget?.catId;
+    const cat = catId ? CATEGORIES[catId] : null;
+    searchInput.placeholder = cat
+      ? `${cat.icon} ${cat.name} 내 키워드 검색 또는 AI 질문`
+      : '키워드 검색 또는 AI에게 자연어로 질문하세요';
+  }
+
   function getSearchExitLabel(): string {
     return appState.searchReturnTarget ? '← 돌아가기' : '🏠 홈으로';
   }
@@ -164,6 +173,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     appState.searchReturnTarget = null;
     if (searchWrap) searchWrap.style.display = 'none';
     resetSearchUI();
+    syncSearchInputPlaceholder();
     if (ret && ret.catId && appState.openList) {
       appState.openList(ret.catId, ret.tag);
     } else {
@@ -392,9 +402,14 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     }
 
     try {
+      const scopeCatId = appState.searchReturnTarget?.catId || null;
+      const scopeCat = scopeCatId ? CATEGORIES[scopeCatId] : null;
+      const scopeLabel = scopeCat ? `${scopeCat.icon} ${scopeCat.name} ` : '';
+
       // 1단계: 로컬 벡터(0ms 비블로킹) + 질문 임베딩으로 초고속 하이브리드 상위 메모 추출
       const { results, embeddedNotesCount } = await ai.semanticSearchNotes(queryText, 5, {
         skipHydration: true,
+        categoryId: scopeCatId,
         signal
       });
       if (token !== aiSearchSessionToken || signal.aborted) return;
@@ -410,21 +425,21 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
               </div>
               <div class="ai-rag-body">
                 ${embeddedNotesCount === 0
-                  ? '아직 임베딩 벡터가 저장된 메모가 없습니다. <b>⚙️ AI 설정 → 기존 메모 일괄 임베딩 생성</b>을 먼저 실행하시거나 새 메모를 저장해 주세요.'
-                  : `"<b>${escHtml(queryText)}</b>"와(과) 의미적으로 연관도가 높은 메모를 찾지 못했습니다.`}
+                  ? `${scopeLabel ? `<b>${escHtml(scopeLabel.trim())}</b> 메뉴에 ` : '아직 '}임베딩 벡터가 저장된 메모가 없습니다. <b>⚙️ AI 설정 → 기존 메모 일괄 임베딩 생성</b>을 먼저 실행하시거나 새 메모를 저장해 주세요.`
+                  : `${scopeLabel ? `<b>${escHtml(scopeLabel.trim())}</b> 내에서 ` : ''}"<b>${escHtml(queryText)}</b>"와(과) 의미적으로 연관도가 높은 메모를 찾지 못했습니다.`}
               </div>
             </div>
           `;
         }
         if (searchResults) {
-          searchResults.innerHTML = `<div class="search-no-result">🔍 연관된 메모가 없어요</div>`;
+          searchResults.innerHTML = `<div class="search-no-result">🔍 ${scopeLabel ? `${escHtml(scopeLabel.trim())} 내 ` : ''}연관된 메모가 없어요</div>`;
         }
         return;
       }
 
       // 2단계: 하이브리드 검색 결과 카드를 즉시 렌더링
       const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
-        <span style="font-size:12px;color:#4338CA;font-weight:700">✨ 하이브리드 연관 상위 ${results.length}개 메모 · ${elapsedSec}초</span>
+        <span style="font-size:12px;color:#4338CA;font-weight:700">✨ ${scopeLabel ? `${escHtml(scopeLabel.trim())} · ` : ''}하이브리드 연관 상위 ${results.length}개 메모 · ${elapsedSec}초</span>
         <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">${getSearchExitLabel()}</button>
       </div>`;
 
@@ -534,8 +549,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         return;
       }
 
+      const scopeCatId = appState.searchReturnTarget?.catId || null;
+      const scopeCat = scopeCatId ? CATEGORIES[scopeCatId] : null;
+      const scopeLabel = scopeCat ? `${scopeCat.icon} ${scopeCat.name}` : '';
+      const scopedIdx = scopeCatId
+        ? searchIdx.filter(entry => getNoteCategories(entry.note).includes(scopeCatId))
+        : searchIdx;
+
       const cleanQueryLower = keyword.trim().toLowerCase();
-      const matchedScored = searchIdx
+      const matchedScored = scopedIdx
         .filter(entry => keywords.every(kw => matchesSearchToken(entry.text, kw)))
         .map(entry => {
           const n = entry.note;
@@ -565,7 +587,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       matchedScored.sort((a, b) => b.rank - a.rank);
       const results = matchedScored.map(item => item.note);
 
-      const signature = `${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${getNoteTags(n).join(',')}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
+      const signature = `${scopeCatId || 'ALL'}::${keyword}::${results.map(n => `${n.id}|${n.title || ''}|${getNoteCategories(n).join(',')}|${getNoteTags(n).join(',')}|${n.locked ? 1 : 0}|${n.snippet || ''}`).join(';;')}`;
       if (fromCacheSync && signature === lastRenderedSearchSignature) {
         return;
       }
@@ -573,7 +595,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
 
       if (results.length === 0) {
         searchResults.innerHTML = `<div class="search-no-result">
-          <div>🔍 "<b>${escHtml(keyword)}</b>" 키워드 일치 결과가 없어요</div>
+          <div>🔍 ${scopeLabel ? `<b>${escHtml(scopeLabel)}</b> 내에서 ` : ''}"<b>${escHtml(keyword)}</b>" 키워드 일치 결과가 없어요</div>
           <div style="margin-top:12px">
             <button type="button" data-run-ai-search="1" style="padding:8px 14px;border-radius:10px;border:1.5px solid #6366F1;background:#EEF2FF;color:#4338CA;font-weight:700;font-size:13px;cursor:pointer">✨ 이 내용으로 AI 의미 검색 · 추론 실행</button>
           </div>
@@ -583,7 +605,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
 
       const prevScrollY = window.scrollY;
       const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
-        <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
+        <span style="font-size:12px;color:var(--text-light)">${scopeLabel ? `${escHtml(scopeLabel)} 내 ` : ''}${results.length}개 검색됨</span>
         <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">${getSearchExitLabel()}</button>
       </div>`;
       const items = results.map(note => {
@@ -675,6 +697,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       const isHidden = searchWrap.style.display === 'none';
       if (isHidden) {
         appState.searchReturnTarget = null;
+        syncSearchInputPlaceholder();
         searchWrap.style.display = 'block';
         searchInput?.focus();
         // 검색창을 열 때 로컬 IndexedDB 벡터 맵을 백그라운드로 미리 메모리에 올려두어
@@ -1059,6 +1082,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     openSearchWrapAndFocus: () => {
       deps.ensureSearchIndexReady();
       deps.ensureAllNotesCache();
+      syncSearchInputPlaceholder();
       if (searchWrap) searchWrap.style.display = 'block';
       if (searchInput) {
         searchInput.focus();

@@ -1081,6 +1081,7 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
 
 export interface SemanticSearchOptions {
   skipHydration?: boolean;
+  categoryId?: string | null;
   signal?: AbortSignal;
 }
 
@@ -1270,7 +1271,11 @@ export async function semanticSearchNotes(
   throwIfAborted(signal);
 
   const queryNormVec = toNormalizedFloat32(queryVector);
-  const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
+  const allIndexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
+  const scopeCatId = options?.categoryId || null;
+  const indexItems = scopeCatId
+    ? allIndexItems.filter(item => getNoteCategories(item).includes(scopeCatId))
+    : allIndexItems;
   const cleanQueryLower = cleanQuery.toLowerCase();
   let queryTermGroups = extractQueryTermGroups(cleanQuery);
   if (queryTermGroups.length === 0 && cleanQueryLower.length >= 1) {
