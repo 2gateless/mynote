@@ -1240,6 +1240,68 @@ export function computeBm25Scores(
 }
 
 /**
+ * 긴 메모 본문을 600자 단위(100자 오버랩)로 청킹하여
+ * 장문 중간에 포함된 짧은 핵심 문장도 길이 페널티 없이 포착할 수 있게 합니다.
+ */
+export function splitTextIntoSearchChunks(textLower: string, chunkSize = 600, overlap = 100): string[] {
+  if (!textLower) return [];
+  if (textLower.length <= chunkSize + 100) return [textLower];
+  const chunks: string[] = [];
+  const step = Math.max(100, chunkSize - overlap);
+  for (let start = 0; start < textLower.length; start += step) {
+    chunks.push(textLower.slice(start, start + chunkSize));
+    if (start + chunkSize >= textLower.length) break;
+  }
+  return chunks;
+}
+
+/**
+ * 최근 수정/작성된 메모에 완만한 시간 감쇠(Time Decay) 보너스를 부여합니다.
+ * (최근 7일 이내 최대 +0.045, ~45일 반감기로 자연스럽게 감쇠)
+ */
+export function computeTimeDecayBonus(latestMs: number, nowMs = Date.now()): number {
+  if (!latestMs || latestMs <= 0 || nowMs <= latestMs) {
+    return latestMs > 0 ? 0.045 : 0;
+  }
+  const ageDays = (nowMs - latestMs) / (1000 * 60 * 60 * 24);
+  return 0.045 * Math.exp(-ageDays / 45);
+}
+
+/**
+ * 2단계 로컬 경량 리랭커:
+ * 상위 후보에 대해 ① 연속 구문 일치 여부와 ② 동일 청크 내 다중 키워드 근접 동시 출현(Co-occurrence)을
+ * 검사하여 1~3위 정밀도를 높입니다 (네트워크 지연 0ms).
+ */
+export function computeProximityRerankBonus(
+  cleanQueryLower: string,
+  titleLower: string,
+  metaLower: string,
+  bestChunkLower: string,
+  queryTermGroups: string[][]
+): number {
+  let bonus = 0;
+  if (queryTermGroups.length >= 2 && cleanQueryLower.length >= 3) {
+    if (titleLower.includes(cleanQueryLower) || metaLower.includes(cleanQueryLower)) {
+      bonus += 0.05;
+    } else if (bestChunkLower && bestChunkLower.includes(cleanQueryLower)) {
+      bonus += 0.035;
+    }
+  }
+  if (queryTermGroups.length >= 2 && bestChunkLower) {
+    let coOccurringGroups = 0;
+    for (const variants of queryTermGroups) {
+      if (variants.some(v => matchesSearchToken(bestChunkLower, v))) {
+        coOccurringGroups++;
+      }
+    }
+    if (coOccurringGroups === queryTermGroups.length) {
+      bonus += 0.03;
+    }
+  }
+  return bonus;
+}
+
+/**
  * 요구사항 2 (읽기 비용 극대화 절감 + txtai 기반 BM25 하이브리드 융합 + 적응형 커트라인):
  * - 전체 문서를 Firestore에서 읽지 않고 로컬 캐시(allNotesCache + IndexedDB 벡터)만으로
  *   100% 로컬에서 L2 정규화 Float32Array Dense 내적 + Okapi BM25 Sparse 점수를 동적 가중 결합합니다.
@@ -1290,9 +1352,10 @@ export async function semanticSearchNotes(
 
   let embeddedNotesCount = 0;
   const sanitizedLockedForIdb: LocalVectorRecord[] = [];
-  const docFreqs = new Array<number>(queryTermGroups.length).fill(0);
+  const metaDocFreqs = new Array<number>(queryTermGroups.length).fill(0);
+  const bodyDocFreqs = new Array<number>(queryTermGroups.length).fill(0);
 
-  // 2) Pass 1: Dense 코사인 유사도 계산 및 BM25용 필드 가중 TF·문서 빈도(DF) 수집
+  // 2) Pass 1: 서브인덱스 분리(① 제목·태그·키워드 vs ② 본문 청킹 Max-Sim) 및 DF 수집
   const prepDocs = indexItems.map(idxItem => {
     const vecRec = vectorMap.get(idxItem.id);
     const isLocked = !!idxItem.locked;
@@ -1322,32 +1385,63 @@ export async function semanticSearchNotes(
       }
     }
 
-    const termTfs = new Array<number>(queryTermGroups.length).fill(0);
-    let matchedGroupCount = 0;
-
+    // ① 제목·태그·키워드 서브인덱스 TF 집계
+    const metaTfs = new Array<number>(queryTermGroups.length).fill(0);
+    let metaMatchedGroups = 0;
     for (let t = 0; t < queryTermGroups.length; t++) {
-      const variants = queryTermGroups[t];
       let metaBest = 0;
-      let bodyBest = 0;
-      for (const v of variants) {
+      for (const v of queryTermGroups[t]) {
         const mc = countSearchTokenOccurrences(metaLower, v, 8);
         if (mc > metaBest) metaBest = mc;
-        if (hayBody) {
-          const bc = countSearchTokenOccurrences(hayBody, v, 15);
-          if (bc > bodyBest) bodyBest = bc;
-        }
       }
-      // 제목·태그·키워드 영역 등장은 본문보다 3배 높은 BM25 가중 TF 부여
-      const weightedTf = metaBest * 3.0 + bodyBest * 1.0;
-      termTfs[t] = weightedTf;
-      if (weightedTf > 0) {
-        docFreqs[t]++;
-        matchedGroupCount++;
+      metaTfs[t] = metaBest;
+      if (metaBest > 0) {
+        metaDocFreqs[t]++;
+        metaMatchedGroups++;
       }
     }
 
-    const docLen = Math.max(20, metaLower.length + hayBody.length);
-    const titleExact = titleLower.trim() === cleanQueryLower;
+    // ② 본문 서브인덱스: 긴 본문을 600자 단위 청크로 나누어 Max-Sim 대표 청크 선택
+    const chunks = hayBody ? splitTextIntoSearchChunks(hayBody) : [];
+    let bestChunkText = '';
+    let bestChunkTfs = new Array<number>(queryTermGroups.length).fill(0);
+    let bestChunkScore = -1;
+    const bodyMatchedSet = new Set<number>();
+
+    for (const chunk of chunks) {
+      const chunkTfs = new Array<number>(queryTermGroups.length).fill(0);
+      let matchedInChunk = 0;
+      let totalInChunk = 0;
+      for (let t = 0; t < queryTermGroups.length; t++) {
+        let best = 0;
+        for (const v of queryTermGroups[t]) {
+          const bc = countSearchTokenOccurrences(chunk, v, 12);
+          if (bc > best) best = bc;
+        }
+        chunkTfs[t] = best;
+        if (best > 0) {
+          bodyMatchedSet.add(t);
+          matchedInChunk++;
+          totalInChunk += Math.min(4, best);
+        }
+      }
+      const chunkRank = matchedInChunk * 10 + totalInChunk;
+      if (chunkRank > bestChunkScore) {
+        bestChunkScore = chunkRank;
+        bestChunkTfs = chunkTfs;
+        bestChunkText = chunk;
+      }
+    }
+
+    for (const t of bodyMatchedSet) {
+      bodyDocFreqs[t]++;
+    }
+
+    const latestMs = Math.max(
+      toMillis(idxItem.updatedAt),
+      toMillis(idxItem.embeddingUpdatedAt),
+      toMillis(idxItem.createdAt)
+    );
 
     return {
       idxItem,
@@ -1355,10 +1449,19 @@ export async function semanticSearchNotes(
       isLocked,
       hasEmb,
       denseScore,
-      docLen,
-      termTfs,
-      matchedGroupCount,
-      titleExact
+      titleLower,
+      metaLower,
+      metaDocLen: Math.max(10, metaLower.length),
+      metaTfs,
+      bodyDocLen: Math.max(20, bestChunkText.length || hayBody.length),
+      bodyTfs: bestChunkTfs,
+      bestChunkText,
+      matchedGroupCount: new Set([
+        ...metaTfs.map((v, i) => (v > 0 ? i : -1)).filter(i => i >= 0),
+        ...bodyMatchedSet
+      ]).size || (metaMatchedGroups > 0 ? metaMatchedGroups : 0),
+      titleExact: titleLower.trim() === cleanQueryLower,
+      latestMs
     };
   });
 
@@ -1366,14 +1469,32 @@ export async function semanticSearchNotes(
     putVectorsToIdb(sanitizedLockedForIdb).catch(() => {});
   }
 
-  // Pass 2: Okapi BM25 산출 + [0, 1] 정규화 후 txtai 방식 동적 가중 결합
-  const { rawScores: bm25RawScores, maxScore: maxBm25 } = computeBm25Scores(prepDocs, docFreqs);
+  // Pass 2: 제목·태그 서브인덱스 BM25 + 본문 Max-Sim 청크 BM25 독립 산출 후 가중 결합
+  const metaBm25Res = computeBm25Scores(
+    prepDocs.map(d => ({ docLen: d.metaDocLen, termTfs: d.metaTfs })),
+    metaDocFreqs
+  );
+  const bodyBm25Res = computeBm25Scores(
+    prepDocs.map(d => ({ docLen: d.bodyDocLen, termTfs: d.bodyTfs })),
+    bodyDocFreqs
+  );
+  const nowMs = Date.now();
+
+  const normalizeBm25 = (raw: number, maxVal: number) => {
+    if (raw <= 0) return 0;
+    const rel = maxVal > 0 ? raw / maxVal : 0;
+    const sat = raw / (raw + 2.0);
+    return Math.min(1, rel * 0.6 + sat * 0.4);
+  };
 
   const scored = prepDocs.map((docItem, idx) => {
-    const rawBm25 = bm25RawScores[idx];
-    const relNorm = maxBm25 > 0 ? rawBm25 / maxBm25 : 0;
-    const satNorm = rawBm25 > 0 ? rawBm25 / (rawBm25 + 2.2) : 0;
-    const sparseScore = rawBm25 > 0 ? Math.min(1, relNorm * 0.6 + satNorm * 0.4) : 0;
+    const normMeta = normalizeBm25(metaBm25Res.rawScores[idx], metaBm25Res.maxScore);
+    const normBody = normalizeBm25(bodyBm25Res.rawScores[idx], bodyBm25Res.maxScore);
+    // 서브인덱스 가중 결합 (제목·태그 0.60 + 본문 0.40), 단일 영역만 정확히 일치한 경우도 손실 최소화
+    const sparseScore =
+      normMeta > 0 || normBody > 0
+        ? Math.min(1, Math.max(normMeta * 0.6 + normBody * 0.4, normMeta * 0.85, normBody * 0.65))
+        : 0;
     const titleExactBonus = docItem.titleExact ? 0.12 : 0;
 
     let score = 0;
@@ -1397,23 +1518,41 @@ export async function semanticSearchNotes(
       score = Math.min(0.88, sparseScore * 0.82 + titleExactBonus);
     }
 
+    // ③ 시간 감쇠 가중치 반영 (관련도가 일정 기준 이상인 메모에만 최신성 보너스 가산)
+    if (score >= 0.35 && docItem.latestMs > 0) {
+      score = Math.min(0.999, score + computeTimeDecayBonus(docItem.latestMs, nowMs));
+    }
+
     return {
       idxItem: docItem.idxItem,
       vecRec: docItem.vecRec,
       isLocked: docItem.isLocked,
       score,
       hasEmbedding: docItem.hasEmb,
-      lexicalMatched: docItem.matchedGroupCount
+      lexicalMatched: docItem.matchedGroupCount,
+      titleLower: docItem.titleLower,
+      metaLower: docItem.metaLower,
+      bestChunkText: docItem.bestChunkText
     };
   });
 
-  if (sanitizedLockedForIdb.length > 0) {
-    putVectorsToIdb(sanitizedLockedForIdb).catch(() => {});
+  // ④ 2단계 경량 근접도·구문 리랭킹: 1차 정렬 후 상위 15개 후보의 순위를 정밀 보정
+  scored.sort((a, b) => b.score - a.score);
+  const rerankLimit = Math.min(15, scored.length);
+  for (let i = 0; i < rerankLimit; i++) {
+    const item = scored[i];
+    if (item.score < 0.35 || item.isLocked) continue;
+    const proxBonus = computeProximityRerankBonus(
+      cleanQueryLower,
+      item.titleLower,
+      item.metaLower,
+      item.bestChunkText,
+      queryTermGroups
+    );
+    if (proxBonus > 0) {
+      item.score = Math.min(0.999, item.score + proxBonus);
+    }
   }
-
-  // 3) 적응형(Adaptive) 유사도 커트라인 적용 및 상위 메모 추출
-  //    - 1순위 점수 대비 편차가 너무 크거나 무관한 하위 노이즈 메모가 섞이는 현상 방지
-  //    - 상위권에 잠금 메모가 있더라도 비잠금 메모가 최소 topK개까지 확보될 수 있도록 여유 있게 추출(최대 topK + 3)
   scored.sort((a, b) => b.score - a.score);
 
   const bestScore = scored[0]?.score || 0;

@@ -115,6 +115,7 @@ function toIndexItem(id: string, data: any, shardCategory?: string): NoteIndexIt
     snippet: data.locked ? '' : (data.body || '').substring(0, SNIPPET_LEN),
     keywords: data.keywords || '',
     createdAt: data.createdAt || null,
+    updatedAt: data.updatedAt || null,
     pinned: !!data.pinned,
     pinnedAt: data.pinnedAt || null,
     locked: !!data.locked,

@@ -14,6 +14,9 @@ import {
   isCurrentEmbedding,
   computeHybridWeights,
   computeBm25Scores,
+  splitTextIntoSearchChunks,
+  computeTimeDecayBonus,
+  computeProximityRerankBonus,
   EMBEDDING_VERSION,
   EMBEDDING_DIM
 } from '../src/services/ai';
@@ -80,5 +83,41 @@ describe('ai 서비스 순수 함수', () => {
     expect(rawScores[0]).toBeGreaterThan(0);
     expect(rawScores[2]).toBe(0);
     expect(maxScore).toBe(rawScores[1]);
+  });
+
+  it('splitTextIntoSearchChunks는 긴 메모 본문을 오버랩 있는 청크로 분할해야 한다', () => {
+    const shortText = '짧은 메모 내용';
+    expect(splitTextIntoSearchChunks(shortText, 600, 100)).toEqual([shortText]);
+
+    const longText = '가'.repeat(1300);
+    const chunks = splitTextIntoSearchChunks(longText, 600, 100);
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    expect(chunks[0].length).toBe(600);
+  });
+
+  it('computeTimeDecayBonus는 최신 메모일수록 더 높은 시간 보너스를 반환해야 한다', () => {
+    const now = Date.now();
+    const threeDaysAgo = now - 3 * 24 * 60 * 60 * 1000;
+    const yearAgo = now - 365 * 24 * 60 * 60 * 1000;
+    expect(computeTimeDecayBonus(threeDaysAgo, now)).toBeGreaterThan(computeTimeDecayBonus(yearAgo, now));
+    expect(computeTimeDecayBonus(0, now)).toBe(0);
+  });
+
+  it('computeProximityRerankBonus는 연속 구문과 동일 청크 동시 출현 시 리랭크 보너스를 부여해야 한다', () => {
+    const bonusExact = computeProximityRerankBonus(
+      '감기약 복용법',
+      '감기약 복용법 정리',
+      '감기약 복용법 정리',
+      '감기약 복용법은 식후 30분입니다',
+      [['감기약'], ['복용법']]
+    );
+    const bonusScattered = computeProximityRerankBonus(
+      '감기약 복용법',
+      '병원 메모',
+      '병원 메모',
+      '감기약만 적혀 있음',
+      [['감기약'], ['복용법']]
+    );
+    expect(bonusExact).toBeGreaterThan(bonusScattered);
   });
 });
