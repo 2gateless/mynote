@@ -407,7 +407,9 @@
     transition: all 0.15s;
   }
   .list-search-btn:hover { background: var(--sky-light); border-color: var(--sky-dark); }
+  .list-search-btn.active { background: var(--sky-dark); color: var(--white); border-color: var(--sky-deep); }
   .list-search-btn:active { transform: scale(0.92); }
+  #screen-list .search-wrap { position: static; padding-top: 4px; }
   .tag-filter-btn {
     padding: 6px 14px; border-radius: 20px; background: var(--white);
     color: var(--text-light); font-size: 13px; font-weight: 600;

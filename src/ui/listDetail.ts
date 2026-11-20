@@ -27,6 +27,7 @@ export interface ListDetailDeps {
   getLastCounts: () => Record<string, number>;
   openEditModal: (note: Note) => void;
   openSearchFromList: () => void;
+  closeSearchWrapIfOpen?: () => void;
   restoreSearchScreenIfHasContent: () => boolean;
   resetSearchUI: () => void;
   onCacheNoteDeleted: (noteId: string, detailFrom: string) => void;
@@ -243,6 +244,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   function openList(catId: string, tag: string | null = null) {
     const cat = CATEGORIES[catId];
     if (!cat) return;
+    deps.closeSearchWrapIfOpen?.();
     appState.currentCat = catId;
     appState.currentTag = tag;
     const listTitle = $('list-title');
@@ -506,6 +508,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   const listBack = $('list-back');
   if (listBack) {
     listBack.onclick = () => {
+      deps.closeSearchWrapIfOpen?.();
       appState.searchReturnTarget = null;
       stopListSubscription();
       showAppScreen('home');

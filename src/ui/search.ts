@@ -26,7 +26,7 @@ export interface SearchModuleApi {
   restoreSearchScreenIfHasContent: () => boolean;
   isSearchVisibleOnHome: () => boolean;
   isSearchWrapOpen: () => boolean;
-  openSearchWrapAndFocus: () => void;
+  openSearchWrapAndFocus: (mode?: 'home' | 'list') => void;
   closeSearchWrap: () => void;
   exitSearchAndReturn: () => void;
   shouldSyncSearchOnCacheUpdate: () => string | null;
@@ -120,11 +120,40 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     }
   }
 
+  function mountSearchPanelTo(target: 'home' | 'list') {
+    const parent = target === 'list' ? $('screen-list') : $('screen-home');
+    const anchor = target === 'list' ? $('list-content') : $('folders-meta-header');
+    if (parent && anchor && anchor.parentNode === parent) {
+      if (searchWrap && searchWrap.parentNode !== parent) {
+        parent.insertBefore(searchWrap, anchor);
+      }
+      if (aiRagContainer && aiRagContainer.parentNode !== parent) {
+        parent.insertBefore(aiRagContainer, anchor);
+      }
+      if (searchResults && searchResults.parentNode !== parent) {
+        parent.insertBefore(searchResults, anchor);
+      }
+    }
+    const listSearchBtn = $('btn-list-search');
+    if (listSearchBtn) {
+      const isOpenInList = target === 'list' && Boolean(searchWrap && searchWrap.style.display !== 'none');
+      listSearchBtn.classList.toggle('active', isOpenInList);
+    }
+  }
+
   function setHomeListVisible(visible: boolean) {
     const fl = $('folders-list');
     const mh = $('folders-meta-header');
-    if (fl) fl.style.display = visible ? '' : 'none';
-    if (mh) mh.style.display = visible ? '' : 'none';
+    const lc = $('list-content');
+    if (appState.searchReturnTarget) {
+      if (lc) lc.style.display = visible ? '' : 'none';
+      if (fl) fl.style.display = '';
+      if (mh) mh.style.display = '';
+    } else {
+      if (lc) lc.style.display = '';
+      if (fl) fl.style.display = visible ? '' : 'none';
+      if (mh) mh.style.display = visible ? '' : 'none';
+    }
   }
 
   function resetSearchUI() {
@@ -174,8 +203,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     if (searchWrap) searchWrap.style.display = 'none';
     resetSearchUI();
     syncSearchInputPlaceholder();
-    if (ret && ret.catId && appState.openList) {
-      appState.openList(ret.catId, ret.tag);
+    mountSearchPanelTo('home');
+    if (ret && ret.catId) {
+      const lc = $('list-content');
+      if (lc) lc.style.display = '';
+      if (currentScreen() === 'list' && appState.currentCat === ret.catId && appState.currentTag === ret.tag) {
+        showAppScreen('list');
+      } else if (appState.openList) {
+        appState.openList(ret.catId, ret.tag);
+      }
     } else {
       showAppScreen('home');
     }
@@ -697,6 +733,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       const isHidden = searchWrap.style.display === 'none';
       if (isHidden) {
         appState.searchReturnTarget = null;
+        mountSearchPanelTo('home');
         syncSearchInputPlaceholder();
         searchWrap.style.display = 'block';
         searchInput?.focus();
@@ -1059,6 +1096,8 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         (searchResults && searchResults.innerHTML.trim() !== '') ||
         (aiRagContainer && aiRagContainer.innerHTML.trim() !== '');
       if (!hasSearchContent) return false;
+      const targetScreen = appState.searchReturnTarget ? 'list' : 'home';
+      mountSearchPanelTo(targetScreen);
       if (searchWrap) searchWrap.style.display = 'block';
       if (searchResults && searchResults.innerHTML.trim() !== '') {
         searchResults.style.display = 'block';
@@ -1067,7 +1106,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         aiRagContainer.style.display = 'block';
       }
       setHomeListVisible(false);
-      showAppScreen('home');
+      showAppScreen(targetScreen);
       const scrollY = deps.getSavedSearchScrollY();
       if (scrollY > 0) {
         requestAnimationFrame(() => window.scrollTo(0, scrollY));
@@ -1079,11 +1118,14 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       (aiRagContainer && aiRagContainer.style.display !== 'none' && aiRagContainer.innerHTML.trim() !== '')
     ),
     isSearchWrapOpen: () => Boolean(searchWrap && searchWrap.style.display !== 'none'),
-    openSearchWrapAndFocus: () => {
+    openSearchWrapAndFocus: (mode: 'home' | 'list' = 'home') => {
       deps.ensureSearchIndexReady();
       deps.ensureAllNotesCache();
+      mountSearchPanelTo(mode);
       syncSearchInputPlaceholder();
       if (searchWrap) searchWrap.style.display = 'block';
+      const listSearchBtn = $('btn-list-search');
+      if (listSearchBtn) listSearchBtn.classList.toggle('active', mode === 'list');
       if (searchInput) {
         searchInput.focus();
         searchInput.select();
@@ -1091,8 +1133,11 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       deps.getAi().then(ai => ai.preloadVectorCache()).catch(() => {});
     },
     closeSearchWrap: () => {
+      appState.searchReturnTarget = null;
       if (searchWrap) searchWrap.style.display = 'none';
       resetSearchUI();
+      syncSearchInputPlaceholder();
+      mountSearchPanelTo('home');
     },
     exitSearchAndReturn,
     shouldSyncSearchOnCacheUpdate: () => {
@@ -1104,7 +1149,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         !isSelectingSearchResult &&
         !isPointerDownOnSearchResults &&
         !isAiSearchActive &&
-        currentScreen() === 'home'
+        (currentScreen() === 'home' || currentScreen() === 'list')
       ) {
         return searchInput.value.trim();
       }

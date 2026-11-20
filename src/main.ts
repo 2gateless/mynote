@@ -347,9 +347,16 @@ listDetailApi = initListDetailModule({
   getLastCounts: () => lastCounts,
   openEditModal: (note) => noteModalApi.openEditModal(note),
   openSearchFromList: () => {
-    listDetailApi.stopListSubscription();
-    showAppScreen('home');
-    searchApi.openSearchWrapAndFocus();
+    if (searchApi.isSearchWrapOpen()) {
+      searchApi.exitSearchAndReturn();
+    } else {
+      searchApi.openSearchWrapAndFocus('list');
+    }
+  },
+  closeSearchWrapIfOpen: () => {
+    if (searchApi.isSearchWrapOpen() || searchApi.isSearchVisibleOnHome()) {
+      searchApi.closeSearchWrap();
+    }
   },
   restoreSearchScreenIfHasContent: () => searchApi.restoreSearchScreenIfHasContent(),
   resetSearchUI: () => searchApi.resetSearchUI(),
@@ -610,6 +617,11 @@ initPwaNavigation((screen) => {
     }
   }
   if (screen === 'list') {
+    if (searchApi.isSearchVisibleOnHome() || searchApi.isSearchWrapOpen()) {
+      searchApi.exitSearchAndReturn();
+      history.pushState(null, '', location.href);
+      return;
+    }
     appState.searchReturnTarget = null;
     listDetailApi.stopListSubscription();
     searchApi.resetSearchUI();
@@ -664,11 +676,17 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     if (screen === 'home' || screen === 'list' || screen === 'detail') {
       e.preventDefault();
-      if (screen !== 'home') {
-        listDetailApi.stopListSubscription();
-        showAppScreen('home');
+      if (screen === 'list' && appState.currentCat) {
+        appState.searchReturnTarget = { catId: appState.currentCat, tag: appState.currentTag };
+        searchApi.openSearchWrapAndFocus('list');
+      } else {
+        if (screen !== 'home') {
+          listDetailApi.stopListSubscription();
+          showAppScreen('home');
+        }
+        appState.searchReturnTarget = null;
+        searchApi.openSearchWrapAndFocus('home');
       }
-      searchApi.openSearchWrapAndFocus();
     }
     return;
   }
@@ -677,11 +695,13 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingInInput) {
     if (screen === 'home' || screen === 'list') {
       e.preventDefault();
-      if (screen === 'list') {
-        listDetailApi.stopListSubscription();
-        showAppScreen('home');
+      if (screen === 'list' && appState.currentCat) {
+        appState.searchReturnTarget = { catId: appState.currentCat, tag: appState.currentTag };
+        searchApi.openSearchWrapAndFocus('list');
+      } else {
+        appState.searchReturnTarget = null;
+        searchApi.openSearchWrapAndFocus('home');
       }
-      searchApi.openSearchWrapAndFocus();
     }
     return;
   }
@@ -709,7 +729,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     } else if (screen === 'detail') {
       e.preventDefault();
       listDetailApi.goBackFromDetail();
-    } else if (screen === 'home' && (searchApi.isSearchWrapOpen() || searchApi.isSearchVisibleOnHome())) {
+    } else if ((screen === 'home' || screen === 'list') && (searchApi.isSearchWrapOpen() || searchApi.isSearchVisibleOnHome())) {
       e.preventDefault();
       searchApi.exitSearchAndReturn();
     }
