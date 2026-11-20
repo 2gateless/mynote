@@ -1,6 +1,6 @@
 import { appState, SearchIndexEntry } from '../state';
 import { CATEGORIES, getNoteCategories, getNoteTags } from '../services/database';
-import { escHtml, matchesSearchToken, parseMarkdownBody } from '../utils/formatter';
+import { countSearchTokenOccurrences, escHtml, matchesSearchToken, parseMarkdownBody } from '../utils/formatter';
 import { showToast } from '../utils/toast';
 import { currentScreen, showAppScreen } from '../pwa';
 import { NoteIndexItem } from '../types';
@@ -28,6 +28,7 @@ export interface SearchModuleApi {
   isSearchWrapOpen: () => boolean;
   openSearchWrapAndFocus: () => void;
   closeSearchWrap: () => void;
+  exitSearchAndReturn: () => void;
   shouldSyncSearchOnCacheUpdate: () => string | null;
   syncSearchResultOnNoteUpdated: (
     noteId: string,
@@ -152,6 +153,22 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       searchResults.innerHTML = '';
     }
     setHomeListVisible(true);
+  }
+
+  function getSearchExitLabel(): string {
+    return appState.searchReturnTarget ? '← 돌아가기' : '🏠 홈으로';
+  }
+
+  function exitSearchAndReturn() {
+    const ret = appState.searchReturnTarget;
+    appState.searchReturnTarget = null;
+    if (searchWrap) searchWrap.style.display = 'none';
+    resetSearchUI();
+    if (ret && ret.catId && appState.openList) {
+      appState.openList(ret.catId, ret.tag);
+    } else {
+      showAppScreen('home');
+    }
   }
 
   function lockAndBlurSearchInput(lockedRaw: string) {
@@ -408,7 +425,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       // 2단계: 하이브리드 검색 결과 카드를 즉시 렌더링
       const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
         <span style="font-size:12px;color:#4338CA;font-weight:700">✨ 하이브리드 연관 상위 ${results.length}개 메모 · ${elapsedSec}초</span>
-        <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
+        <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">${getSearchExitLabel()}</button>
       </div>`;
 
       const searchTokens = queryText.toLowerCase().split(/\s+/).filter(Boolean);
@@ -535,6 +552,12 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
             else if (matchesSearchToken(metaLower, kw)) rank += 45;
             else if (matchesSearchToken(entry.text, kw, true)) rank += 20;
             else rank += 10;
+
+            // 본문·제목 내 반복 출현 횟수(TF)에 따른 완만한 포화 가중치 부여
+            const tf = countSearchTokenOccurrences(entry.text, kw, 8);
+            if (tf > 1) {
+              rank += Math.min(24, (tf - 1) * 5);
+            }
           }
           return { note: n, rank };
         });
@@ -561,7 +584,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       const prevScrollY = window.scrollY;
       const header = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px 10px">
         <span style="font-size:12px;color:var(--text-light)">${results.length}개 검색됨</span>
-        <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">🏠 홈으로</button>
+        <button id="search-home-btn" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1.5px solid var(--border-color);background:transparent;color:var(--text);cursor:pointer;font-weight:600">${getSearchExitLabel()}</button>
       </div>`;
       const items = results.map(note => {
         const noteCats = getNoteCategories(note);
@@ -650,14 +673,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       deps.ensureSearchIndexReady();
       deps.ensureAllNotesCache();
       const isHidden = searchWrap.style.display === 'none';
-      searchWrap.style.display = isHidden ? 'block' : 'none';
       if (isHidden) {
+        appState.searchReturnTarget = null;
+        searchWrap.style.display = 'block';
         searchInput?.focus();
         // 검색창을 열 때 로컬 IndexedDB 벡터 맵을 백그라운드로 미리 메모리에 올려두어
         // 이후 AI 시맨틱 검색 실행 시 대기 시간을 줄임 (Firestore 읽기 0회)
         deps.getAi().then(ai => ai.preloadVectorCache()).catch(() => {});
       } else {
-        resetSearchUI();
+        exitSearchAndReturn();
       }
     });
   }
@@ -918,8 +942,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
         if (e.cancelable) e.preventDefault();
         touchStartId = null;
         touchStartItem = null;
-        resetSearchUI();
-        showAppScreen('home');
+        exitSearchAndReturn();
         return;
       }
 
@@ -979,8 +1002,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       if ((e.target as HTMLElement).closest('#search-home-btn')) {
         mouseDownId = null;
         mouseDownItem = null;
-        resetSearchUI();
-        showAppScreen('home');
+        exitSearchAndReturn();
         return;
       }
 
@@ -1048,6 +1070,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       if (searchWrap) searchWrap.style.display = 'none';
       resetSearchUI();
     },
+    exitSearchAndReturn,
     shouldSyncSearchOnCacheUpdate: () => {
       if (
         searchInput &&

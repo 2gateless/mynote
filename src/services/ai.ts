@@ -20,7 +20,7 @@ import {
    getSingleNote,
   rebuildCategoryIndex
 } from './database';
-import { fmtDate, isAlnumSearchToken, matchesSearchToken, stripMarkupForSearch, toMillis } from '../utils/formatter';
+import { countSearchTokenOccurrences, fmtDate, isAlnumSearchToken, matchesSearchToken, stripMarkupForSearch, toMillis } from '../utils/formatter';
 import { Note, NoteIndexItem } from '../types';
 
 // ─────────────────────────────────────────────
@@ -1179,9 +1179,69 @@ export async function hydrateTopSearchResults(
 }
 
 /**
- * 요구사항 2 (읽기 비용 극대화 절감 + 한국어 하이브리드 보정 + 적응형 커트라인):
+ * txtai 하이브리드 검색 가이드 기반 동적 가중치 계산 ([denseWeight, sparseWeight]):
+ * - 영문·숫자/코드 쿼리: 정확한 토큰 매칭(BM25) 비중을 높여 다국어 임베딩 노이즈 억제 (0.35 / 0.65)
+ * - 짧은 키워드형 쿼리(1~2단어): 의미 검색과 BM25 키워드 검색의 균형 유지 (0.52 / 0.48)
+ * - 자연어 질문/긴 문장형 쿼리: 유의어·문맥 추론(Dense) 비중 강화 (0.78 / 0.22)
+ */
+export function computeHybridWeights(
+  cleanQuery: string,
+  termGroupCount: number,
+  isAlnumQuery: boolean
+): { denseWeight: number; sparseWeight: number } {
+  if (isAlnumQuery) {
+    return { denseWeight: 0.35, sparseWeight: 0.65 };
+  }
+  const isQuestionLike =
+    /[?？]$/.test(cleanQuery) ||
+    /(?:뭐야|뭔가|무엇|어디|언제|어떻게|왜|얼마|누구|알려|찾아|요약|정리|비교|인가요|할까요|일까요|나요|가요|까요)$/.test(cleanQuery);
+  if (isQuestionLike || termGroupCount >= 3) {
+    return { denseWeight: 0.78, sparseWeight: 0.22 };
+  }
+  return { denseWeight: 0.52, sparseWeight: 0.48 };
+}
+
+/**
+ * Okapi BM25 기반 Sparse 점수 계산 (필드 가중치 + IDF 희귀도 + 문서 길이 정규화).
+ */
+export function computeBm25Scores(
+  docs: Array<{ docLen: number; termTfs: number[] }>,
+  docFreqs: number[],
+  k1 = 1.2,
+  b = 0.75
+): { rawScores: number[]; maxScore: number } {
+  const N = docs.length;
+  if (N === 0 || docFreqs.length === 0) {
+    return { rawScores: docs.map(() => 0), maxScore: 0 };
+  }
+  let totalLen = 0;
+  for (const d of docs) totalLen += d.docLen;
+  const avgLen = Math.max(1, totalLen / N);
+
+  const idfs = docFreqs.map(df => Math.log(1 + (N - df + 0.5) / (df + 0.5)));
+  const rawScores: number[] = new Array(N).fill(0);
+  let maxScore = 0;
+
+  for (let i = 0; i < N; i++) {
+    const d = docs[i];
+    const normFactor = 1 - b + b * (d.docLen / avgLen);
+    let sum = 0;
+    for (let t = 0; t < docFreqs.length; t++) {
+      const tf = d.termTfs[t] || 0;
+      if (tf <= 0) continue;
+      sum += idfs[t] * ((tf * (k1 + 1)) / (tf + k1 * normFactor));
+    }
+    rawScores[i] = sum;
+    if (sum > maxScore) maxScore = sum;
+  }
+
+  return { rawScores, maxScore };
+}
+
+/**
+ * 요구사항 2 (읽기 비용 극대화 절감 + txtai 기반 BM25 하이브리드 융합 + 적응형 커트라인):
  * - 전체 문서를 Firestore에서 읽지 않고 로컬 캐시(allNotesCache + IndexedDB 벡터)만으로
- *   100% 로컬에서 L2 정규화 Float32Array 내적을 통해 코사인 유사도를 고속 계산하여 상위 topK 메모를 추출합니다.
+ *   100% 로컬에서 L2 정규화 Float32Array Dense 내적 + Okapi BM25 Sparse 점수를 동적 가중 결합합니다.
  * - 잠금 메모가 상위권에 포함된 경우에도 RAG 추론에 사용할 일반(비잠금) 메모가 부족하지 않도록
  *   후보를 보충하고, 잠금 메모의 본문은 절대 로컬 캐시나 스니펫에 노출하지 않습니다.
  */
@@ -1211,19 +1271,24 @@ export async function semanticSearchNotes(
 
   const queryNormVec = toNormalizedFloat32(queryVector);
   const indexItems = (appState.allNotesCache as NoteIndexItem[]) || [];
-  const queryTermGroups = extractQueryTermGroups(cleanQuery);
   const cleanQueryLower = cleanQuery.toLowerCase();
+  let queryTermGroups = extractQueryTermGroups(cleanQuery);
+  if (queryTermGroups.length === 0 && cleanQueryLower.length >= 1) {
+    queryTermGroups = [[cleanQueryLower]];
+  }
   // 영문/숫자 중심 쿼리(예: a4, api, usb c) 여부: 짧은 영문 토큰의 임베딩 왜곡 보정용
   const isAlnumQuery =
     isAlnumSearchToken(cleanQuery) ||
     (queryTermGroups.length > 0 && queryTermGroups.every(g => g.some(v => isAlnumSearchToken(v))));
 
+  const { denseWeight, sparseWeight } = computeHybridWeights(cleanQuery, queryTermGroups.length, isAlnumQuery);
+
   let embeddedNotesCount = 0;
   const sanitizedLockedForIdb: LocalVectorRecord[] = [];
+  const docFreqs = new Array<number>(queryTermGroups.length).fill(0);
 
-  // 2) 전체 메모 스코어링은 Firestore 조회 없이 100% 로컬 메모리에서 수행
-  //    (정렬·필터링 단계에서는 경량 구조만 유지하고, 최종 선택된 상위 메모에 대해서만 Note 객체 생성)
-  const scored = indexItems.map(idxItem => {
+  // 2) Pass 1: Dense 코사인 유사도 계산 및 BM25용 필드 가중 TF·문서 빈도(DF) 수집
+  const prepDocs = indexItems.map(idxItem => {
     const vecRec = vectorMap.get(idxItem.id);
     const isLocked = !!idxItem.locked;
 
@@ -1237,65 +1302,103 @@ export async function semanticSearchNotes(
     const hasEmb = Boolean(vecRec && vecRec.embedding.length === queryNormVec.length);
     if (hasEmb) embeddedNotesCount++;
 
-    let score = hasEmb ? dotProductNormalized(queryNormVec, getRecordNormVec(vecRec!)) : 0;
-    let matchedTerms = 0;
+    const denseScore = hasEmb ? Math.max(0, dotProductNormalized(queryNormVec, getRecordNormVec(vecRec!))) : 0;
+    const { titleLower, metaLower, snippetLower } = getIndexLexicalEntry(idxItem);
 
-    if (queryTermGroups.length > 0) {
-      const { titleLower, metaLower, snippetLower } = getIndexLexicalEntry(idxItem);
-      // 잠금 메모는 본문/스니펫 텍스트를 키워드 매칭에 사용하지 않음
-      let haySnippet = '';
-      if (!isLocked) {
-        if (vecRec?.body !== undefined) {
-          if (vecRec.bodyLower === undefined) {
-            vecRec.bodyLower = stripMarkupForSearch(vecRec.body).toLowerCase();
-          }
-          haySnippet = vecRec.bodyLower;
-        } else {
-          haySnippet = snippetLower;
+    let hayBody = '';
+    if (!isLocked) {
+      if (vecRec?.body !== undefined) {
+        if (vecRec.bodyLower === undefined) {
+          vecRec.bodyLower = stripMarkupForSearch(vecRec.body).toLowerCase();
         }
-      }
-
-      for (const variants of queryTermGroups) {
-        if (variants.some(v => matchesSearchToken(metaLower, v))) {
-          matchedTerms += 1.0;
-        } else if (haySnippet && variants.some(v => matchesSearchToken(haySnippet, v))) {
-          matchedTerms += 0.45;
-        }
-      }
-
-      const matchRatio = matchedTerms / queryTermGroups.length;
-      if (isAlnumQuery) {
-        // 영문/숫자 쿼리는 벡터 유사도 비중을 낮추고 단어 경계 키워드 매칭·제목 일치 가중치를 대폭 상향
-        if (matchedTerms > 0) {
-          const titleMatched = queryTermGroups.some(g => g.some(v => matchesSearchToken(titleLower, v)));
-          const titleExact = titleLower.trim() === cleanQueryLower;
-          const lexicalBoost = Math.min(0.42, matchRatio * 0.34 + (titleMatched ? 0.08 : 0));
-          if (hasEmb) {
-            score = Math.min(0.999, score * 0.68 + lexicalBoost + (titleExact ? 0.12 : 0));
-          } else {
-            score = Math.min(0.88, 0.48 + matchRatio * 0.28 + (titleExact ? 0.12 : 0));
-          }
-        } else if (hasEmb) {
-          // 영문 토큰이 전혀 포함되지 않은 한글 문서의 의미적 노이즈 점수 억제
-          score *= 0.65;
-        }
+        hayBody = vecRec.bodyLower;
       } else {
-        const lexicalBoost = Math.min(0.10, matchRatio * 0.10);
-        if (hasEmb) {
-          score = Math.min(0.999, score + lexicalBoost);
-        } else if (matchedTerms > 0) {
-          score = Math.min(0.58, 0.38 + matchRatio * 0.20);
-        }
+        hayBody = snippetLower;
       }
     }
+
+    const termTfs = new Array<number>(queryTermGroups.length).fill(0);
+    let matchedGroupCount = 0;
+
+    for (let t = 0; t < queryTermGroups.length; t++) {
+      const variants = queryTermGroups[t];
+      let metaBest = 0;
+      let bodyBest = 0;
+      for (const v of variants) {
+        const mc = countSearchTokenOccurrences(metaLower, v, 8);
+        if (mc > metaBest) metaBest = mc;
+        if (hayBody) {
+          const bc = countSearchTokenOccurrences(hayBody, v, 15);
+          if (bc > bodyBest) bodyBest = bc;
+        }
+      }
+      // 제목·태그·키워드 영역 등장은 본문보다 3배 높은 BM25 가중 TF 부여
+      const weightedTf = metaBest * 3.0 + bodyBest * 1.0;
+      termTfs[t] = weightedTf;
+      if (weightedTf > 0) {
+        docFreqs[t]++;
+        matchedGroupCount++;
+      }
+    }
+
+    const docLen = Math.max(20, metaLower.length + hayBody.length);
+    const titleExact = titleLower.trim() === cleanQueryLower;
 
     return {
       idxItem,
       vecRec,
       isLocked,
+      hasEmb,
+      denseScore,
+      docLen,
+      termTfs,
+      matchedGroupCount,
+      titleExact
+    };
+  });
+
+  if (sanitizedLockedForIdb.length > 0) {
+    putVectorsToIdb(sanitizedLockedForIdb).catch(() => {});
+  }
+
+  // Pass 2: Okapi BM25 산출 + [0, 1] 정규화 후 txtai 방식 동적 가중 결합
+  const { rawScores: bm25RawScores, maxScore: maxBm25 } = computeBm25Scores(prepDocs, docFreqs);
+
+  const scored = prepDocs.map((docItem, idx) => {
+    const rawBm25 = bm25RawScores[idx];
+    const relNorm = maxBm25 > 0 ? rawBm25 / maxBm25 : 0;
+    const satNorm = rawBm25 > 0 ? rawBm25 / (rawBm25 + 2.2) : 0;
+    const sparseScore = rawBm25 > 0 ? Math.min(1, relNorm * 0.6 + satNorm * 0.4) : 0;
+    const titleExactBonus = docItem.titleExact ? 0.12 : 0;
+
+    let score = 0;
+    if (docItem.hasEmb) {
+      if (sparseScore > 0) {
+        score = Math.min(
+          0.999,
+          denseWeight * docItem.denseScore + sparseWeight * sparseScore + titleExactBonus
+        );
+      } else if (isAlnumQuery) {
+        // 영문/숫자 토큰이 전혀 포함되지 않은 한글 문서의 의미적 노이즈 점수 억제
+        score = docItem.denseScore * 0.62;
+      } else {
+        // 일반 질문형/문장형에서 유의어 의미 유사도가 높은 메모는 자연스럽게 유지
+        score = docItem.denseScore >= 0.58
+          ? docItem.denseScore * 0.94
+          : docItem.denseScore * denseWeight;
+      }
+    } else if (sparseScore > 0) {
+      // 아직 임베딩이 없는 새 메모도 BM25 일치도가 높으면 공정하게 상위권 진입
+      score = Math.min(0.88, sparseScore * 0.82 + titleExactBonus);
+    }
+
+    return {
+      idxItem: docItem.idxItem,
+      vecRec: docItem.vecRec,
+      isLocked: docItem.isLocked,
       score,
-      hasEmbedding: hasEmb,
-      lexicalMatched: matchedTerms
+      hasEmbedding: docItem.hasEmb,
+      lexicalMatched: docItem.matchedGroupCount
     };
   });
 

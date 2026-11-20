@@ -319,3 +319,46 @@ export function matchesSearchToken(
   }
   return re.test(plainTextLower);
 }
+
+/**
+ * 정제된 소문자 텍스트에서 검색 토큰이 등장한 횟수(TF)를 반환합니다.
+ * - 영문/숫자 토큰은 matchesSearchToken과 동일한 단어 경계 규칙을 적용합니다.
+ * - 한글 등 비영문 토큰은 겹치지 않는 부분 문자열 출현 횟수를 고속 집계합니다.
+ */
+export function countSearchTokenOccurrences(
+  plainTextLower: string,
+  tokenLower: string,
+  maxCount = 20
+): number {
+  if (!plainTextLower || !tokenLower) return 0;
+  if (!isAlnumSearchToken(tokenLower)) {
+    let count = 0;
+    let pos = 0;
+    while (count < maxCount) {
+      const idx = plainTextLower.indexOf(tokenLower, pos);
+      if (idx === -1) break;
+      count++;
+      pos = idx + tokenLower.length;
+    }
+    return count;
+  }
+  const useExact = tokenLower.length < 3;
+  const cacheKey = `${useExact ? 'EG:' : 'PG:'}${tokenLower}`;
+  let re = tokenBoundaryRegexCache.get(cacheKey);
+  if (!re) {
+    const escaped = escapeRegExpStr(tokenLower);
+    re = useExact
+      ? new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'g')
+      : new RegExp(`(?<![a-z0-9])${escaped}`, 'g');
+    if (tokenBoundaryRegexCache.size > 200) {
+      tokenBoundaryRegexCache.clear();
+    }
+    tokenBoundaryRegexCache.set(cacheKey, re);
+  }
+  re.lastIndex = 0;
+  let count = 0;
+  while (count < maxCount && re.exec(plainTextLower) !== null) {
+    count++;
+  }
+  return count;
+}

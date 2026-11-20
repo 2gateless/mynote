@@ -10,6 +10,7 @@ export interface AppState {
   currentUser: User | null;
   currentCat: string | null;
   currentTag: string | null;
+  searchReturnTarget: { catId: string; tag: string | null } | null;
   currentNote: Note | null;
   editingNoteId: string | null;
   deleteTargetId: string | null;
@@ -35,6 +36,7 @@ export const appState: AppState = {
   currentUser: null,
   currentCat: null,
   currentTag: null,
+  searchReturnTarget: null,
   currentNote: null,
   editingNoteId: null,
   deleteTargetId: null,

@@ -26,6 +26,7 @@ export interface ListDetailDeps {
   ensureAllNotesCache: () => void;
   getLastCounts: () => Record<string, number>;
   openEditModal: (note: Note) => void;
+  openSearchFromList: () => void;
   restoreSearchScreenIfHasContent: () => boolean;
   resetSearchUI: () => void;
   onCacheNoteDeleted: (noteId: string, detailFrom: string) => void;
@@ -90,17 +91,16 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     const filterBar = $('list-tag-filter');
     if (!filterBar) return;
     const tags = SUB_TAGS[catId];
-    if (!tags || tags.length === 0) {
-      filterBar.style.display = 'none';
-      filterBar.innerHTML = '';
-      return;
-    }
     filterBar.style.display = 'flex';
+    const tagsHtml = tags && tags.length > 0
+      ? `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" data-filter-tag="">전체</div>` +
+        tags.map(t =>
+          `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" data-filter-tag="${escHtml(t)}">#${escHtml(t)}</div>`
+        ).join('')
+      : '';
     filterBar.innerHTML =
-      `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" data-filter-tag="">전체</div>` +
-      tags.map(t =>
-        `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" data-filter-tag="${escHtml(t)}">#${escHtml(t)}</div>`
-      ).join('');
+      tagsHtml +
+      `<button type="button" class="list-search-btn" id="btn-list-search" title="메모 검색">🔍</button>`;
   }
 
   function stopListSubscription() {
@@ -479,7 +479,16 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   const listTagFilter = $('list-tag-filter');
   if (listTagFilter) {
     listTagFilter.addEventListener('click', e => {
-      const btn = (e.target as HTMLElement).closest('[data-filter-tag]') as HTMLElement | null;
+      const target = e.target as HTMLElement;
+      const searchBtn = target.closest('#btn-list-search');
+      if (searchBtn) {
+        appState.searchReturnTarget = appState.currentCat
+          ? { catId: appState.currentCat, tag: appState.currentTag }
+          : null;
+        deps.openSearchFromList();
+        return;
+      }
+      const btn = target.closest('[data-filter-tag]') as HTMLElement | null;
       if (!btn || !appState.currentCat) return;
       openList(appState.currentCat, btn.dataset.filterTag || null);
     });
@@ -497,6 +506,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   const listBack = $('list-back');
   if (listBack) {
     listBack.onclick = () => {
+      appState.searchReturnTarget = null;
       stopListSubscription();
       showAppScreen('home');
     };

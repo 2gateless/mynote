@@ -12,6 +12,8 @@ import {
   extractQueryTermGroups,
   buildNoteEmbeddingInput,
   isCurrentEmbedding,
+  computeHybridWeights,
+  computeBm25Scores,
   EMBEDDING_VERSION,
   EMBEDDING_DIM
 } from '../src/services/ai';
@@ -50,5 +52,33 @@ describe('ai 서비스 순수 함수', () => {
     expect(isCurrentEmbedding(EMBEDDING_VERSION, validVec)).toBe(true);
     expect(isCurrentEmbedding('text-embedding-004', validVec)).toBe(false);
     expect(isCurrentEmbedding(EMBEDDING_VERSION, [0.1, 0.2])).toBe(false);
+  });
+
+  it('computeHybridWeights는 txtai 가이드에 따라 쿼리 유형별 Dense/Sparse 가중치를 조절해야 한다', () => {
+    // 영문/숫자 코드 쿼리는 Sparse(BM25) 비중 우선
+    const alnum = computeHybridWeights('a4', 1, true);
+    expect(alnum.sparseWeight).toBeGreaterThan(alnum.denseWeight);
+
+    // 자연어 질문형 쿼리는 Dense(시맨틱) 비중 우선
+    const ragQuestion = computeHybridWeights('지난번 감기약 복용법이 뭐야?', 3, false);
+    expect(ragQuestion.denseWeight).toBeGreaterThan(ragQuestion.sparseWeight);
+
+    // 짧은 키워드형은 균형 유지
+    const shortKw = computeHybridWeights('고양이', 1, false);
+    expect(shortKw.denseWeight + shortKw.sparseWeight).toBeCloseTo(1);
+  });
+
+  it('computeBm25Scores는 반복 등장 빈도와 희귀 단어(IDF)를 반영해 높은 점수를 부여해야 한다', () => {
+    const docs = [
+      { docLen: 100, termTfs: [1, 0] }, // 흔한 단어 1회
+      { docLen: 100, termTfs: [4, 1] }, // 흔한 단어 4회 + 희귀 단어 1회
+      { docLen: 100, termTfs: [0, 0] }  // 미포함
+    ];
+    const docFreqs = [2, 1];
+    const { rawScores, maxScore } = computeBm25Scores(docs, docFreqs);
+    expect(rawScores[1]).toBeGreaterThan(rawScores[0]);
+    expect(rawScores[0]).toBeGreaterThan(0);
+    expect(rawScores[2]).toBe(0);
+    expect(maxScore).toBe(rawScores[1]);
   });
 });

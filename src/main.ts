@@ -346,6 +346,11 @@ listDetailApi = initListDetailModule({
   ensureAllNotesCache,
   getLastCounts: () => lastCounts,
   openEditModal: (note) => noteModalApi.openEditModal(note),
+  openSearchFromList: () => {
+    listDetailApi.stopListSubscription();
+    showAppScreen('home');
+    searchApi.openSearchWrapAndFocus();
+  },
   restoreSearchScreenIfHasContent: () => searchApi.restoreSearchScreenIfHasContent(),
   resetSearchUI: () => searchApi.resetSearchUI(),
   onCacheNoteDeleted: (noteId, detailFrom) => {
@@ -598,18 +603,14 @@ initPwaNavigation((screen) => {
     return;
   }
   if (screen === 'home') {
-    if (searchApi.isSearchVisibleOnHome()) {
-      searchApi.resetSearchUI();
-      history.pushState(null, '', location.href);
-      return;
-    }
-    if (searchApi.isSearchWrapOpen()) {
-      searchApi.closeSearchWrap();
+    if (searchApi.isSearchVisibleOnHome() || searchApi.isSearchWrapOpen()) {
+      searchApi.exitSearchAndReturn();
       history.pushState(null, '', location.href);
       return;
     }
   }
   if (screen === 'list') {
+    appState.searchReturnTarget = null;
     listDetailApi.stopListSubscription();
     searchApi.resetSearchUI();
     showAppScreen('home');
@@ -708,9 +709,9 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     } else if (screen === 'detail') {
       e.preventDefault();
       listDetailApi.goBackFromDetail();
-    } else if (screen === 'home' && searchApi.isSearchWrapOpen()) {
+    } else if (screen === 'home' && (searchApi.isSearchWrapOpen() || searchApi.isSearchVisibleOnHome())) {
       e.preventDefault();
-      searchApi.closeSearchWrap();
+      searchApi.exitSearchAndReturn();
     }
   }
 });
