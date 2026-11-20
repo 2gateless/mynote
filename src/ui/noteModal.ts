@@ -176,24 +176,20 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   function setLockToggleUI(isLocked: boolean) {
     const cb = $('note-locked') as HTMLInputElement | null;
     const wrap = $('lock-toggle-wrap');
-    const icon = $('lock-toggle-icon');
-    const status = $('lock-toggle-status');
     if (cb) cb.checked = isLocked;
-    if (icon) icon.textContent = isLocked ? '🔒' : '🔓';
-    if (wrap && status) {
+    if (wrap) {
       wrap.classList.toggle('active', isLocked);
-      status.textContent = isLocked ? '🔒 잠금됨' : '해제';
+      wrap.title = isLocked ? '잠금됨 (클릭 시 해제)' : '잠금 설정';
     }
   }
 
   function setPinToggleUI(isPinned: boolean) {
     const cb = $('note-pinned') as HTMLInputElement | null;
     const wrap = $('pin-toggle-wrap');
-    const status = $('pin-toggle-status');
     if (cb) cb.checked = isPinned;
-    if (wrap && status) {
+    if (wrap) {
       wrap.classList.toggle('active', isPinned);
-      status.textContent = isPinned ? '📌 고정됨' : '해제';
+      wrap.title = isPinned ? '핀 고정됨 (클릭 시 해제)' : '핀 고정';
     }
   }
 
@@ -351,11 +347,17 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     };
   }
 
-  function ensureActiveFieldVisibleInModal(modalBox: HTMLElement, fieldEl: HTMLElement) {
+  function ensureActiveFieldVisibleInModal(modalBox: HTMLElement, fieldEl: HTMLElement, preferEnd = false) {
     const boxRect = modalBox.getBoundingClientRect();
     const fieldRect = fieldEl.getBoundingClientRect();
-    // 하단 sticky 저장 버튼 영역(약 76px)을 제외한 실제 가시 영역 확인
-    const visibleBottom = boxRect.bottom - 76;
+    // 하단 sticky 저장 버튼 영역(약 72px)을 제외한 실제 가시 영역 확인
+    const visibleBottom = boxRect.bottom - 72;
+    if (preferEnd) {
+      if (fieldRect.bottom > visibleBottom || fieldRect.bottom < boxRect.top + 40) {
+        fieldEl.scrollIntoView({ block: 'end' });
+      }
+      return;
+    }
     if (fieldRect.bottom < boxRect.top + 24 || fieldRect.top > visibleBottom - 24) {
       fieldEl.scrollIntoView({ block: 'center' });
     }
@@ -374,15 +376,17 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
         modalBox.scrollTop = snapshot.modalScrollTop;
       }
       if (snapshot.fieldId === 'note-body' && noteBodyEl) {
+        let isNearEnd = false;
         try {
           noteBodyEl.focus({ preventScroll: true });
           const len = noteBodyEl.value.length;
           const s = Math.min(snapshot.selectionStart, len);
           const e = Math.min(snapshot.selectionEnd, len);
+          isNearEnd = len > 0 && s >= len * 0.65;
           noteBodyEl.setSelectionRange(s, e);
           noteBodyEl.scrollTop = snapshot.textareaScrollTop;
         } catch {}
-        if (modalBox) ensureActiveFieldVisibleInModal(modalBox, noteBodyEl);
+        if (modalBox) ensureActiveFieldVisibleInModal(modalBox, noteBodyEl, isNearEnd);
       } else if (snapshot.fieldId) {
         const el = $(snapshot.fieldId) as HTMLInputElement | null;
         if (el) {
@@ -420,7 +424,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   function resetInlineImgBtn(force = false) {
     if (force) activeImageUploadCount = 0;
     if (!inlineImgBtn || activeImageUploadCount > 0) return;
-    inlineImgBtn.textContent = '🖼️ 이미지 삽입';
+    inlineImgBtn.textContent = '이미지 삽입';
     inlineImgBtn.classList.remove('uploading');
     inlineImgBtn.disabled = false;
   }
@@ -428,8 +432,8 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   function setInlineImgBtnUploading() {
     if (!inlineImgBtn) return;
     inlineImgBtn.textContent = activeImageUploadCount > 1
-      ? `⏳ 업로드 중 (${activeImageUploadCount}개)...`
-      : '⏳ 업로드 중...';
+      ? `업로드(${activeImageUploadCount})`
+      : '업로드중';
     inlineImgBtn.classList.add('uploading');
     inlineImgBtn.disabled = true;
   }
@@ -439,7 +443,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     isRecording = false;
     const vb = $('voice-btn');
     if (vb) {
-      vb.textContent = '🎤 음성 입력';
+      vb.textContent = '음성';
       vb.classList.remove('recording');
     }
   }
@@ -807,7 +811,10 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     const category = categories[0] || appState.currentCat || Object.keys(CATEGORIES)[0];
     const tags = getSelectedTagsFromUI();
     const tag = tags[0] || null;
-    const pinned = pinnedEl ? pinnedEl.checked : false;
+    // 수정 모달에서 핀 버튼을 제거했으므로 기존 메모 수정 시 기존 핀 상태를 그대로 보존
+    const pinned = pinnedEl
+      ? pinnedEl.checked
+      : (appState.editingNoteId ? !!appState.currentNote?.pinned : false);
     const locked = lockedEl ? lockedEl.checked : false;
     const keywords = keywordsEl ? keywordsEl.value.trim() : '';
 
@@ -1146,7 +1153,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
       recognition.onend = () => { if (isRecording) stopRecording(); };
       recognition.start();
       isRecording = true;
-      voiceBtn.textContent = '🔴 녹음 중... (클릭하여 종료)';
+      voiceBtn.textContent = '녹음중';
       voiceBtn.classList.add('recording');
     };
   }
