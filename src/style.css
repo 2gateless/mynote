@@ -1,4 +1,7 @@
  :root {
+    color-scheme: light;
+    scrollbar-color: #6A9EBA transparent;
+    scrollbar-width: thin;
     --bg-base: #F7F4EB;
     --sky: #9DCAE0;
     --sky-light: #D8EDF7;
@@ -198,9 +201,13 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    width: 100%;
     padding: 16px 24px;
     background: var(--bg-base);
+    border: none;
     border-bottom: 1.5px solid var(--border-color);
+    font-family: inherit;
+    text-align: left;
     cursor: pointer;
     transition: background 0.15s;
     user-select: none;
@@ -300,6 +307,7 @@
     margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow);
     border: 1.5px solid var(--border-color); transition: background 0.15s, border-color 0.15s;
     user-select: none; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+    content-visibility: auto; contain-intrinsic-size: auto 96px;
   }
   .search-result-item:hover { border-color: var(--sky-dark); background: #F8FBFD; }
   .search-result-item:active,
@@ -356,6 +364,10 @@
     margin-bottom: 10px; cursor: pointer; box-shadow: var(--shadow);
     border: 1.5px solid var(--border-color); transition: all 0.2s;
     display: flex; align-items: center; gap: 12px;
+    content-visibility: auto; contain-intrinsic-size: auto 72px;
+  }
+  .note-list-tag {
+    background: none; border: none; padding: 0; font: inherit;
   }
   .note-list-item:hover { border-color: var(--sky-dark); transform: translateX(3px); }
   .note-list-bullet {
@@ -412,7 +424,7 @@
   #screen-list .search-wrap { position: static; padding-top: 4px; }
   .tag-filter-btn {
     padding: 6px 14px; border-radius: 20px; background: var(--white);
-    color: var(--text-light); font-size: 13px; font-weight: 600;
+    color: var(--text-light); font-size: 13px; font-weight: 600; font-family: inherit;
     cursor: pointer; border: 1.5px solid var(--sky-light); transition: all 0.2s;
     white-space: nowrap; box-shadow: 0 2px 8px rgba(90,144,176,0.08);
   }
@@ -426,7 +438,7 @@
     display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
     box-shadow: 0 2px 10px rgba(90,144,176,0.1); position: sticky; top: 0; z-index: 50;
   }
-  .detail-header-title { flex: 1; font-size: 18px; font-weight: 800; word-break: break-word; }
+  .detail-header-title { flex: 1; font-size: 18px; font-weight: 800; word-break: break-word; text-wrap: balance; }
   .detail-actions {
     display: flex;
     flex-wrap: nowrap;
@@ -468,6 +480,7 @@
   .detail-body {
     font-size: 18px; color: var(--text); line-height: 1.9;
     word-break: break-word; overflow-wrap: break-word;
+    text-wrap: pretty;
     background: #D8EED8; border-radius: 16px; padding: 20px;
     box-shadow: var(--shadow); min-height: 120px;
   }
@@ -601,16 +614,6 @@
   .video-drive-meta-text { font-size: 12px; font-weight: 600; color: var(--sky-deep); flex: 1; }
   .video-drive-meta-arrow { font-size: 13px; color: var(--text-light); }
 
-  .form-input, .form-textarea {
-    width: 100%; padding: 13px 16px; border-radius: 12px;
-    border: 1.5px solid var(--sky-mid); background: #D8EED8;
-    font-size: 15px; color: var(--text); outline: none; transition: border-color 0.2s; font-family: inherit;
-  }
-  .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: #CCE8CC; }
-  .img-upload-area {
-    border: 2px dashed var(--sky); border-radius: 12px; padding: 18px;
-    text-align: center; cursor: pointer; background: #D8EED8;
-  }
   .detail-images {
     margin-top: 16px;
     display: flex;
@@ -637,12 +640,27 @@
     box-shadow: 0 6px 22px rgba(90, 144, 176, 0.28);
   }
   
-  /* Image Viewer */
-  .img-viewer-overlay {
+  /* Image Viewer (Native <dialog> Top Layer) */
+  dialog.img-viewer-overlay {
+    border: none; padding: 0; margin: 0; max-width: none; max-height: none;
+    width: 100%; height: 100%;
     position: fixed; inset: 0; background: rgba(15, 23, 36, 0.94); z-index: 2500;
     display: none; flex-direction: column; backdrop-filter: blur(8px);
-    touch-action: none; user-select: none;
-    animation: fadeIn 0.18s ease;
+    touch-action: none; user-select: none; overscroll-behavior: contain;
+    opacity: 0;
+    transition: opacity 0.18s ease, display 0.18s allow-discrete, overlay 0.18s allow-discrete;
+  }
+  dialog.img-viewer-overlay[open] {
+    display: flex;
+    opacity: 1;
+  }
+  dialog.img-viewer-overlay::backdrop {
+    background: transparent;
+  }
+  @starting-style {
+    dialog.img-viewer-overlay[open] {
+      opacity: 0;
+    }
   }
   .img-viewer-topbar {
     position: absolute; top: 0; left: 0; right: 0; height: 58px;
@@ -732,29 +750,52 @@
     .img-viewer-bottombar { bottom: 16px; }
   }
 
-  /* 이미지 다운로드 컨텍스트 메뉴 */
+  /* 이미지 다운로드 컨텍스트 메뉴 (Native Popover) */
   .img-ctx-menu {
-    position: fixed; z-index: 2000;
+    position: fixed; inset: auto; margin: 0; border: none; z-index: 2000;
     background: var(--white); border-radius: 14px;
     box-shadow: 0 8px 32px rgba(44,74,90,0.22); padding: 8px 0;
     min-width: 180px; overflow: hidden;
     animation: fadeIn 0.15s ease;
   }
+  .img-ctx-menu:not(:popover-open) { display: none; }
   .img-ctx-item {
+    width: 100%; border: none; background: transparent; font-family: inherit; text-align: left;
     padding: 13px 20px; font-size: 15px; font-weight: 600; color: var(--text);
     cursor: pointer; display: flex; align-items: center; gap: 10px;
     transition: background 0.15s;
   }
   .img-ctx-item:hover { background: var(--sky-light); }
 
-  /* ── MODALS ── */
-  .modal-overlay {
-    position: fixed; inset: 0; background: rgba(28, 36, 44, 0.5);
-    z-index: 200; display: flex; align-items: flex-end; justify-content: center;
+  /* ── MODALS (Native <dialog> Top Layer) ── */
+  dialog.modal-overlay {
+    border: none; padding: 0; margin: 0; max-width: none; max-height: none;
+    width: 100%; height: 100%;
+    position: fixed; inset: 0; background: transparent;
+    z-index: 200; display: none; align-items: flex-end; justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s ease, display 0.2s allow-discrete, overlay 0.2s allow-discrete;
+  }
+  dialog.modal-overlay[open] {
+    display: flex;
+    opacity: 1;
+  }
+  dialog.modal-overlay::backdrop {
+    background: rgba(28, 36, 44, 0.5);
+    transition: opacity 0.2s ease, display 0.2s allow-discrete, overlay 0.2s allow-discrete;
+  }
+  @starting-style {
+    dialog.modal-overlay[open] {
+      opacity: 0;
+    }
+    dialog.modal-overlay[open]::backdrop {
+      opacity: 0;
+    }
   }
   .modal {
     background: var(--white); border-radius: 24px 24px 0 0; padding: 28px 24px 40px;
     width: 100%; max-width: 640px; max-height: 96vh; max-height: 96dvh; overflow-y: auto;
+    overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
     animation: slideUp 0.22s ease;
@@ -776,7 +817,7 @@
   }
   @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .modal-handle { width: 40px; height: 4px; background: var(--sky-mid); border-radius: 2px; margin: 0 auto 20px; }
-  .modal h2 { font-size: 20px; font-weight: 800; margin-bottom: 20px; }
+  .modal h2 { font-size: 20px; font-weight: 800; margin-bottom: 20px; text-wrap: balance; }
   .form-group { margin-bottom: 16px; }
   .form-label { font-size: 13px; font-weight: 700; color: var(--text-light); margin-bottom: 7px; display: block; }
   .form-input, .form-textarea {
@@ -826,15 +867,17 @@
   .del-modal {
     background: var(--white); border-radius: 24px 24px 0 0; padding: 36px 24px 48px;
     width: 100%; max-width: 640px; text-align: center;
+    overscroll-behavior: contain;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
     animation: slideUp 0.3s ease;
   }
 
   .toast {
-    position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+    position: fixed; inset: auto auto 28px 50%; margin: 0; border: none;
+    transform: translateX(-50%);
     background: var(--text); color: white; padding: 12px 24px; border-radius: 14px;
-    font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none;
-    white-space: nowrap;
+    font-size: 14px; z-index: 9999; opacity: 0; transition: opacity 0.3s; pointer-events: none;
+    white-space: nowrap; max-width: calc(100vw - 32px); overflow: hidden; text-overflow: ellipsis;
   }
   .toast.show { opacity: 1; }
 
@@ -842,8 +885,14 @@
   .empty-list .ei { font-size: 52px; margin-bottom: 14px; opacity: 0.45; }
   .empty-list p { color: var(--text-light); font-size: 14px; }
 
-  /* Tags */
-  .tag-radio { display: none; }
+  /* Tags (키보드·스크린리더 접근성 유지를 위해 display:none 대신 visually-hidden 사용) */
+  .tag-radio {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  .tag-radio:focus-visible + .tag-label {
+    outline: 2px solid var(--sky-deep); outline-offset: 2px;
+  }
   .tag-label {
     padding: 6px 14px; border-radius: 20px; background: var(--sky-light);
     color: var(--text-light); font-size: 13px; font-weight: 600;
@@ -854,8 +903,8 @@
     background: var(--sky-dark); color: white; border-color: var(--sky-deep);
   }
   .detail-tag-badge {
-    cursor: pointer; background: var(--sky-dark); color: white; border-radius: 8px;
-    padding: 4px 12px; font-size: 13px; font-weight: 600;
+    cursor: pointer; background: var(--sky-dark); color: white; border: none; border-radius: 8px;
+    padding: 4px 12px; font-size: 13px; font-weight: 600; font-family: inherit;
   }
 
   .app-footer {
@@ -870,7 +919,7 @@
     background: linear-gradient(135deg, #EFECE1, #E8E4D8);
     border: 1.5px solid #C8C0A8;
     border-radius: 8px; padding: 2px 10px 2px 6px;
-    font-size: 0.9em; font-weight: 600; color: #6B5D3E;
+    font-family: inherit; font-size: 0.9em; font-weight: 600; color: #6B5D3E;
     cursor: pointer; text-decoration: none;
     transition: all 0.18s; vertical-align: middle;
     white-space: nowrap; max-width: 100%;
@@ -908,11 +957,13 @@
     flex: 1; border: none; outline: none; font-size: 14px;
     color: var(--text); background: transparent; font-family: inherit;
   }
-  .note-link-list { flex: 1; overflow-y: auto; }
+  .note-link-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
   .note-link-item {
+    width: 100%; border: none; background: transparent; font-family: inherit; text-align: left;
     padding: 12px 14px; border-radius: 10px; cursor: pointer;
     display: flex; align-items: center; gap: 10px;
     transition: background 0.15s; margin-bottom: 4px;
+    content-visibility: auto; contain-intrinsic-size: auto 44px;
   }
   .note-link-item:hover { background: var(--sky-light); }
   .note-link-item-cat { font-size: 13px; flex-shrink: 0; }
@@ -923,6 +974,7 @@
   .pin-modal-box {
     background: var(--white); border-radius: 24px 24px 0 0; padding: 28px 24px 36px;
     width: 100%; max-width: 420px; text-align: center;
+    overscroll-behavior: contain;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.25);
     animation: slideUp 0.25s ease;
     border-top: 2px solid var(--border-color);
@@ -1008,13 +1060,20 @@
     transition: all 0.15s;
     font-family: inherit;
   }
-  .note-tool-btn input[type="checkbox"] { display: none; }
+  .note-tool-btn input[type="checkbox"] {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
   .note-tool-btn:hover { background: var(--sky-mid); }
   .note-tool-btn:active { transform: scale(0.96); }
-  .note-tool-btn.active {
+  .note-tool-btn.active,
+  .note-tool-btn:has(input[type="checkbox"]:checked) {
     background: var(--sky-dark);
     color: var(--white);
     border-color: var(--sky-deep);
+  }
+  .note-tool-btn:has(input[type="checkbox"]:focus-visible) {
+    outline: 2px solid var(--sky-deep); outline-offset: 2px;
   }
   .note-tool-btn.recording {
     background: #FDEAEA;
@@ -1100,16 +1159,21 @@
     transition: all 0.15s;
   }
   .cat-option-chip input[type="checkbox"] {
-    display: none;
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
   }
   .cat-option-chip:hover {
     border-color: var(--sky);
   }
-  .cat-option-chip.selected {
+  .cat-option-chip.selected,
+  .cat-option-chip:has(input[type="checkbox"]:checked) {
     background: var(--sky-dark);
     color: var(--white);
     border-color: var(--sky-deep);
     font-weight: 700;
+  }
+  .cat-option-chip:has(input[type="checkbox"]:focus-visible) {
+    outline: 2px solid var(--sky-deep); outline-offset: 2px;
   }
   .cat-option-check {
     margin-left: auto;
@@ -1349,10 +1413,8 @@
     .modal, .del-modal, .share-modal, .note-link-modal, .pin-modal-box {
       border-radius: 24px; margin: auto; max-height: 85vh;
       animation: fadeIn 0.2s ease;
-
-
     }
-    .modal-overlay { align-items: center; }
+    dialog.modal-overlay { align-items: center; }
     @keyframes fadeIn { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
     .cat-grid { max-width: 480px; margin: 0 auto; }
     .search-wrap { max-width: 480px; margin: 0 auto; }
@@ -1360,4 +1422,47 @@
     .user-bar { max-width: 480px; margin: 0 auto 16px; }
     .list-content { max-width: 640px; margin: 0 auto; }
     .detail-content { max-width: 640px; margin: 0 auto; }
+  }
+
+  /* ── 키보드 포커스 링 (접근성) ── */
+  button:focus-visible,
+  [role="button"]:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--sky-deep);
+    outline-offset: 2px;
+  }
+
+  /* ── Same-Document View Transitions ── */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 180ms;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* ── 모션 감소 환경 대응 (prefers-reduced-motion) ── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* ── 고대비 환경 대응 (prefers-contrast: more) ── */
+  @media (prefers-contrast: more) {
+    :root {
+      --text: #000000;
+      --text-light: #333333;
+      --border-color: #000000;
+      scrollbar-color: #000000 #FFFFFF;
+    }
+    .note-list-item,
+    .search-result-item,
+    .folder-row,
+    .btn-back,
+    .btn-sort-sm,
+    .tag-filter-btn {
+      border-width: 2px;
+    }
   }

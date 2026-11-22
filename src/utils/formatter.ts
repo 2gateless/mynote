@@ -124,7 +124,7 @@ export function buildVideoEmbed(url: string, index = 0) {
   return `<div class="video-embed-wrap">
 <div class="video-embed-label">${escHtml(label)}</div>
 <div class="video-embed-container">
-  <iframe src="${escHtml(embedUrl)}" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>
+  <iframe src="${escHtml(embedUrl)}" allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen loading="lazy"></iframe>
 </div>
 <a class="video-embed-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer">🔗 원본 링크로 열기</a>
 </div>`;
@@ -198,6 +198,9 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
   // 마크다운 본문 내 외부 링크(<a>) 클릭 시 PWA 단독 창이 이탈하지 않도록 새 탭 열기 속성 보장
   parsedBody = parsedBody.replace(/<a\s+(?![^>]*\btarget=)([^>]*\bhref=["']https?:\/\/[^>]*)>/gi, '<a target="_blank" rel="noopener noreferrer" $1>');
 
+  // 마크다운 본문 이미지에 지연 로딩 및 비동기 디코딩 속성 보장
+  parsedBody = parsedBody.replace(/<img\s+(?![^>]*\bloading=)/gi, '<img loading="lazy" decoding="async" ');
+
   // ⑥ KaTeX 수식 복원
   if (mathBlocks.length > 0) {
     try { await loadKatex(); } catch(e) { console.error('KaTeX load error', e); }
@@ -245,11 +248,11 @@ export async function parseMarkdownBody(rawBody: string): Promise<string> {
       if (found) {
         const cat = CATEGORIES[found.category];
         const icon = cat ? cat.icon : '📝';
-        return `<span class="note-link" data-note-id="${escHtml(found.id)}" data-note-title="${safeTitle}" title="메모로 이동: ${safeTitle}">`
-          + `<span class="note-link-icon">${icon}</span>${safeTitle}</span>`;
+        return `<button type="button" class="note-link" data-note-id="${escHtml(found.id)}" data-note-title="${safeTitle}" title="메모로 이동: ${safeTitle}">`
+          + `<span class="note-link-icon" aria-hidden="true">${icon}</span>${safeTitle}</button>`;
       } else {
         return `<span class="note-link broken" title="연결된 메모 없음: ${safeTitle}">`
-          + `<span class="note-link-icon">📝</span>${safeTitle} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
+          + `<span class="note-link-icon" aria-hidden="true">📝</span>${safeTitle} <span style="font-size:0.8em;opacity:0.6">(?)</span></span>`;
       }
     });
   }

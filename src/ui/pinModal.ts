@@ -5,6 +5,7 @@ import { doc, getDoc, setDoc, collection, addDoc, Timestamp } from 'firebase/fir
 import { db } from '../services/firebase';
 import { appState } from '../state';
 import { showToast } from '../utils/toast';
+import { openDialog, closeDialog } from './dom';
 
 const LEGACY_LOCK_PIN_STORAGE_KEY = 'mynote_lock_pin';
 const LOCK_PIN_HASH_KEY = 'mynote_lock_pin_hash_v1';
@@ -18,7 +19,8 @@ const PBKDF2_ITERATIONS = 100000;
 
 const MAX_FAIL_COUNT = 5;
 const LOCKOUT_DURATION_MS = 24 * 60 * 60 * 1000; // 24시간 잠금
-const ALERT_EMAIL = '2gateless@gmail.com';
+const ALERT_EMAIL = ((import.meta as any).env?.VITE_ALERT_EMAIL as string | undefined)?.trim() || '2gateless@gmail.com';
+const ALERT_WEBHOOK_URL = ((import.meta as any).env?.VITE_ALERT_WEBHOOK_URL as string | undefined)?.trim() || '';
 
 type PinModalMode = 'setup' | 'verify';
 
@@ -102,9 +104,10 @@ async function sendLockoutEmailNotification(attempts: number, lockedUntilMs: num
 본인이 시도한 것이 아니라면 다른 사람이 회원님의 메모 열람을 시도했을 가능성이 있으니 계정 보안 상태를 점검하시기 바랍니다.
 `.trim();
 
-  // 1) formsubmit.co AJAX 엔드포인트를 통해 2gateless@gmail.com으로 백그라운드 발송
+  // 1) 보안 웹훅(Cloud Functions 권장) 또는 formsubmit.co AJAX 엔드포인트를 통해 백그라운드 발송
+  const alertEndpoint = ALERT_WEBHOOK_URL || `https://formsubmit.co/ajax/${ALERT_EMAIL}`;
   try {
-    fetch(`https://formsubmit.co/ajax/${ALERT_EMAIL}`, {
+    fetch(alertEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -442,8 +445,7 @@ function finishModal(result: boolean) {
     clearInterval(lockoutTimerInterval);
     lockoutTimerInterval = null;
   }
-  const modal = $('pin-modal');
-  if (modal) modal.style.display = 'none';
+  closeDialog('pin-modal');
   const keypad = $('pin-keypad');
   if (keypad) keypad.classList.remove('locked-out');
   const dotsWrap = $('pin-dots');
@@ -478,8 +480,7 @@ export function openPinModal(mode: PinModalMode, canCancel = true): Promise<bool
   isProcessingStep = false;
   isOpen = true;
 
-  const modal = $('pin-modal');
-  if (modal) modal.style.display = 'flex';
+  openDialog('pin-modal');
 
   if (mode === 'verify' && isCurrentlyLockedOut()) {
     startLockoutTimer();
@@ -704,6 +705,11 @@ export function initPinModal() {
       if ((e.target as HTMLElement).id === 'pin-modal' && allowCancel) {
         finishModal(false);
       }
+    });
+    // 네이티브 <dialog> Esc / 플랫폼 뒤로가기 시 allowCancel 정책 유지
+    modal.addEventListener('cancel', (e) => {
+      e.preventDefault();
+      closePinModalByBack();
     });
   }
 

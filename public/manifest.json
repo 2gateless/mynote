@@ -5,7 +5,7 @@
   "start_url": "/mynote/",
   "scope": "/mynote/",
   "display": "standalone",
-  "background_color": "#111111",
+  "background_color": "#F7F4EB",
   "theme_color": "#7BAEC8",
   "orientation": "portrait",
   "icons": [

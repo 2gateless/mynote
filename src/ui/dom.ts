@@ -9,9 +9,75 @@ export function setDisplay(id: string, value: string) {
   if (el) el.style.display = value;
 }
 
-// 태그 칩 HTML (클릭은 이벤트 위임으로 처리 — 인라인 onclick 미사용)
+/**
+ * 네이티브 <dialog>를 Top Layer(showModal)로 안전하게 여는 헬퍼.
+ * 구형 환경에서는 open 속성으로 폴백합니다.
+ */
+export function openDialog(idOrEl: string | HTMLElement | null) {
+  const el = typeof idOrEl === 'string' ? $(idOrEl) : idOrEl;
+  if (!el) return;
+  if (typeof HTMLDialogElement !== 'undefined' && el instanceof HTMLDialogElement) {
+    if (!el.open) {
+      if (typeof el.showModal === 'function') {
+        try {
+          el.showModal();
+          return;
+        } catch {
+          // 이미 열려 있거나 연결되지 않은 경우 open 속성 폴백
+        }
+      }
+      el.setAttribute('open', '');
+    }
+    return;
+  }
+  el.style.display = 'flex';
+}
+
+/**
+ * 네이티브 <dialog>를 안전하게 닫는 헬퍼.
+ */
+export function closeDialog(idOrEl: string | HTMLElement | null) {
+  const el = typeof idOrEl === 'string' ? $(idOrEl) : idOrEl;
+  if (!el) return;
+  if (typeof HTMLDialogElement !== 'undefined' && el instanceof HTMLDialogElement) {
+    if (el.open) {
+      if (typeof el.close === 'function') {
+        el.close();
+      } else {
+        el.removeAttribute('open');
+      }
+    }
+    return;
+  }
+  el.style.display = 'none';
+}
+
+/**
+ * 네이티브 <dialog> 또는 일반 오버레이가 현재 열려 있는지 판별합니다.
+ */
+export function isDialogOpen(idOrEl: string | HTMLElement | null): boolean {
+  const el = typeof idOrEl === 'string' ? $(idOrEl) : idOrEl;
+  if (!el) return false;
+  if (typeof HTMLDialogElement !== 'undefined' && el instanceof HTMLDialogElement) {
+    return el.open;
+  }
+  return el.style.display !== 'none';
+}
+
+/**
+ * 긴 작업 중간에 메인 스레드 제어권을 브라우저에 양보합니다 (scheduler.yield 우선, setTimeout 폴백).
+ */
+export function yieldToMain(): Promise<void> {
+  const sched = (globalThis as any).scheduler;
+  if (sched && typeof sched.yield === 'function') {
+    return sched.yield();
+  }
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+// 태그 칩 HTML (클릭은 이벤트 위임으로 처리 — 키보드 접근성 포함)
 export function tagChipHtml(category: string, tag: string, className: string, style = '') {
-  return `<span class="${className}" data-tag-link data-cat="${escHtml(category)}" data-tag="${escHtml(tag)}"${style ? ` style="${style}"` : ''}>#${escHtml(tag)}</span>`;
+  return `<button type="button" class="${className}" data-tag-link data-cat="${escHtml(category)}" data-tag="${escHtml(tag)}"${style ? ` style="${style}"` : ''}>#${escHtml(tag)}</button>`;
 }
 
 // 위임된 클릭 이벤트에서 태그 칩을 처리. 처리했으면 true
@@ -65,10 +131,10 @@ export function renderFoldersList(counts: Record<string, number> = {}) {
   listEl.innerHTML = Object.entries(CATEGORIES)
     .map(([catId, info]) => {
       const count = Math.max(0, counts[catId] || 0);
-      return `<div class="folder-row" data-cat="${escHtml(catId)}">
+      return `<button type="button" class="folder-row" data-cat="${escHtml(catId)}">
         <span class="folder-name">${escHtml(info.name)}</span>
-        <span class="folder-meta"><span class="folder-count" id="cnt-${escHtml(catId)}">${count}</span> <span class="folder-arrow">›</span></span>
-      </div>`;
+        <span class="folder-meta"><span class="folder-count" id="cnt-${escHtml(catId)}">${count}</span> <span class="folder-arrow" aria-hidden="true">›</span></span>
+      </button>`;
     })
     .join('');
 }

@@ -4,7 +4,7 @@ import { escHtml, matchesSearchToken, parseMarkdownBody } from '../utils/formatt
 import { showToast } from '../utils/toast';
 import { currentScreen, showAppScreen } from '../pwa';
 import { NoteIndexItem } from '../types';
-import { $ } from './dom';
+import { $, openDialog, closeDialog } from './dom';
 
 export interface SearchModuleDeps {
   getAi: () => Promise<typeof import('../services/ai')>;
@@ -244,11 +244,11 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
     if (aiApiKeyInput) aiApiKeyInput.value = ai.getGeminiApiKey();
     if (aiProxyUrlInput) aiProxyUrlInput.value = ai.getAiProxyUrl();
     if (aiSyncCloudCb) aiSyncCloudCb.checked = false;
-    aiConfigModal.style.display = 'flex';
+    openDialog(aiConfigModal);
   }
 
   function closeAiConfigModal() {
-    if (aiConfigModal) aiConfigModal.style.display = 'none';
+    closeDialog(aiConfigModal);
   }
 
   const AI_AUTO_RAG_KEY = 'mynote_ai_auto_rag_v1';
@@ -503,7 +503,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
           ? '🔒 잠긴 메모입니다'
           : highlightKeywords(snippet, searchTokens);
 
-        return `<div class="search-result-item" data-id="${escHtml(note.id || '')}" data-cat="${escHtml(note.category)}">
+        return `<div class="search-result-item" data-id="${escHtml(note.id || '')}" data-cat="${escHtml(note.category)}" role="button" tabindex="0">
           <div class="search-result-title">${titleHtml}${simBadge}</div>
           ${catBadgesHtml}
           ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
@@ -584,7 +584,7 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       ? '🔒 잠긴 메모입니다'
       : highlightKeywords(rawSnippet, keywords);
 
-    return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}">
+    return `<div class="search-result-item" data-id="${escHtml(note.id)}" data-cat="${escHtml(note.category)}" role="button" tabindex="0">
       <div class="search-result-title">${titleHtml}</div>
       ${catBadgesHtml}
       ${getNoteTags(note).map(t => `<span class="search-result-cat" style="background:var(--sky-dark);color:white;margin-left:4px">#${escHtml(t)}</span>`).join('')}
@@ -1128,6 +1128,15 @@ export function initSearchModule(deps: SearchModuleDeps): SearchModuleApi {
       const clickedItem = itemOf(e);
       if (clickedItem?.dataset.id) {
         goToSearchDetailById(clickedItem.dataset.id, clickedItem);
+      }
+    });
+
+    searchResults.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const item = itemOf(e);
+      if (item?.dataset.id) {
+        e.preventDefault();
+        goToSearchDetailById(item.dataset.id, item);
       }
     });
   }

@@ -15,7 +15,7 @@ import { collectImagePaths } from '../utils/imagePaths';
 import { showToast } from '../utils/toast';
 import { openPinModal, syncPinFromUserMeta, getStoredLockPin } from './pinModal';
 import { Note, NoteIndexItem } from '../types';
-import { $, setDisplay, insertAtCursor } from './dom';
+import { $, insertAtCursor, openDialog, closeDialog, isDialogOpen } from './dom';
 
 export const NOTE_DRAFT_KEY = 'mynote_new_note_draft_v1';
 export const NOTE_EDIT_DRAFT_PREFIX = 'mynote_edit_draft_v1_';
@@ -101,6 +101,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     if (!catMultiselectPanel || !catMultiselectTrigger || !catMultiselectArrow) return;
     catMultiselectPanel.style.display = open ? 'block' : 'none';
     catMultiselectTrigger.classList.toggle('open', open);
+    catMultiselectTrigger.setAttribute('aria-expanded', String(open));
     catMultiselectArrow.textContent = open ? '▲ 닫기' : '▾ 선택';
   }
 
@@ -237,7 +238,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
 
   function isNoteFormDirty(): boolean {
     const modal = $('note-modal');
-    if (!modal || modal.style.display === 'none' || !initialNoteFormSnapshot) return false;
+    if (!modal || !isDialogOpen(modal) || !initialNoteFormSnapshot) return false;
     if (sessionUploadedInlineImages.length > 0) return true;
     return isSnapshotDirty(takeCurrentFormSnapshot());
   }
@@ -276,7 +277,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
       draftSaveTimer = null;
     }
     const modal = $('note-modal');
-    if (!modal || modal.style.display === 'none') return;
+    if (!modal || !isDialogOpen(modal)) return;
     try {
       const key = getActiveDraftKey();
       const snap = takeCurrentFormSnapshot();
@@ -332,7 +333,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
 
   function captureModalEditPosition() {
     const overlay = $('note-modal');
-    if (!overlay || overlay.style.display === 'none') return;
+    if (!overlay || !isDialogOpen(overlay)) return;
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
     const activeId = (document.activeElement as HTMLElement | null)?.id || lastFocusedFieldId;
     const fieldId = activeId === 'note-body' || activeId === 'note-title' || activeId === 'note-keywords'
@@ -365,13 +366,13 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
 
   function restoreModalEditPosition() {
     const overlay = $('note-modal');
-    if (!overlay || overlay.style.display === 'none' || !savedEditCursor) return;
+    if (!overlay || !isDialogOpen(overlay) || !savedEditCursor) return;
     const snapshot = savedEditCursor;
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
 
     syncNoteModalViewportHeight();
     requestAnimationFrame(() => {
-      if (overlay.style.display === 'none') return;
+      if (!isDialogOpen(overlay)) return;
       if (modalBox && snapshot.modalScrollTop > 0) {
         modalBox.scrollTop = snapshot.modalScrollTop;
       }
@@ -450,7 +451,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
 
   function syncNoteModalViewportHeight() {
     const overlay = $('note-modal');
-    if (!overlay || overlay.style.display === 'none') return;
+    if (!overlay || !isDialogOpen(overlay)) return;
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
     const vv = window.visualViewport;
     if (vv) {
@@ -494,7 +495,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function showNoteModalOverlay() {
-    setDisplay('note-modal', 'flex');
+    openDialog('note-modal');
     syncNoteModalViewportHeight();
     const modalBox = $('note-modal')?.querySelector('.modal') as HTMLElement | null;
     if (modalBox) modalBox.scrollTop = 0;
@@ -505,7 +506,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     initialNoteFormSnapshot = null;
     savedEditCursor = null;
     lastFocusedFieldId = null;
-    setDisplay('note-modal', 'none');
+    closeDialog('note-modal');
     resetNoteModalViewportStyle();
     stopRecording();
     resetInlineImgBtn(true);
@@ -652,11 +653,11 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     }
     noteLinkList.innerHTML = filtered.map(note => {
       const noteCats = getNoteCategories(note);
-      return `<div class="note-link-item" data-title="${escHtml(note.title)}">`
-        + `<span class="note-link-item-cat">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
+      return `<button type="button" class="note-link-item" data-title="${escHtml(note.title)}">`
+        + `<span class="note-link-item-cat" aria-hidden="true">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
         + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
         + getNoteTags(note).map(t => `<span class="note-link-item-tag">#${escHtml(t)}</span>`).join('')
-        + `</div>`;
+        + `</button>`;
     }).join('');
   }
 
@@ -665,13 +666,13 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     deps.ensureAllNotesCache();
     if (noteLinkSearchInput) noteLinkSearchInput.value = '';
     renderNoteLinkList('');
-    if (noteLinkModal) noteLinkModal.style.display = 'flex';
+    openDialog(noteLinkModal);
     setTimeout(() => noteLinkSearchInput?.focus(), 80);
   }
 
   function closeNoteLinkModal() {
     if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
-    if (noteLinkModal) noteLinkModal.style.display = 'none';
+    closeDialog(noteLinkModal);
   }
 
   function insertNoteLink(title: string) {
@@ -1007,6 +1008,10 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     noteLinkModal.addEventListener('click', e => {
       if ((e.target as HTMLElement).id === 'note-link-modal') closeNoteLinkModal();
     });
+    noteLinkModal.addEventListener('cancel', e => {
+      e.preventDefault();
+      closeNoteLinkModal();
+    });
   }
 
   if (noteLinkList) {
@@ -1197,6 +1202,11 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
         setCategoryPanelOpen(false);
       }
     });
+    // 네이티브 <dialog> Esc / 플랫폼 뒤로가기 취소 시 작성 중 내용 확인 보호
+    noteModal.addEventListener('cancel', e => {
+      e.preventDefault();
+      requestCloseModal(false);
+    });
   }
 
   return {
@@ -1205,9 +1215,9 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     closeModal,
     requestCloseModal,
     closeNoteLinkModal,
-    isNoteLinkModalOpen: () => Boolean(noteLinkModal && noteLinkModal.style.display !== 'none'),
+    isNoteLinkModalOpen: () => isDialogOpen(noteLinkModal),
     refreshNoteLinkListIfOpen: () => {
-      if (noteLinkModal && noteLinkModal.style.display !== 'none') {
+      if (isDialogOpen(noteLinkModal)) {
         renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '');
       }
     },

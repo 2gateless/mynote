@@ -2,11 +2,15 @@
 // (2배 더블클릭 확대 / 마우스·터치 드래그 이동 / 휠 줌 / 롱프레스 메뉴 / 다운로드)
 import { appState } from '../state';
 import { showToast } from '../utils/toast';
+import { openDialog, closeDialog, isDialogOpen } from './dom';
 
 export async function downloadImage(url: string) {
   showToast('이미지 저장 중...');
   try {
-    const response = await fetch(url);
+    const signal = typeof AbortSignal !== 'undefined' && typeof (AbortSignal as any).timeout === 'function'
+      ? (AbortSignal as any).timeout(15000)
+      : undefined;
+    const response = await fetch(url, signal ? { signal } : undefined);
     const blob = await response.blob();
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -103,7 +107,7 @@ export function initImageViewer() {
   }
 
   function closeImageViewer() {
-    if (viewer) viewer.style.display = 'none';
+    closeDialog(viewer);
     resetViewerZoom(false);
   }
 
@@ -113,12 +117,11 @@ export function initImageViewer() {
     if (!viewer || !viewerImg) return;
     viewerImg.src = url;
     if (viewerDownloadBtn) viewerDownloadBtn.dataset.url = url;
-    viewer.style.display = 'flex';
+    openDialog(viewer);
     viewerScale = initialScale || 1;
     viewerPanX = 0;
     viewerPanY = 0;
     updateViewerTransform(false);
-    viewer.focus();
   };
 
   if (viewerCloseBtn) viewerCloseBtn.onclick = () => closeImageViewer();
@@ -244,33 +247,55 @@ export function initImageViewer() {
     });
   }
 
-  // ESC 키로 뷰어 닫기
-  window.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && viewer && viewer.style.display !== 'none') {
-      closeImageViewer();
-    }
-  });
+  // 네이티브 <dialog> 닫기(Esc/플랫폼 뒤로가기) 시 줌 상태 초기화
+  if (viewer) {
+    viewer.addEventListener('close', () => {
+      resetViewerZoom(false);
+    });
+  }
 
-  // ── IMAGE CONTEXT MENU (ContextMenu & LongPress)
+  // ── IMAGE CONTEXT MENU (Native Popover + ContextMenu & LongPress)
   let ctxMenuUrl: string | null = null;
   let longPressTimer: any = null;
   let longPressTriggeredAt = 0;
-  const ctxMenu = document.getElementById('img-ctx-menu') as HTMLElement;
+  const ctxMenu = document.getElementById('img-ctx-menu') as (HTMLElement & {
+    showPopover?: () => void;
+    hidePopover?: () => void;
+  }) | null;
 
   function showImgCtxMenu(x: number, y: number, url: string) {
     if (!ctxMenu) return;
     ctxMenuUrl = url;
-    ctxMenu.style.display = 'block';
     const menuW = 200, menuH = 110;
     const vw = window.innerWidth, vh = window.innerHeight;
-    ctxMenu.style.left = Math.min(x, vw - menuW - 8) + 'px';
-    ctxMenu.style.top  = Math.min(y, vh - menuH - 8) + 'px';
+    ctxMenu.style.left = Math.max(8, Math.min(x, vw - menuW - 8)) + 'px';
+    ctxMenu.style.top  = Math.max(8, Math.min(y, vh - menuH - 8)) + 'px';
+    if (typeof ctxMenu.showPopover === 'function') {
+      try {
+        if (!ctxMenu.matches(':popover-open')) ctxMenu.showPopover();
+        return;
+      } catch {}
+    }
+    ctxMenu.style.display = 'block';
   }
   function hideImgCtxMenu() {
-    if (!ctxMenu || ctxMenu.style.display === 'none') return;
-    ctxMenu.style.display = 'none';
+    if (!ctxMenu) return;
+    if (typeof ctxMenu.hidePopover === 'function') {
+      try {
+        if (ctxMenu.matches(':popover-open')) ctxMenu.hidePopover();
+      } catch {}
+    } else if (ctxMenu.style.display !== 'none') {
+      ctxMenu.style.display = 'none';
+    }
     ctxMenuUrl = null;
   }
+
+  // 구형 브라우저용 Esc 폴백 (네이티브 <dialog>는 자체 처리)
+  window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && viewer && isDialogOpen(viewer) && !(typeof HTMLDialogElement !== 'undefined' && viewer instanceof HTMLDialogElement)) {
+      closeImageViewer();
+    }
+  });
 
   const ctxView = document.getElementById('img-ctx-view');
   if (ctxView) {

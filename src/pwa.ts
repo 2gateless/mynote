@@ -1,17 +1,13 @@
-import { appState } from './state';
 import { stopAllVideos } from './utils/formatter';
+import { isDialogOpen } from './ui/dom';
 
 export function currentScreen(): string {
-  const isShown = (id: string) => {
-    const el = document.getElementById(id);
-    return !!el && el.style.display !== 'none';
-  };
-  if (isShown('pin-modal')) return 'pin-modal';
-  if (isShown('ai-config-modal')) return 'ai-config-modal';
-  if (isShown('img-viewer')) return 'img-viewer';
-  if (isShown('note-link-modal')) return 'note-link-modal';
-  if (isShown('note-modal')) return 'modal';
-  if (isShown('del-modal')) return 'del-modal';
+  if (isDialogOpen('pin-modal')) return 'pin-modal';
+  if (isDialogOpen('ai-config-modal')) return 'ai-config-modal';
+  if (isDialogOpen('img-viewer')) return 'img-viewer';
+  if (isDialogOpen('note-link-modal')) return 'note-link-modal';
+  if (isDialogOpen('note-modal')) return 'modal';
+  if (isDialogOpen('del-modal')) return 'del-modal';
   const active = document.querySelector('.screen.active');
   return active ? active.id.replace('screen-', '') : 'home';
 }
@@ -20,9 +16,32 @@ export function showAppScreen(name: string) {
   if (name !== 'detail') {
     stopAllVideos();
   }
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById('screen-' + name)?.classList.add('active');
-  window.scrollTo(0, 0);
+  const applySwitch = () => {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById('screen-' + name)?.classList.add('active');
+    window.scrollTo(0, 0);
+  };
+
+  const active = document.querySelector('.screen.active');
+  const prevName = active ? active.id.replace('screen-', '') : '';
+  const prefersReducedMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Same-Document View Transitions API (지원 브라우저 & 모션 축소 비활성 시에만 적용)
+  const docAny = document as Document & {
+    startViewTransition?: (cb: () => void) => { finished: Promise<void> };
+  };
+  if (prevName && prevName !== name && !prefersReducedMotion && typeof docAny.startViewTransition === 'function') {
+    try {
+      docAny.startViewTransition(applySwitch);
+      return;
+    } catch {
+      // 폴백으로 즉시 전환
+    }
+  }
+  applySwitch();
 }
 
 export function showRootScreen(name: string) {

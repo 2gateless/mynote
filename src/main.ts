@@ -20,7 +20,7 @@ import {
 import { showAppScreen, showRootScreen, initPwaNavigation, currentScreen, registerServiceWorker } from './pwa';
 import { NoteIndexItem } from './types';
 import { saveNotesToLocalDb, loadNotesFromLocalDb, clearNotesLocalDb } from './services/notesCache';
-import { $, setDisplay, renderUserBar, renderFoldersList } from './ui/dom';
+import { $, closeDialog, renderUserBar, renderFoldersList } from './ui/dom';
 import { initSearchModule, SearchModuleApi } from './ui/search';
 import { initListDetailModule, ListDetailApi } from './ui/listDetail';
 import { initNoteModalModule, NoteModalApi, NOTE_DRAFT_KEY, NOTE_EDIT_DRAFT_PREFIX } from './ui/noteModal';
@@ -321,7 +321,7 @@ function stopAllSubscriptions() {
   noteModalApi?.closeModal(true);
   searchApi?.closeAiConfigModal();
   noteModalApi?.closeNoteLinkModal();
-  setDisplay('del-modal', 'none');
+  closeDialog('del-modal');
   appState.closeImageViewer?.();
 }
 
@@ -600,7 +600,7 @@ initPwaNavigation((screen) => {
     return;
   }
   if (screen === 'del-modal') {
-    setDisplay(screen, 'none');
+    closeDialog(screen);
     history.pushState(null, '', location.href);
     return;
   }
@@ -725,7 +725,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       noteModalApi.requestCloseModal(false);
     } else if (screen === 'del-modal') {
       e.preventDefault();
-      setDisplay('del-modal', 'none');
+      closeDialog('del-modal');
     } else if (screen === 'detail') {
       e.preventDefault();
       listDetailApi.goBackFromDetail();

@@ -17,7 +17,7 @@ import { showToast } from '../utils/toast';
 import { verifyLockPinForNote } from './pinModal';
 import { currentScreen, showAppScreen } from '../pwa';
 import { Note, NoteIndexItem } from '../types';
-import { $, setDisplay, tagChipHtml, handleTagLink } from './dom';
+import { $, tagChipHtml, handleTagLink, openDialog, closeDialog, yieldToMain } from './dom';
 
 export interface ListDetailDeps {
   getAi: () => Promise<typeof import('../services/ai')>;
@@ -94,14 +94,14 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     const tags = SUB_TAGS[catId];
     filterBar.style.display = 'flex';
     const tagsHtml = tags && tags.length > 0
-      ? `<div class="tag-filter-btn ${!activeTag ? 'active' : ''}" data-filter-tag="">전체</div>` +
+      ? `<button type="button" class="tag-filter-btn ${!activeTag ? 'active' : ''}" data-filter-tag="" aria-pressed="${!activeTag}">전체</button>` +
         tags.map(t =>
-          `<div class="tag-filter-btn ${t === activeTag ? 'active' : ''}" data-filter-tag="${escHtml(t)}">#${escHtml(t)}</div>`
+          `<button type="button" class="tag-filter-btn ${t === activeTag ? 'active' : ''}" data-filter-tag="${escHtml(t)}" aria-pressed="${t === activeTag}">#${escHtml(t)}</button>`
         ).join('')
       : '';
     filterBar.innerHTML =
       tagsHtml +
-      `<button type="button" class="list-search-btn" id="btn-list-search" title="메모 검색">🔍</button>`;
+      `<button type="button" class="list-search-btn" id="btn-list-search" title="메모 검색" aria-label="이 폴더에서 메모 검색">🔍</button>`;
   }
 
   function stopListSubscription() {
@@ -143,13 +143,13 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     });
 
     content.innerHTML = [...pinned, ...unpinned].map(note => `
-      <div class="note-list-item${note.pinned ? ' pinned' : ''}" data-id="${escHtml(note.id)}">
-        <div class="note-list-bullet"></div>
+      <div class="note-list-item${note.pinned ? ' pinned' : ''}" data-id="${escHtml(note.id)}" role="button" tabindex="0">
+        <div class="note-list-bullet" aria-hidden="true"></div>
         <div class="note-list-info">
           <div class="note-list-title">${note.locked ? '🔒 ' : ''}${escHtml(note.title || '제목 없음')}</div>
           <div class="note-list-date">${getNoteTags(note).map(t => tagChipHtml(resolveCategoryForTag(note, t, note.category), t, 'note-list-tag', 'color:var(--sky-dark);font-weight:600;margin-right:6px;cursor:pointer')).join('')}${fmtDate(note.createdAt)}</div>
         </div>
-        ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : (note.locked ? '<span class="pin-badge" title="잠금">🔒</span>' : '<span class="note-list-arrow">›</span>')}
+        ${note.pinned ? '<span class="pin-badge" title="핀 고정">📌</span>' : (note.locked ? '<span class="pin-badge" title="잠금">🔒</span>' : '<span class="note-list-arrow" aria-hidden="true">›</span>')}
       </div>`).join('');
   }
 
@@ -284,7 +284,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     const rawBodyText = note.body || '';
     const imgs = (note.images || []).filter(i => i?.url && !rawBodyText.includes(i.url));
     const imgHtml = imgs.length > 0
-      ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${escHtml(i.url)}" alt="이미지">`).join('')}</div>`
+      ? `<div class="detail-images">${imgs.map(i => `<img class="detail-img" src="${escHtml(i.url)}" alt="이미지" loading="lazy" decoding="async">`).join('')}</div>`
       : '';
 
     const parsedBody = await parseMarkdownBody(note.body || '');
@@ -315,19 +315,28 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       <div id="detail-backlinks-slot"></div>`;
     showAppScreen('detail');
 
-    // ⑤ 역방향 링크(Backlinks): 본문 표시와 UI 반응을 막지 않도록 비동기로 가벼운 인덱스(snippet)만 스캔
+    // ⑤ 역방향 링크(Backlinks): scheduler.yield로 메인 스레드를 양보하며 비동기 스캔 (Long Task 방지)
     const noteTitleTrimmed = (note.title || '').trim();
     if (noteTitleTrimmed) {
-      setTimeout(() => {
+      (async () => {
+        await yieldToMain();
         if (token !== detailRenderToken) return;
         const slot = $('detail-backlinks-slot');
         if (!slot) return;
         const allNotes = appState.allNotesCache || [];
         const linkPatternLower = `[[${noteTitleTrimmed.toLowerCase()}]]`;
-        const referencingNotes = allNotes.filter(n => {
-          if (!n?.id || n.id === note.id || n.locked) return false;
-          return (n.snippet || '').toLowerCase().includes(linkPatternLower);
-        });
+        const referencingNotes: NoteIndexItem[] = [];
+        for (let i = 0; i < allNotes.length; i++) {
+          if (i > 0 && i % 250 === 0) {
+            await yieldToMain();
+            if (token !== detailRenderToken) return;
+          }
+          const n = allNotes[i];
+          if (!n?.id || n.id === note.id || n.locked) continue;
+          if ((n.snippet || '').toLowerCase().includes(linkPatternLower)) {
+            referencingNotes.push(n);
+          }
+        }
         if (referencingNotes.length > 0) {
           slot.innerHTML = `
             <div class="detail-backlinks-section" style="margin-top:24px;padding-top:16px;border-top:1.5px dashed var(--sky-mid);">
@@ -346,7 +355,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
             </div>
           `;
         }
-      }, 0);
+      })();
     }
   }
 
@@ -506,6 +515,16 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
       const item = (e.target as HTMLElement).closest('.note-list-item') as HTMLElement | null;
       if (item?.dataset.id) openNoteById(item.dataset.id, 'list');
     });
+    listContent.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const target = e.target as HTMLElement;
+      if (target.closest('[data-tag-link]')) return;
+      const item = target.closest('.note-list-item') as HTMLElement | null;
+      if (item?.dataset.id) {
+        e.preventDefault();
+        openNoteById(item.dataset.id, 'list');
+      }
+    });
   }
 
   const listBack = $('list-back');
@@ -648,13 +667,13 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     btnDelDetail.onclick = () => {
       if (appState.currentNote?.id) {
         appState.deleteTargetId = appState.currentNote.id;
-        setDisplay('del-modal', 'flex');
+        openDialog('del-modal');
       }
     };
   }
 
   const delCancel = $('del-cancel');
-  if (delCancel) delCancel.onclick = () => setDisplay('del-modal', 'none');
+  if (delCancel) delCancel.onclick = () => closeDialog('del-modal');
 
   const delConfirm = $('del-confirm') as HTMLButtonElement | null;
   if (delConfirm) {
@@ -678,7 +697,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
           }
           showToast('메모가 삭제되었어요 🗑️');
         }
-        setDisplay('del-modal', 'none');
+        closeDialog('del-modal');
         appState.deleteTargetId = null;
         goBackFromDetail();
       } catch (e: any) {
@@ -707,7 +726,7 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
   const delModal = $('del-modal');
   if (delModal) {
     delModal.addEventListener('click', e => {
-      if ((e.target as HTMLElement).id === 'del-modal') delModal.style.display = 'none';
+      if ((e.target as HTMLElement).id === 'del-modal') closeDialog(delModal);
     });
   }
 
