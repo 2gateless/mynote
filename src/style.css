@@ -940,11 +940,10 @@
 
   /* 메모 링크 삽입 모달 */
   .note-link-modal {
-    background: var(--white); border-radius: 24px 24px 0 0; padding: 24px 20px 36px;
-    width: 100%; max-width: 640px; max-height: 80vh;
+    background: var(--white); border-radius: 24px 24px 0 0; padding: 24px 20px 24px;
+    width: 100%; max-width: 640px; max-height: 82dvh;
     display: flex; flex-direction: column;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
-    animation: slideUp 0.3s ease;
   }
   .note-link-search {
     background: var(--sky-light); border-radius: 12px; padding: 10px 14px;
@@ -969,6 +968,12 @@
   .note-link-item-cat { font-size: 13px; flex-shrink: 0; }
   .note-link-item-title { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .note-link-item-tag { font-size: 11px; color: var(--sky-dark); background: var(--sky-light); padding: 1px 7px; border-radius: 6px; flex-shrink: 0; }
+  .note-link-more-btn {
+    width: 100%; margin-top: 8px; padding: 10px 12px; border-radius: 10px;
+    border: 1.5px dashed var(--border-color); background: var(--sky-light);
+    color: var(--sky-dark); font-size: 12.5px; font-weight: 700; cursor: pointer;
+    font-family: inherit;
+  }
 
   /* ── PIN LOCK MODAL ── */
   .pin-modal-box {

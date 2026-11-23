@@ -93,12 +93,18 @@ export function handleTagLink(
   return true;
 }
 
-export function insertAtCursor(ta: HTMLTextAreaElement, text: string) {
-  const start = ta.selectionStart;
-  const end = ta.selectionEnd;
+export function insertAtCursor(
+  ta: HTMLTextAreaElement,
+  text: string,
+  selection?: { start: number; end: number; preventScroll?: boolean }
+) {
+  const len = ta.value.length;
+  const start = selection ? Math.max(0, Math.min(selection.start, len)) : ta.selectionStart;
+  const end = selection ? Math.max(start, Math.min(selection.end, len)) : ta.selectionEnd;
   ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
-  ta.selectionStart = ta.selectionEnd = start + text.length;
-  ta.focus();
+  const nextPos = start + text.length;
+  ta.focus(selection?.preventScroll ? { preventScroll: true } : undefined);
+  ta.setSelectionRange(nextPos, nextPos);
 }
 
 export function renderUserBar(user: Pick<User, 'displayName' | 'email' | 'photoURL'>) {

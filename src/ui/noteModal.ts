@@ -73,6 +73,14 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   const noteBodyEl = $('note-body') as HTMLTextAreaElement | null;
 
   let noteLinkSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  let noteLinkRenderLimit = 80;
+  let isNoteLinkComposing = false;
+  let savedNoteLinkPosition: {
+    modalScrollTop: number;
+    textareaScrollTop: number;
+    selectionStart: number;
+    selectionEnd: number;
+  } | null = null;
   let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let modalSessionToken = 0;
   let initialNoteFormSnapshot: NoteFormSnapshot | null = null;
@@ -365,6 +373,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function restoreModalEditPosition() {
+    if (isDialogOpen(noteLinkModal)) return;
     const overlay = $('note-modal');
     if (!overlay || !isDialogOpen(overlay) || !savedEditCursor) return;
     const snapshot = savedEditCursor;
@@ -450,10 +459,17 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function syncNoteModalViewportHeight() {
+    const vv = window.visualViewport;
+    if (vv && isDialogOpen(noteLinkModal)) {
+      const linkBox = noteLinkModal?.querySelector('.note-link-modal') as HTMLElement | null;
+      if (linkBox) {
+        linkBox.style.maxHeight = `${Math.max(220, Math.floor(vv.height - 20))}px`;
+      }
+      return;
+    }
     const overlay = $('note-modal');
     if (!overlay || !isDialogOpen(overlay)) return;
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
-    const vv = window.visualViewport;
     if (vv) {
       const prevHeight = lastViewportHeight;
       const prevScrollTop = modalBox ? modalBox.scrollTop : 0;
@@ -505,6 +521,8 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     modalSessionToken++;
     initialNoteFormSnapshot = null;
     savedEditCursor = null;
+    savedNoteLinkPosition = null;
+    isNoteLinkComposing = false;
     lastFocusedFieldId = null;
     closeDialog('note-modal');
     resetNoteModalViewportStyle();
@@ -651,7 +669,9 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
         + (kw ? `🔍 "${escHtml(kw)}" 결과 없음` : '📝 메모가 없어요') + `</div>`;
       return;
     }
-    noteLinkList.innerHTML = filtered.map(note => {
+    // 대량 메모 시 한 번에 수백~수천 개 DOM을 생성하지 않도록 상한을 두어 모달 열림/검색 지연 방지
+    const visible = filtered.slice(0, noteLinkRenderLimit);
+    const itemsHtml = visible.map(note => {
       const noteCats = getNoteCategories(note);
       return `<button type="button" class="note-link-item" data-title="${escHtml(note.title)}">`
         + `<span class="note-link-item-cat" aria-hidden="true">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
@@ -659,26 +679,99 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
         + getNoteTags(note).map(t => `<span class="note-link-item-tag">#${escHtml(t)}</span>`).join('')
         + `</button>`;
     }).join('');
+
+    const moreHtml = filtered.length > visible.length
+      ? `<button type="button" class="note-link-more-btn" id="note-link-more-btn">더 보기 (${visible.length} / ${filtered.length}개 · 검색어로 빠르게 찾기)</button>`
+      : '';
+    noteLinkList.innerHTML = itemsHtml + moreHtml;
+  }
+
+  function captureNoteBodyPositionForLink() {
+    const overlay = $('note-modal');
+    const modalBox = overlay?.querySelector('.modal') as HTMLElement | null;
+    if (!noteBodyEl) return;
+    savedNoteLinkPosition = {
+      modalScrollTop: modalBox ? modalBox.scrollTop : 0,
+      textareaScrollTop: noteBodyEl.scrollTop,
+      selectionStart: noteBodyEl.selectionStart ?? noteBodyEl.value.length,
+      selectionEnd: noteBodyEl.selectionEnd ?? noteBodyEl.value.length
+    };
+  }
+
+  function restoreNoteBodyPositionAfterLink(insertedRange?: { start: number; end: number }) {
+    const pos = savedNoteLinkPosition;
+    savedNoteLinkPosition = null;
+    const overlay = $('note-modal');
+    const modalBox = overlay?.querySelector('.modal') as HTMLElement | null;
+    if (!noteBodyEl || !overlay || !isDialogOpen(overlay)) return;
+
+    requestAnimationFrame(() => {
+      if (modalBox && pos) {
+        modalBox.scrollTop = pos.modalScrollTop;
+      }
+      try {
+        noteBodyEl.focus({ preventScroll: true });
+        if (insertedRange) {
+          noteBodyEl.setSelectionRange(insertedRange.start, insertedRange.end);
+        } else if (pos) {
+          const len = noteBodyEl.value.length;
+          noteBodyEl.setSelectionRange(Math.min(pos.selectionStart, len), Math.min(pos.selectionEnd, len));
+        }
+        if (pos) {
+          noteBodyEl.scrollTop = pos.textareaScrollTop;
+        }
+        if (modalBox) {
+          ensureActiveFieldVisibleInModal(modalBox, noteBodyEl);
+        }
+      } catch {}
+    });
   }
 
   function openNoteLinkModal() {
+    if (!savedNoteLinkPosition) {
+      captureNoteBodyPositionForLink();
+    }
     deps.ensureSearchIndexReady();
     deps.ensureAllNotesCache();
+    noteLinkRenderLimit = 80;
     if (noteLinkSearchInput) noteLinkSearchInput.value = '';
+    if (noteLinkList) noteLinkList.scrollTop = 0;
     renderNoteLinkList('');
     openDialog(noteLinkModal);
-    setTimeout(() => noteLinkSearchInput?.focus(), 80);
+    syncNoteModalViewportHeight();
+    requestAnimationFrame(() => {
+      noteLinkSearchInput?.focus({ preventScroll: true });
+    });
   }
 
-  function closeNoteLinkModal() {
+  function closeNoteLinkModal(restoreBodyFocus = true) {
     if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
+    isNoteLinkComposing = false;
+    const linkBox = noteLinkModal?.querySelector('.note-link-modal') as HTMLElement | null;
+    if (linkBox) linkBox.style.maxHeight = '';
     closeDialog(noteLinkModal);
+    if (restoreBodyFocus) {
+      restoreNoteBodyPositionAfterLink();
+    }
   }
 
   function insertNoteLink(title: string) {
+    const pos = savedNoteLinkPosition;
     const ta = $('note-body') as HTMLTextAreaElement | null;
-    if (ta) insertAtCursor(ta, `[[${title}]]`);
-    closeNoteLinkModal();
+    const linkText = `[[${title}]]`;
+    // 반드시 <dialog id="note-link-modal">을 먼저 닫아 하위 #note-modal의 inert 상태를 해제한 뒤 본문에 포커스/스크롤 복원
+    closeNoteLinkModal(false);
+    if (ta) {
+      const len = ta.value.length;
+      const start = pos ? Math.max(0, Math.min(pos.selectionStart, len)) : ta.selectionStart;
+      const end = pos ? Math.max(start, Math.min(pos.selectionEnd, len)) : ta.selectionEnd;
+      insertAtCursor(ta, linkText, { start, end, preventScroll: true });
+      const nextCursor = start + linkText.length;
+      restoreNoteBodyPositionAfterLink({ start: nextCursor, end: nextCursor });
+      scheduleSaveDraft();
+    } else {
+      savedNoteLinkPosition = null;
+    }
     showToast(`"${title}" 메모 링크를 삽입했어요 📝`);
   }
 
@@ -999,7 +1092,11 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   if (btnSave) btnSave.onclick = saveNote;
 
   const noteLinkBtn = $('note-link-btn');
-  if (noteLinkBtn) noteLinkBtn.onclick = () => openNoteLinkModal();
+  if (noteLinkBtn) {
+    // 버튼 클릭으로 #note-body 포커스가 풀리기 전에 커서/스크롤 위치를 선캡처
+    noteLinkBtn.addEventListener('pointerdown', () => captureNoteBodyPositionForLink(), { passive: true });
+    noteLinkBtn.onclick = () => openNoteLinkModal();
+  }
 
   const noteLinkCancel = $('note-link-cancel');
   if (noteLinkCancel) noteLinkCancel.onclick = () => closeNoteLinkModal();
@@ -1016,15 +1113,34 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
 
   if (noteLinkList) {
     noteLinkList.addEventListener('click', e => {
+      const moreBtn = (e.target as HTMLElement).closest('#note-link-more-btn');
+      if (moreBtn) {
+        noteLinkRenderLimit += 100;
+        renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '');
+        return;
+      }
       const item = (e.target as HTMLElement).closest('.note-link-item') as HTMLElement | null;
       if (item && item.dataset.title !== undefined) insertNoteLink(item.dataset.title);
     });
   }
 
   if (noteLinkSearchInput) {
+    noteLinkSearchInput.addEventListener('compositionstart', () => {
+      isNoteLinkComposing = true;
+    });
+    noteLinkSearchInput.addEventListener('compositionend', () => {
+      isNoteLinkComposing = false;
+      if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
+      noteLinkRenderLimit = 80;
+      renderNoteLinkList(noteLinkSearchInput.value);
+    });
     noteLinkSearchInput.addEventListener('input', () => {
       if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
-      noteLinkSearchTimer = setTimeout(() => renderNoteLinkList(noteLinkSearchInput.value), 120);
+      noteLinkSearchTimer = setTimeout(() => {
+        if (isNoteLinkComposing) return;
+        noteLinkRenderLimit = 80;
+        renderNoteLinkList(noteLinkSearchInput.value);
+      }, 100);
     });
   }
 
@@ -1217,7 +1333,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     closeNoteLinkModal,
     isNoteLinkModalOpen: () => isDialogOpen(noteLinkModal),
     refreshNoteLinkListIfOpen: () => {
-      if (isDialogOpen(noteLinkModal)) {
+      if (isDialogOpen(noteLinkModal) && !isNoteLinkComposing) {
         renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '');
       }
     },
