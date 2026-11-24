@@ -10,7 +10,7 @@ import {
   updateNoteWithIndex,
   updateNoteIndexEmbeddingMeta
 } from '../services/database';
-import { escHtml } from '../utils/formatter';
+import { escHtml, scoreKoreanTitleMatch, highlightKoreanTitleMatch } from '../utils/formatter';
 import { collectImagePaths } from '../utils/imagePaths';
 import { showToast } from '../utils/toast';
 import { openPinModal, syncPinFromUserMeta, getStoredLockPin } from './pinModal';
@@ -62,6 +62,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   const koCollator = new Intl.Collator('ko');
   const noteLinkModal = $('note-link-modal') as HTMLElement | null;
   const noteLinkSearchInput = $('note-link-search-input') as HTMLInputElement | null;
+  const noteLinkSearchClear = $('note-link-search-clear') as HTMLButtonElement | null;
   const noteLinkList = $('note-link-list') as HTMLElement | null;
   const noteCategoryOptionsEl = $('note-category-options') as HTMLElement | null;
   const catMultiselectTrigger = $('cat-multiselect-trigger') as HTMLButtonElement | null;
@@ -72,9 +73,12 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   const inlineImgInput = $('inline-img-input') as HTMLInputElement | null;
   const noteBodyEl = $('note-body') as HTMLTextAreaElement | null;
 
-  let noteLinkSearchTimer: ReturnType<typeof setTimeout> | null = null;
   let noteLinkRenderLimit = 80;
-  let isNoteLinkComposing = false;
+  let activeNoteLinkIndex = -1;
+  let visibleNoteLinkTitles: string[] = [];
+  let suppressFocusRestoreUntil = 0;
+  let lastKnownBodySelection = { start: 0, end: 0, scrollTop: 0 };
+  let hasKnownBodySelection = false;
   let savedNoteLinkPosition: {
     modalScrollTop: number;
     textareaScrollTop: number;
@@ -339,7 +343,114 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     }
   });
 
+  // 본문(#note-body)의 마지막 커서/스크롤 위치를 상시 추적하여 툴바 버튼 클릭 시에도 정확한 삽입 위치 보장
+  if (noteBodyEl) {
+    const syncBodySelection = () => {
+      lastKnownBodySelection = {
+        start: noteBodyEl.selectionStart ?? 0,
+        end: noteBodyEl.selectionEnd ?? 0,
+        scrollTop: noteBodyEl.scrollTop
+      };
+      hasKnownBodySelection = true;
+    };
+    ['focus', 'click', 'keyup', 'mouseup', 'select', 'input', 'touchend'].forEach(evt => {
+      noteBodyEl.addEventListener(evt, syncBodySelection, { passive: true });
+    });
+  }
+
+  // 미러 엘리먼트를 사용해 textarea 내 특정 문자 인덱스의 정확한 픽셀 Y좌표·줄 높이를 측정
+  let caretMirrorEl: HTMLDivElement | null = null;
+  function getTextareaCaretMetrics(ta: HTMLTextAreaElement, charIndex: number): { top: number; lineHeight: number } {
+    if (typeof document === 'undefined' || typeof window === 'undefined') {
+      return { top: 0, lineHeight: 24 };
+    }
+    if (!caretMirrorEl) {
+      caretMirrorEl = document.createElement('div');
+      caretMirrorEl.setAttribute('aria-hidden', 'true');
+      caretMirrorEl.style.position = 'fixed';
+      caretMirrorEl.style.top = '-9999px';
+      caretMirrorEl.style.left = '-9999px';
+      caretMirrorEl.style.visibility = 'hidden';
+      caretMirrorEl.style.pointerEvents = 'none';
+      caretMirrorEl.style.whiteSpace = 'pre-wrap';
+      caretMirrorEl.style.wordWrap = 'break-word';
+      caretMirrorEl.style.overflowWrap = 'break-word';
+      document.body.appendChild(caretMirrorEl);
+    }
+    const cs = window.getComputedStyle(ta);
+    caretMirrorEl.style.boxSizing = cs.boxSizing;
+    caretMirrorEl.style.width = `${ta.clientWidth}px`;
+    caretMirrorEl.style.padding = cs.padding;
+    caretMirrorEl.style.border = 'none';
+    caretMirrorEl.style.font = cs.font;
+    caretMirrorEl.style.fontSize = cs.fontSize;
+    caretMirrorEl.style.fontFamily = cs.fontFamily;
+    caretMirrorEl.style.fontWeight = cs.fontWeight;
+    caretMirrorEl.style.lineHeight = cs.lineHeight;
+    caretMirrorEl.style.letterSpacing = cs.letterSpacing;
+
+    const safeIdx = Math.max(0, Math.min(charIndex, ta.value.length));
+    caretMirrorEl.textContent = ta.value.slice(0, safeIdx);
+    const marker = document.createElement('span');
+    marker.textContent = ta.value.slice(safeIdx, safeIdx + 1) || '\u200b';
+    caretMirrorEl.appendChild(marker);
+
+    const parsedLh = parseFloat(cs.lineHeight);
+    const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : (marker.offsetHeight || 24);
+    const top = marker.offsetTop;
+    caretMirrorEl.textContent = '';
+    return { top, lineHeight };
+  }
+
+  /**
+   * 390px 이상인 #note-body 전체를 scrollIntoView('center')로 튀게 하지 않고,
+   * 실제 커서(caret) 줄이 가시 영역 밖일 때만 필요한 만큼만 정밀 스크롤합니다.
+   */
+  function scrollTextareaCaretIntoView(
+    modalBox: HTMLElement,
+    ta: HTMLTextAreaElement,
+    caretPos: number,
+    restoreScroll?: { modalScrollTop: number; textareaScrollTop: number } | null
+  ) {
+    if (restoreScroll) {
+      modalBox.scrollTop = restoreScroll.modalScrollTop;
+      ta.scrollTop = restoreScroll.textareaScrollTop;
+    }
+
+    const { top: caretTop, lineHeight } = getTextareaCaretMetrics(ta, caretPos);
+
+    // 1) textarea 자체 내부 스크롤 보정
+    if (ta.scrollHeight > ta.clientHeight + 2) {
+      const pad = 12;
+      if (caretTop < ta.scrollTop + pad) {
+        ta.scrollTop = Math.max(0, caretTop - pad);
+      } else if (caretTop + lineHeight > ta.scrollTop + ta.clientHeight - pad) {
+        ta.scrollTop = Math.max(0, caretTop + lineHeight - ta.clientHeight + pad);
+      }
+    }
+
+    // 2) 모달 스크롤 보정 (커서 줄이 이미 화면 안에 보이면 0px 이동 — 화면 점프 방지)
+    const boxRect = modalBox.getBoundingClientRect();
+    const taRect = ta.getBoundingClientRect();
+    const footerEl = $('note-modal-footer');
+    const footerHeight = footerEl ? footerEl.offsetHeight : 76;
+    const visibleTop = boxRect.top + 18;
+    const visibleBottom = boxRect.bottom - footerHeight - 14;
+
+    if (visibleBottom <= visibleTop) return;
+
+    const caretViewportTop = taRect.top + (caretTop - ta.scrollTop);
+    const caretViewportBottom = caretViewportTop + lineHeight;
+
+    if (caretViewportBottom > visibleBottom) {
+      modalBox.scrollTop += (caretViewportBottom - visibleBottom) + 18;
+    } else if (caretViewportTop < visibleTop) {
+      modalBox.scrollTop = Math.max(0, modalBox.scrollTop - (visibleTop - caretViewportTop) - 18);
+    }
+  }
+
   function captureModalEditPosition() {
+    if (isDialogOpen(noteLinkModal) || Date.now() < suppressFocusRestoreUntil) return;
     const overlay = $('note-modal');
     if (!overlay || !isDialogOpen(overlay)) return;
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
@@ -357,47 +468,50 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function ensureActiveFieldVisibleInModal(modalBox: HTMLElement, fieldEl: HTMLElement, preferEnd = false) {
-    const boxRect = modalBox.getBoundingClientRect();
-    const fieldRect = fieldEl.getBoundingClientRect();
-    // 하단 sticky 저장 버튼 영역(약 72px)을 제외한 실제 가시 영역 확인
-    const visibleBottom = boxRect.bottom - 72;
-    if (preferEnd) {
-      if (fieldRect.bottom > visibleBottom || fieldRect.bottom < boxRect.top + 40) {
-        fieldEl.scrollIntoView({ block: 'end' });
-      }
+    if (fieldEl instanceof HTMLTextAreaElement) {
+      const pos = preferEnd ? fieldEl.value.length : (fieldEl.selectionEnd ?? fieldEl.value.length);
+      scrollTextareaCaretIntoView(modalBox, fieldEl, pos);
       return;
     }
-    if (fieldRect.bottom < boxRect.top + 24 || fieldRect.top > visibleBottom - 24) {
-      fieldEl.scrollIntoView({ block: 'center' });
+    const boxRect = modalBox.getBoundingClientRect();
+    const fieldRect = fieldEl.getBoundingClientRect();
+    const footerEl = $('note-modal-footer');
+    const footerHeight = footerEl ? footerEl.offsetHeight : 76;
+    const visibleBottom = boxRect.bottom - footerHeight;
+    if (fieldRect.bottom < boxRect.top + 20 || fieldRect.top > visibleBottom - 20) {
+      fieldEl.scrollIntoView({ block: 'nearest' });
     }
   }
 
   function restoreModalEditPosition() {
-    if (isDialogOpen(noteLinkModal)) return;
+    if (isDialogOpen(noteLinkModal) || Date.now() < suppressFocusRestoreUntil) return;
     const overlay = $('note-modal');
     if (!overlay || !isDialogOpen(overlay) || !savedEditCursor) return;
     const snapshot = savedEditCursor;
+    savedEditCursor = null; // 1회 복원 후 즉시 소모하여 이후 포커스 이벤트 시 유령 점프 방지
     const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
 
     syncNoteModalViewportHeight();
     requestAnimationFrame(() => {
-      if (!isDialogOpen(overlay)) return;
-      if (modalBox && snapshot.modalScrollTop > 0) {
-        modalBox.scrollTop = snapshot.modalScrollTop;
-      }
+      if (!isDialogOpen(overlay) || isDialogOpen(noteLinkModal) || Date.now() < suppressFocusRestoreUntil) return;
       if (snapshot.fieldId === 'note-body' && noteBodyEl) {
-        let isNearEnd = false;
         try {
           noteBodyEl.focus({ preventScroll: true });
           const len = noteBodyEl.value.length;
           const s = Math.min(snapshot.selectionStart, len);
           const e = Math.min(snapshot.selectionEnd, len);
-          isNearEnd = len > 0 && s >= len * 0.65;
           noteBodyEl.setSelectionRange(s, e);
-          noteBodyEl.scrollTop = snapshot.textareaScrollTop;
+          if (modalBox) {
+            scrollTextareaCaretIntoView(modalBox, noteBodyEl, e, {
+              modalScrollTop: snapshot.modalScrollTop,
+              textareaScrollTop: snapshot.textareaScrollTop
+            });
+          }
         } catch {}
-        if (modalBox) ensureActiveFieldVisibleInModal(modalBox, noteBodyEl, isNearEnd);
       } else if (snapshot.fieldId) {
+        if (modalBox && snapshot.modalScrollTop > 0) {
+          modalBox.scrollTop = snapshot.modalScrollTop;
+        }
         const el = $(snapshot.fieldId) as HTMLInputElement | null;
         if (el) {
           try { el.focus({ preventScroll: true }); } catch {}
@@ -461,62 +575,81 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   let lastAppliedVvHeight = 0;
   let lastAppliedVvOffsetTop = -1;
   let lastAppliedLinkVvHeight = 0;
+  let lastAppliedLinkVvOffsetTop = -1;
 
   function syncNoteModalViewportHeight(force = false) {
     const vv = window.visualViewport;
-    if (vv && isDialogOpen(noteLinkModal)) {
+    if (!vv) return;
+
+    // 1) 메모 링크 검색 모달이 열려 있을 때: 가시 뷰포트(키보드 위쪽 영역) 상단에 정확히 맞춤
+    if (noteLinkModal && isDialogOpen(noteLinkModal)) {
       const nextH = Math.floor(vv.height);
-      if (!force && Math.abs(nextH - lastAppliedLinkVvHeight) < 1) return;
-      lastAppliedLinkVvHeight = nextH;
-      const linkBox = noteLinkModal?.querySelector('.note-link-modal') as HTMLElement | null;
-      if (linkBox) {
-        linkBox.style.maxHeight = `${Math.max(220, nextH - 20)}px`;
+      const nextTop = Math.floor(vv.offsetTop);
+      if (force || Math.abs(nextH - lastAppliedLinkVvHeight) >= 1 || Math.abs(nextTop - lastAppliedLinkVvOffsetTop) >= 1) {
+        lastAppliedLinkVvHeight = nextH;
+        lastAppliedLinkVvOffsetTop = nextTop;
+        noteLinkModal.style.height = `${nextH}px`;
+        noteLinkModal.style.top = `${nextTop}px`;
+        noteLinkModal.style.bottom = 'auto';
+        const linkBox = noteLinkModal.querySelector('.note-link-modal') as HTMLElement | null;
+        if (linkBox) {
+          linkBox.style.maxHeight = `${Math.max(180, nextH - 16)}px`;
+        }
       }
-      return;
     }
+
+    // 2) 하위 메모 작성·수정 모달도 항상 최신 뷰포트 치수로 동기화 (링크 모달 닫힐 때 뒤늦은 점프 방지)
     const overlay = $('note-modal');
     if (!overlay || !isDialogOpen(overlay)) return;
-    if (vv) {
-      // 타이핑·커서 이동 중 visualViewport scroll 이벤트가 연속 발생해도 실제 치수가 같으면 강제 리플로우 차단
-      if (
-        !force &&
-        Math.abs(vv.height - lastAppliedVvHeight) < 1 &&
-        Math.abs(vv.offsetTop - lastAppliedVvOffsetTop) < 1
-      ) {
-        return;
+
+    if (
+      !force &&
+      Math.abs(vv.height - lastAppliedVvHeight) < 1 &&
+      Math.abs(vv.offsetTop - lastAppliedVvOffsetTop) < 1
+    ) {
+      return;
+    }
+    lastAppliedVvHeight = vv.height;
+    lastAppliedVvOffsetTop = vv.offsetTop;
+
+    const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
+    const prevHeight = lastViewportHeight;
+    const prevScrollTop = modalBox ? modalBox.scrollTop : 0;
+    lastViewportHeight = vv.height;
+
+    overlay.style.height = `${vv.height}px`;
+    overlay.style.top = `${vv.offsetTop}px`;
+    overlay.style.bottom = 'auto';
+    if (modalBox) {
+      modalBox.style.maxHeight = `${Math.max(240, Math.floor(vv.height - 12))}px`;
+      if (prevScrollTop > 0 && modalBox.scrollTop === 0) {
+        modalBox.scrollTop = prevScrollTop;
       }
-      lastAppliedVvHeight = vv.height;
-      lastAppliedVvOffsetTop = vv.offsetTop;
-
-      const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
-      const prevHeight = lastViewportHeight;
-      const prevScrollTop = modalBox ? modalBox.scrollTop : 0;
-      lastViewportHeight = vv.height;
-
-      overlay.style.height = `${vv.height}px`;
-      overlay.style.top = `${vv.offsetTop}px`;
-      overlay.style.bottom = 'auto';
-      if (modalBox) {
-        modalBox.style.maxHeight = `${Math.max(240, Math.floor(vv.height - 12))}px`;
-        // 키보드 열림/닫힘으로 뷰포트가 변해도 스크롤이 0으로 튀지 않도록 보정
-        if (prevScrollTop > 0 && modalBox.scrollTop === 0) {
-          modalBox.scrollTop = prevScrollTop;
-        }
-        // 키보드가 올라와 화면이 줄어들었을 때 포커스된 본문 입력칸이 가려지지 않도록 유지
-        if (prevHeight - vv.height > 80) {
-          const activeEl = document.activeElement as HTMLElement | null;
-          if (activeEl && (activeEl.id === 'note-body' || activeEl.id === 'note-title' || activeEl.id === 'note-keywords')) {
-            requestAnimationFrame(() => ensureActiveFieldVisibleInModal(modalBox, activeEl));
-          }
+      // 메모 링크 모달이 닫혀 있고 키보드가 새로 올라왔을 때만 실제 커서 줄 가시성 보정
+      if (!isDialogOpen(noteLinkModal) && prevHeight - vv.height > 80) {
+        const activeEl = document.activeElement as HTMLElement | null;
+        if (activeEl && (activeEl.id === 'note-body' || activeEl.id === 'note-title' || activeEl.id === 'note-keywords')) {
+          requestAnimationFrame(() => ensureActiveFieldVisibleInModal(modalBox, activeEl));
         }
       }
     }
   }
 
+  function resetNoteLinkModalViewportStyle() {
+    lastAppliedLinkVvHeight = 0;
+    lastAppliedLinkVvOffsetTop = -1;
+    if (!noteLinkModal) return;
+    noteLinkModal.style.height = '';
+    noteLinkModal.style.top = '';
+    noteLinkModal.style.bottom = '';
+    const linkBox = noteLinkModal.querySelector('.note-link-modal') as HTMLElement | null;
+    if (linkBox) linkBox.style.maxHeight = '';
+  }
+
   function resetNoteModalViewportStyle() {
     lastAppliedVvHeight = 0;
     lastAppliedVvOffsetTop = -1;
-    lastAppliedLinkVvHeight = 0;
+    resetNoteLinkModalViewportStyle();
     const overlay = $('note-modal');
     if (!overlay) return;
     overlay.style.height = '';
@@ -533,6 +666,8 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function showNoteModalOverlay() {
+    hasKnownBodySelection = false;
+    lastKnownBodySelection = { start: 0, end: 0, scrollTop: 0 };
     openDialog('note-modal');
     syncNoteModalViewportHeight(true);
     const modalBox = $('note-modal')?.querySelector('.modal') as HTMLElement | null;
@@ -544,7 +679,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     initialNoteFormSnapshot = null;
     savedEditCursor = null;
     savedNoteLinkPosition = null;
-    isNoteLinkComposing = false;
+    hasKnownBodySelection = false;
     lastFocusedFieldId = null;
     closeDialog('note-modal');
     resetNoteModalViewportStyle();
@@ -673,106 +808,180 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     return appState.sortedNotesByTitle;
   }
 
-  function renderNoteLinkList(keyword: string) {
+  function syncActiveNoteLinkItemUI(scrollIntoView = false) {
     if (!noteLinkList) return;
-    const kw = keyword.toLowerCase().trim();
+    const items = noteLinkList.querySelectorAll<HTMLElement>('.note-link-item');
+    items.forEach((el, idx) => {
+      const isAct = idx === activeNoteLinkIndex;
+      el.classList.toggle('active', isAct);
+      if (isAct && scrollIntoView) {
+        el.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
+  function renderNoteLinkList(rawKeyword: string, resetScroll = true) {
+    if (!noteLinkList) return;
+    const kw = rawKeyword.trim();
+    if (noteLinkSearchClear) {
+      noteLinkSearchClear.style.display = rawKeyword.length > 0 ? 'block' : 'none';
+    }
+
     const allNotes = appState.allNotesCache || [];
     if (allNotes.length === 0 && !deps.isNotesLoaded()) {
-      noteLinkList.innerHTML = `<div style="text-align:center;padding:28px;color:var(--text-light);font-size:13px">⏳ 메모 목록을 불러오는 중...</div>`;
+      visibleNoteLinkTitles = [];
+      activeNoteLinkIndex = -1;
+      noteLinkList.innerHTML = `<div style="text-align:center;padding:24px;color:var(--text-light);font-size:13px">⏳ 메모 목록을 불러오는 중...</div>`;
       return;
     }
-    const filtered = getSortedNotesByTitle().filter(n =>
-      n.id !== appState.editingNoteId &&
-      (!kw || (n.title || '').toLowerCase().includes(kw))
-    );
+
+    const baseSorted = getSortedNotesByTitle();
+    let filtered: NoteIndexItem[];
+
+    if (!kw) {
+      filtered = baseSorted.filter(n => n.id !== appState.editingNoteId);
+    } else {
+      const scored: { note: NoteIndexItem; score: number }[] = [];
+      for (const n of baseSorted) {
+        if (n.id === appState.editingNoteId) continue;
+        const s = scoreKoreanTitleMatch(n.title || '', kw);
+        if (s > 0) {
+          scored.push({ note: n, score: s });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+      filtered = scored.map(x => x.note);
+    }
 
     if (filtered.length === 0) {
-      noteLinkList.innerHTML = `<div style="text-align:center;padding:28px;color:var(--text-light);font-size:13px">`
-        + (kw ? `🔍 "${escHtml(kw)}" 결과 없음` : '📝 메모가 없어요') + `</div>`;
+      visibleNoteLinkTitles = [];
+      activeNoteLinkIndex = -1;
+      noteLinkList.innerHTML = `<div style="text-align:center;padding:24px;color:var(--text-light);font-size:13px">`
+        + (kw ? `🔍 "${escHtml(kw)}" 일치하는 메모 제목이 없어요` : '📝 메모가 없어요') + `</div>`;
       return;
     }
-    // 대량 메모 시 한 번에 수백~수천 개 DOM을 생성하지 않도록 상한을 두어 모달 열림/검색 지연 방지
+
     const visible = filtered.slice(0, noteLinkRenderLimit);
-    const itemsHtml = visible.map(note => {
+    visibleNoteLinkTitles = visible.map(n => n.title || '');
+    if (activeNoteLinkIndex >= visible.length) {
+      activeNoteLinkIndex = -1;
+    }
+
+    const itemsHtml = visible.map((note, idx) => {
       const noteCats = getNoteCategories(note);
-      return `<button type="button" class="note-link-item" data-title="${escHtml(note.title)}">`
+      const titleHtml = kw ? highlightKoreanTitleMatch(note.title || '', kw) : escHtml(note.title || '');
+      const activeCls = idx === activeNoteLinkIndex ? ' active' : '';
+      return `<button type="button" class="note-link-item${activeCls}" data-title="${escHtml(note.title)}">`
         + `<span class="note-link-item-cat" aria-hidden="true">${CATEGORIES[noteCats[0] || note.category]?.icon || '📝'}</span>`
-        + `<span class="note-link-item-title">${escHtml(note.title)}</span>`
+        + `<span class="note-link-item-title">${titleHtml}</span>`
         + getNoteTags(note).map(t => `<span class="note-link-item-tag">#${escHtml(t)}</span>`).join('')
         + `</button>`;
     }).join('');
 
     const moreHtml = filtered.length > visible.length
-      ? `<button type="button" class="note-link-more-btn" id="note-link-more-btn">더 보기 (${visible.length} / ${filtered.length}개 · 검색어로 빠르게 찾기)</button>`
+      ? `<button type="button" class="note-link-more-btn" id="note-link-more-btn">더 보기 (${visible.length} / ${filtered.length}개)</button>`
       : '';
     noteLinkList.innerHTML = itemsHtml + moreHtml;
+    if (resetScroll) {
+      noteLinkList.scrollTop = 0;
+    }
   }
 
   function captureNoteBodyPositionForLink() {
     const overlay = $('note-modal');
     const modalBox = overlay?.querySelector('.modal') as HTMLElement | null;
     if (!noteBodyEl) return;
+    const isBodyActive = document.activeElement === noteBodyEl;
+    const selStart = isBodyActive
+      ? (noteBodyEl.selectionStart ?? noteBodyEl.value.length)
+      : (hasKnownBodySelection ? lastKnownBodySelection.start : (noteBodyEl.selectionStart ?? noteBodyEl.value.length));
+    const selEnd = isBodyActive
+      ? (noteBodyEl.selectionEnd ?? noteBodyEl.value.length)
+      : (hasKnownBodySelection ? lastKnownBodySelection.end : (noteBodyEl.selectionEnd ?? noteBodyEl.value.length));
     savedNoteLinkPosition = {
       modalScrollTop: modalBox ? modalBox.scrollTop : 0,
       textareaScrollTop: noteBodyEl.scrollTop,
-      selectionStart: noteBodyEl.selectionStart ?? noteBodyEl.value.length,
-      selectionEnd: noteBodyEl.selectionEnd ?? noteBodyEl.value.length
+      selectionStart: selStart,
+      selectionEnd: selEnd
     };
   }
 
   function restoreNoteBodyPositionAfterLink(insertedRange?: { start: number; end: number }) {
     const pos = savedNoteLinkPosition;
     savedNoteLinkPosition = null;
+    suppressFocusRestoreUntil = Date.now() + 450;
+    savedEditCursor = null;
+
     const overlay = $('note-modal');
     const modalBox = overlay?.querySelector('.modal') as HTMLElement | null;
     if (!noteBodyEl || !overlay || !isDialogOpen(overlay)) return;
 
-    requestAnimationFrame(() => {
-      if (modalBox && pos) {
-        modalBox.scrollTop = pos.modalScrollTop;
+    const len = noteBodyEl.value.length;
+    const targetStart = insertedRange
+      ? Math.max(0, Math.min(insertedRange.start, len))
+      : (pos ? Math.max(0, Math.min(pos.selectionStart, len)) : (noteBodyEl.selectionStart ?? len));
+    const targetEnd = insertedRange
+      ? Math.max(targetStart, Math.min(insertedRange.end, len))
+      : (pos ? Math.max(targetStart, Math.min(pos.selectionEnd, len)) : (noteBodyEl.selectionEnd ?? len));
+
+    try {
+      noteBodyEl.focus({ preventScroll: true });
+      noteBodyEl.setSelectionRange(targetStart, targetEnd);
+      if (modalBox) {
+        scrollTextareaCaretIntoView(
+          modalBox,
+          noteBodyEl,
+          targetEnd,
+          pos ? { modalScrollTop: pos.modalScrollTop, textareaScrollTop: pos.textareaScrollTop } : null
+        );
       }
-      try {
-        noteBodyEl.focus({ preventScroll: true });
-        if (insertedRange) {
-          noteBodyEl.setSelectionRange(insertedRange.start, insertedRange.end);
-        } else if (pos) {
-          const len = noteBodyEl.value.length;
-          noteBodyEl.setSelectionRange(Math.min(pos.selectionStart, len), Math.min(pos.selectionEnd, len));
-        }
-        if (pos) {
-          noteBodyEl.scrollTop = pos.textareaScrollTop;
-        }
-        if (modalBox) {
-          ensureActiveFieldVisibleInModal(modalBox, noteBodyEl);
-        }
-      } catch {}
-    });
+      lastKnownBodySelection = {
+        start: targetStart,
+        end: targetEnd,
+        scrollTop: noteBodyEl.scrollTop
+      };
+      hasKnownBodySelection = true;
+    } catch {}
+
+    // 모바일 가상 키보드 레이아웃 전환이 뒤늦게 완료될 때 커서가 가려진 경우에만 조용히 보정 (이미 보이면 0px 이동)
+    setTimeout(() => {
+      if (!isDialogOpen(overlay) || isDialogOpen(noteLinkModal) || document.activeElement !== noteBodyEl) return;
+      if (modalBox) {
+        scrollTextareaCaretIntoView(modalBox, noteBodyEl, noteBodyEl.selectionEnd ?? targetEnd);
+      }
+    }, 140);
   }
 
   function openNoteLinkModal() {
+    suppressFocusRestoreUntil = Date.now() + 450;
+    savedEditCursor = null;
     if (!savedNoteLinkPosition) {
       captureNoteBodyPositionForLink();
     }
     deps.ensureSearchIndexReady();
     deps.ensureAllNotesCache();
     noteLinkRenderLimit = 80;
+    activeNoteLinkIndex = -1;
     if (noteLinkSearchInput) noteLinkSearchInput.value = '';
-    if (noteLinkList) noteLinkList.scrollTop = 0;
-    renderNoteLinkList('');
+    renderNoteLinkList('', true);
     openDialog(noteLinkModal);
     syncNoteModalViewportHeight(true);
+    noteLinkSearchInput?.focus({ preventScroll: true });
     requestAnimationFrame(() => {
-      noteLinkSearchInput?.focus({ preventScroll: true });
+      syncNoteModalViewportHeight(true);
+      if (document.activeElement !== noteLinkSearchInput) {
+        noteLinkSearchInput?.focus({ preventScroll: true });
+      }
     });
   }
 
   function closeNoteLinkModal(restoreBodyFocus = true) {
-    if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
-    isNoteLinkComposing = false;
-    lastAppliedLinkVvHeight = 0;
-    const linkBox = noteLinkModal?.querySelector('.note-link-modal') as HTMLElement | null;
-    if (linkBox) linkBox.style.maxHeight = '';
+    suppressFocusRestoreUntil = Date.now() + 450;
+    savedEditCursor = null;
+    activeNoteLinkIndex = -1;
+    resetNoteLinkModalViewportStyle();
     closeDialog(noteLinkModal);
+    syncNoteModalViewportHeight(true);
     if (restoreBodyFocus) {
       restoreNoteBodyPositionAfterLink();
     }
@@ -782,14 +991,16 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     const pos = savedNoteLinkPosition;
     const ta = $('note-body') as HTMLTextAreaElement | null;
     const linkText = `[[${title}]]`;
-    // 반드시 <dialog id="note-link-modal">을 먼저 닫아 하위 #note-modal의 inert 상태를 해제한 뒤 본문에 포커스/스크롤 복원
+    // 1) 링크 모달을 즉시 닫아 하위 #note-modal의 inert 상태를 해제
     closeNoteLinkModal(false);
+    // 2) 지연 프레임 없이 동기적으로 텍스트 삽입 + 커서 배치 + 정밀 스크롤 복원
     if (ta) {
       const len = ta.value.length;
       const start = pos ? Math.max(0, Math.min(pos.selectionStart, len)) : ta.selectionStart;
       const end = pos ? Math.max(start, Math.min(pos.selectionEnd, len)) : ta.selectionEnd;
-      insertAtCursor(ta, linkText, { start, end, preventScroll: true });
+      ta.value = ta.value.slice(0, start) + linkText + ta.value.slice(end);
       const nextCursor = start + linkText.length;
+      savedNoteLinkPosition = pos;
       restoreNoteBodyPositionAfterLink({ start: nextCursor, end: nextCursor });
       scheduleSaveDraft();
     } else {
@@ -1116,8 +1327,9 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
 
   const noteLinkBtn = $('note-link-btn');
   if (noteLinkBtn) {
-    // 버튼 클릭으로 #note-body 포커스가 풀리기 전에 커서/스크롤 위치를 선캡처
+    // 버튼 클릭으로 #note-body 포커스가 풀리기 전에 커서/스크롤 위치를 선캡처하고 키보드 깜빡임 방지
     noteLinkBtn.addEventListener('pointerdown', () => captureNoteBodyPositionForLink(), { passive: true });
+    noteLinkBtn.addEventListener('mousedown', e => e.preventDefault());
     noteLinkBtn.onclick = () => openNoteLinkModal();
   }
 
@@ -1135,11 +1347,17 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   if (noteLinkList) {
+    // 항목 클릭 시 검색 입력창이 먼저 blur되어 모바일 키보드가 내려갔다 다시 올라오는 화면 출렁임 방지
+    noteLinkList.addEventListener('mousedown', e => {
+      if ((e.target as HTMLElement).closest('.note-link-item, #note-link-more-btn')) {
+        e.preventDefault();
+      }
+    });
     noteLinkList.addEventListener('click', e => {
       const moreBtn = (e.target as HTMLElement).closest('#note-link-more-btn');
       if (moreBtn) {
         noteLinkRenderLimit += 100;
-        renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '');
+        renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '', false);
         return;
       }
       const item = (e.target as HTMLElement).closest('.note-link-item') as HTMLElement | null;
@@ -1147,23 +1365,59 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     });
   }
 
-  if (noteLinkSearchInput) {
-    noteLinkSearchInput.addEventListener('compositionstart', () => {
-      isNoteLinkComposing = true;
-    });
-    noteLinkSearchInput.addEventListener('compositionend', () => {
-      isNoteLinkComposing = false;
-      if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
+  if (noteLinkSearchClear && noteLinkSearchInput) {
+    noteLinkSearchClear.addEventListener('mousedown', e => e.preventDefault());
+    noteLinkSearchClear.addEventListener('click', () => {
+      noteLinkSearchInput.value = '';
       noteLinkRenderLimit = 80;
-      renderNoteLinkList(noteLinkSearchInput.value);
+      activeNoteLinkIndex = -1;
+      renderNoteLinkList('', true);
+      noteLinkSearchInput.focus({ preventScroll: true });
     });
+  }
+
+  if (noteLinkSearchInput) {
+    // 한글 조합(IME) 중에도 엔터 없이 글자를 치는 즉시 아래 목록이 실시간 필터링되도록 즉시 렌더링
     noteLinkSearchInput.addEventListener('input', () => {
-      if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
-      noteLinkSearchTimer = setTimeout(() => {
-        if (isNoteLinkComposing) return;
-        noteLinkRenderLimit = 80;
-        renderNoteLinkList(noteLinkSearchInput.value);
-      }, 100);
+      noteLinkRenderLimit = 80;
+      activeNoteLinkIndex = -1;
+      renderNoteLinkList(noteLinkSearchInput.value, true);
+    });
+
+    noteLinkSearchInput.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'ArrowDown') {
+        if (visibleNoteLinkTitles.length === 0) return;
+        e.preventDefault();
+        activeNoteLinkIndex = (activeNoteLinkIndex + 1) % visibleNoteLinkTitles.length;
+        syncActiveNoteLinkItemUI(true);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        if (visibleNoteLinkTitles.length === 0) return;
+        e.preventDefault();
+        activeNoteLinkIndex = activeNoteLinkIndex <= 0
+          ? visibleNoteLinkTitles.length - 1
+          : activeNoteLinkIndex - 1;
+        syncActiveNoteLinkItemUI(true);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        // 한글 조합 완료용 Enter 직후이거나 모바일 검색 키를 눌렀을 때도 최신 입력값으로 먼저 동기화
+        renderNoteLinkList(noteLinkSearchInput.value, false);
+        if (activeNoteLinkIndex >= 0 && activeNoteLinkIndex < visibleNoteLinkTitles.length) {
+          insertNoteLink(visibleNoteLinkTitles[activeNoteLinkIndex]);
+          return;
+        }
+        // 결과가 단 1개이거나 검색어와 정확히 일치하는 제목이 1순위이면 엔터로 즉시 삽입
+        const qNorm = noteLinkSearchInput.value.trim().toLowerCase();
+        if (
+          visibleNoteLinkTitles.length === 1 ||
+          (qNorm && visibleNoteLinkTitles.length > 0 && visibleNoteLinkTitles[0].trim().toLowerCase() === qNorm)
+        ) {
+          insertNoteLink(visibleNoteLinkTitles[0]);
+        }
+      }
     });
   }
 
@@ -1356,8 +1610,8 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     closeNoteLinkModal,
     isNoteLinkModalOpen: () => isDialogOpen(noteLinkModal),
     refreshNoteLinkListIfOpen: () => {
-      if (isDialogOpen(noteLinkModal) && !isNoteLinkComposing) {
-        renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '');
+      if (isDialogOpen(noteLinkModal)) {
+        renderNoteLinkList(noteLinkSearchInput ? noteLinkSearchInput.value : '', false);
       }
     },
     clearDraftTimer: () => {

@@ -288,8 +288,181 @@ export function stripMarkupForSearch(raw: string): string {
     .trim();
 }
 
-function escapeRegExpStr(str: string): string {
+export function escapeRegExpStr(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─────────────────────────────────────────────
+// 한글 IME 조합 중간 상태(초성·연음 직전 받침) 호환 메모 제목 검색 유틸리티
+// ─────────────────────────────────────────────
+const HANGUL_CHO = [
+  'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ',
+  'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'
+];
+
+// 종성 인덱스(1~27)가 다음 음절 초성으로 분리(연음)될 때: [앞 음절에 남는 종성 인덱스, 뒤 음절로 넘어가는 초성 문자]
+const HANGUL_JONG_SPLIT: Record<number, [number, string]> = {
+  1: [0, 'ㄱ'], 2: [0, 'ㄲ'], 3: [1, 'ㅅ'], 4: [0, 'ㄴ'], 5: [4, 'ㅈ'], 6: [4, 'ㅎ'],
+  7: [0, 'ㄷ'], 8: [0, 'ㄹ'], 9: [8, 'ㄱ'], 10: [8, 'ㅁ'], 11: [8, 'ㅂ'], 12: [8, 'ㅅ'],
+  13: [8, 'ㅌ'], 14: [8, 'ㅍ'], 15: [8, 'ㅎ'], 16: [0, 'ㅁ'], 17: [0, 'ㅂ'], 18: [17, 'ㅅ'],
+  19: [0, 'ㅅ'], 20: [0, 'ㅆ'], 21: [0, 'ㅇ'], 22: [0, 'ㅈ'], 23: [0, 'ㅊ'], 24: [0, 'ㅋ'],
+  25: [0, 'ㅌ'], 26: [0, 'ㅍ'], 27: [0, 'ㅎ']
+};
+
+const koreanImeRegexCache = new Map<string, RegExp>();
+
+function choRangePattern(choChar: string): string {
+  const choIdx = HANGUL_CHO.indexOf(choChar);
+  if (choIdx === -1) return escapeRegExpStr(choChar);
+  const start = String.fromCharCode(0xac00 + choIdx * 588);
+  const end = String.fromCharCode(0xac00 + choIdx * 588 + 587);
+  return `(?:${escapeRegExpStr(choChar)}|[${start}-${end}])`;
+}
+
+/**
+ * 한글 타이핑 도중의 토큰(초성 단독, 받침 입력 전, 다음 글자 초성이 앞 받침에 임시 결합된 상태 등)을
+ * 끊김 없이 매칭하는 정규식을 생성합니다.
+ */
+export function buildKoreanImeTokenRegex(token: string): RegExp {
+  const cached = koreanImeRegexCache.get(token);
+  if (cached) return cached;
+
+  const chars = Array.from(token);
+  let pattern = '';
+
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    const isLast = i === chars.length - 1;
+    const code = ch.charCodeAt(0);
+
+    // 1) 호환 초성 자모(ㄱ~ㅎ): 어느 위치에 있든 해당 초성 음절 전체 매칭
+    if (HANGUL_CHO.includes(ch)) {
+      pattern += choRangePattern(ch);
+      continue;
+    }
+
+    // 2) 마지막 글자가 완성형 한글 음절(가~힣)인 경우: IME 조합 중간 상태까지 포괄
+    if (isLast && code >= 0xac00 && code <= 0xd7a3) {
+      const offset = code - 0xac00;
+      const cho = Math.floor(offset / 588);
+      const jung = Math.floor((offset % 588) / 28);
+      const jong = offset % 28;
+
+      if (jong === 0) {
+        // 받침 없는 음절(예: '가' -> '가'~'갛' 모두 매칭하여 '강', '간' 등 타이핑 중 유지)
+        const base = String.fromCharCode(0xac00 + cho * 588 + jung * 28);
+        const endJong = String.fromCharCode(0xac00 + cho * 588 + jung * 28 + 27);
+        pattern += `[${base}-${endJong}]`;
+      } else {
+        // 받침 있는 음절(예: '간' -> '간' 자체 또는 '가' + 초성 'ㄴ'[나-닣] 연음 대기 상태 매칭)
+        const split = HANGUL_JONG_SPLIT[jong];
+        if (split) {
+          const [remainJong, nextCho] = split;
+          const prevSyllable = String.fromCharCode(0xac00 + cho * 588 + jung * 28 + remainJong);
+          pattern += `(?:${escapeRegExpStr(ch)}|${escapeRegExpStr(prevSyllable)}${choRangePattern(nextCho)})`;
+        } else {
+          pattern += escapeRegExpStr(ch);
+        }
+      }
+      continue;
+    }
+
+    pattern += escapeRegExpStr(ch);
+  }
+
+  const re = new RegExp(pattern, 'i');
+  if (koreanImeRegexCache.size > 250) {
+    koreanImeRegexCache.clear();
+  }
+  koreanImeRegexCache.set(token, re);
+  return re;
+}
+
+/**
+ * 메모 링크 검색 시 한글 조합 중(초성·연음 중간 단계 포함)에도 엔터 없이 즉시 제목 매칭 점수 산출.
+ * 매칭되지 않으면 0, 매칭되면 우선순위 점수(> 0)를 반환합니다.
+ */
+export function scoreKoreanTitleMatch(title: string, rawQuery: string): number {
+  if (!title) return 0;
+  const q = rawQuery.trim();
+  if (!q) return 1;
+
+  const titleTrimmed = title.trim();
+  const titleLower = titleTrimmed.toLowerCase();
+  const qLower = q.toLowerCase();
+
+  if (titleLower === qLower) return 1000;
+  if (titleLower.startsWith(qLower)) return 600;
+
+  const tokens = q.split(/\s+/).filter(Boolean);
+  let score = 100;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const tokLower = tok.toLowerCase();
+    const directIdx = titleLower.indexOf(tokLower);
+    if (directIdx !== -1) {
+      if (i === 0 && directIdx === 0) score += 400;
+      else if (directIdx === 0 || /[\s[\]()/_-]/.test(titleLower[directIdx - 1])) score += 120;
+      else score += 60;
+      continue;
+    }
+    const imeRe = buildKoreanImeTokenRegex(tok);
+    const m = imeRe.exec(titleTrimmed);
+    if (!m) return 0;
+    if (i === 0 && m.index === 0) score += 320;
+    else if (m.index === 0 || /[\s[\]()/_-]/.test(titleTrimmed[m.index - 1])) score += 90;
+    else score += 40;
+  }
+  return score;
+}
+
+/**
+ * 메모 제목에서 검색어(한글 조합 중간 상태 포함)와 일치하는 구간을 <mark class="search-hl">로 안전하게 강조합니다.
+ */
+export function highlightKoreanTitleMatch(title: string, rawQuery: string): string {
+  if (!title) return '';
+  const q = rawQuery.trim();
+  if (!q) return escHtml(title);
+
+  const tokens = q.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return escHtml(title);
+
+  // 첫 번째 매칭 토큰 기준으로 깔끔하게 하이라이트 (다중 토큰은 순차 범위 마킹)
+  const ranges: [number, number][] = [];
+  for (const tok of tokens) {
+    const re = new RegExp(buildKoreanImeTokenRegex(tok).source, 'gi');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(title)) !== null) {
+      if (m[0].length === 0) {
+        re.lastIndex++;
+        continue;
+      }
+      ranges.push([m.index, m.index + m[0].length]);
+    }
+  }
+  if (ranges.length === 0) return escHtml(title);
+
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged: [number, number][] = [ranges[0]];
+  for (let i = 1; i < ranges.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = ranges[i];
+    if (cur[0] <= prev[1]) {
+      prev[1] = Math.max(prev[1], cur[1]);
+    } else {
+      merged.push(cur);
+    }
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const [s, e] of merged) {
+    if (s > cursor) out += escHtml(title.slice(cursor, s));
+    out += `<mark class="search-hl">${escHtml(title.slice(s, e))}</mark>`;
+    cursor = e;
+  }
+  if (cursor < title.length) out += escHtml(title.slice(cursor));
+  return out;
 }
 
 /** 영문·숫자(기호 ._ - 포함)로만 이루어진 토큰인지 판별 */

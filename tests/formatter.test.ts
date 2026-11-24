@@ -7,7 +7,14 @@ vi.mock('../src/services/database', () => ({
   },
 }));
 
-import { escHtml, toMillis, buildVideoEmbed, linkify } from '../src/utils/formatter';
+import {
+  escHtml,
+  toMillis,
+  buildVideoEmbed,
+  linkify,
+  scoreKoreanTitleMatch,
+  highlightKoreanTitleMatch
+} from '../src/utils/formatter';
 
 describe('formatter 유틸리티', () => {
   it('escHtml은 HTML 특수문자 및 따옴표를 모두 이스케이프해야 한다', () => {
@@ -35,5 +42,28 @@ describe('formatter 유틸리티', () => {
     const html = buildVideoEmbed('https://www.youtube.com/watch?v=dQw4w9WgXcQ', 0);
     expect(html).toContain('https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1');
     expect(html).toContain('YouTube');
+  });
+
+  it('scoreKoreanTitleMatch는 한글 타이핑 중간 상태(초성·받침 전·연음 대기)에서도 끊김 없이 매칭해야 한다', () => {
+    const title = '양자역학 정리 노트';
+    // 타이핑 전 과정: ㅇ -> 야 -> 양 -> 양ㅈ -> 양자 -> 양장(양자역 입력 중) -> 양자여 -> 양자역 -> 양자역ㅎ -> 양자역학
+    for (const step of ['ㅇ', '야', '양', '양ㅈ', '양자', '양장', '양자여', '양자역', '양자역ㅎ', '양자역하', '양자역학', 'ㅇㅈㅇㅎ']) {
+      expect(scoreKoreanTitleMatch(title, step)).toBeGreaterThan(0);
+    }
+    expect(scoreKoreanTitleMatch(title, '전혀다른검색어')).toBe(0);
+
+    // 겹받침 연음 중간 상태: '달가'를 치는 중 '닭'이 된 경우에도 매칭 유지
+    expect(scoreKoreanTitleMatch('달가운 기억', '닭')).toBeGreaterThan(0);
+
+    // 접두어 일치가 단순 포함보다 높은 점수를 받아야 함
+    expect(scoreKoreanTitleMatch('메모 링크 가이드', '메모')).toBeGreaterThan(
+      scoreKoreanTitleMatch('나의 메모장', '메모')
+    );
+  });
+
+  it('highlightKoreanTitleMatch는 매칭된 구간을 안전하게 하이라이트하고 XSS를 방지해야 한다', () => {
+    const hl = highlightKoreanTitleMatch('양자역학 <정리>', '양ㅈ');
+    expect(hl).toContain('<mark class="search-hl">양자</mark>');
+    expect(hl).toContain('&lt;정리&gt;');
   });
 });

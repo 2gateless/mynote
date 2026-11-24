@@ -806,14 +806,26 @@
   #note-modal .form-group {
     margin-bottom: 12px;
   }
-  #note-modal .modal-actions {
+  #note-modal .modal-sticky-footer {
     position: sticky;
     bottom: 0;
     background: var(--white);
-    padding: 10px 0 calc(14px + env(safe-area-inset-bottom, 0px));
-    margin-top: 10px;
+    padding: 8px 0 calc(12px + env(safe-area-inset-bottom, 0px));
+    margin-top: 8px;
     border-top: 1px solid var(--border-color);
     z-index: 10;
+  }
+  #note-modal .modal-sticky-footer .note-tools-bar {
+    margin-top: 0;
+    margin-bottom: 8px;
+  }
+  #note-modal .modal-sticky-footer .modal-actions {
+    margin-top: 0;
+  }
+  #note-modal .modal-sticky-footer .btn-primary,
+  #note-modal .modal-sticky-footer .btn-secondary {
+    padding-top: 11px;
+    padding-bottom: 11px;
   }
   @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .modal-handle { width: 40px; height: 4px; background: var(--sky-mid); border-radius: 2px; margin: 0 auto 20px; }
@@ -938,33 +950,65 @@
   }
   .note-link.broken:hover { transform: none; box-shadow: none; }
 
-  /* 메모 링크 삽입 모달 */
+  /* 메모 링크 삽입 모달 (가시 영역 상단 고정 — 모바일 가상 키보드 올라와도 입력창·목록 항상 표시) */
+  dialog#note-link-modal {
+    align-items: flex-start;
+    justify-content: center;
+    padding: 8px 12px;
+    transition: none;
+  }
+  dialog#note-link-modal::backdrop {
+    transition: none;
+  }
   .note-link-modal {
-    background: var(--white); border-radius: 24px 24px 0 0; padding: 24px 20px 24px;
-    width: 100%; max-width: 640px; max-height: 82dvh;
+    background: var(--white); border-radius: 20px; padding: 14px 16px;
+    width: 100%; max-width: 560px; max-height: calc(100dvh - 16px);
     display: flex; flex-direction: column;
-    box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
+    border: 1.5px solid var(--border-color);
+    box-shadow: 0 10px 36px rgba(28, 36, 44, 0.25);
+    animation: none;
   }
+  .note-link-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 10px; flex-shrink: 0;
+  }
+  .note-link-header h2 {
+    font-size: 16.5px; font-weight: 800; margin: 0; color: var(--text);
+  }
+  .note-link-close-btn {
+    border: 1.5px solid var(--sky-mid); background: var(--bg-base); color: var(--text-light);
+    border-radius: 9px; padding: 5px 11px; font-size: 12.5px; font-weight: 700;
+    cursor: pointer; font-family: inherit; flex-shrink: 0;
+  }
+  .note-link-close-btn:hover { background: var(--sky-light); color: var(--text); }
   .note-link-search {
-    background: var(--sky-light); border-radius: 12px; padding: 10px 14px;
-    display: flex; align-items: center; gap: 10px;
-    border: 1.5px solid transparent; transition: border-color 0.2s;
-    margin-bottom: 12px;
+    background: var(--sky-light); border-radius: 12px; padding: 10px 12px;
+    display: flex; align-items: center; gap: 8px;
+    border: 1.5px solid var(--sky-dark); transition: border-color 0.15s, background 0.15s;
+    margin-bottom: 8px; flex-shrink: 0;
   }
-  .note-link-search:focus-within { border-color: var(--sky-dark); }
+  .note-link-search:focus-within { border-color: var(--sky-deep); background: var(--white); }
   .note-link-search input {
-    flex: 1; border: none; outline: none; font-size: 14px;
-    color: var(--text); background: transparent; font-family: inherit;
+    flex: 1; border: none; outline: none; font-size: 15px;
+    color: var(--text); background: transparent; font-family: inherit; min-width: 0;
   }
-  .note-link-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+  .note-link-search-clear {
+    border: none; background: transparent; color: var(--text-light);
+    font-size: 15px; padding: 2px 4px; cursor: pointer; line-height: 1; flex-shrink: 0;
+  }
+  .note-link-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .note-link-item {
-    width: 100%; border: none; background: transparent; font-family: inherit; text-align: left;
-    padding: 12px 14px; border-radius: 10px; cursor: pointer;
-    display: flex; align-items: center; gap: 10px;
-    transition: background 0.15s; margin-bottom: 4px;
-    content-visibility: auto; contain-intrinsic-size: auto 44px;
+    width: 100%; border: 1px solid transparent; background: transparent; font-family: inherit; text-align: left;
+    padding: 10px 12px; border-radius: 10px; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+    transition: background 0.12s; margin-bottom: 3px;
+    content-visibility: auto; contain-intrinsic-size: auto 42px;
   }
-  .note-link-item:hover { background: var(--sky-light); }
+  .note-link-item:hover,
+  .note-link-item.active {
+    background: var(--sky-light);
+    border-color: var(--sky-dark);
+  }
   .note-link-item-cat { font-size: 13px; flex-shrink: 0; }
   .note-link-item-title { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .note-link-item-tag { font-size: 11px; color: var(--sky-dark); background: var(--sky-light); padding: 1px 7px; border-radius: 6px; flex-shrink: 0; }
@@ -1415,9 +1459,19 @@
   /* PC */
   @media (min-width: 640px) {
     .pin-modal-box { border: 2px solid var(--border-color); }
-    .modal, .del-modal, .share-modal, .note-link-modal, .pin-modal-box {
+    .modal, .del-modal, .share-modal, .pin-modal-box {
       border-radius: 24px; margin: auto; max-height: 85vh;
       animation: fadeIn 0.2s ease;
+    }
+    dialog#note-link-modal {
+      align-items: flex-start;
+      padding-top: 7vh;
+    }
+    .note-link-modal {
+      border-radius: 20px;
+      margin: 0 auto;
+      max-height: 76vh;
+      animation: none;
     }
     dialog.modal-overlay { align-items: center; }
     @keyframes fadeIn { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }

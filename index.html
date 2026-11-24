@@ -271,6 +271,8 @@
       <label class="form-label" for="note-body">내용</label>
       <textarea class="form-textarea" id="note-body" placeholder="메모 내용을 입력하세요..."></textarea>
       <input type="file" id="inline-img-input" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif" style="display:none">
+    </div>
+    <div class="modal-sticky-footer" id="note-modal-footer">
       <div class="note-tools-bar">
         <button type="button" class="note-tool-btn" id="voice-btn" title="음성 입력">음성</button>
         <button type="button" class="note-tool-btn" id="inline-img-btn" title="이미지 삽입">이미지 삽입</button>
@@ -280,10 +282,10 @@
           <span>Lock</span>
         </label>
       </div>
-    </div>
-    <div class="modal-actions">
-      <button type="button" class="btn-secondary" id="btn-cancel">취소</button>
-      <button type="button" class="btn-primary" id="btn-save">💾 저장</button>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="btn-cancel">취소</button>
+        <button type="button" class="btn-primary" id="btn-save">💾 저장</button>
+      </div>
     </div>
   </div>
 </dialog>
@@ -302,17 +304,19 @@
   </div>
 </dialog>
 
-<!-- 메모 링크 삽입 모달 (Native <dialog>) -->
+<!-- 메모 링크 삽입 모달 (Native <dialog> · 상단 고정 검색 뷰) -->
 <dialog class="modal-overlay" id="note-link-modal" closedby="any" aria-labelledby="note-link-modal-title">
   <div class="note-link-modal">
-    <div class="modal-handle" aria-hidden="true"></div>
-    <h2 id="note-link-modal-title" style="font-size:18px;font-weight:800;margin-bottom:14px">📝 메모 링크 삽입</h2>
+    <div class="note-link-header">
+      <h2 id="note-link-modal-title">📝 메모 링크 삽입</h2>
+      <button type="button" class="note-link-close-btn" id="note-link-cancel" aria-label="메모 링크 창 닫기">✕ 닫기</button>
+    </div>
     <div class="note-link-search">
       <span aria-hidden="true">🔍</span>
-      <input id="note-link-search-input" placeholder="메모 제목으로 검색" aria-label="연결할 메모 제목 검색" autocomplete="off">
+      <input id="note-link-search-input" type="text" enterkeyhint="search" placeholder="메모 제목 입력 즉시 아래에 표시됩니다" aria-label="연결할 메모 제목 검색" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <button type="button" class="note-link-search-clear" id="note-link-search-clear" aria-label="검색어 지우기" style="display:none">✕</button>
     </div>
     <div class="note-link-list" id="note-link-list"></div>
-    <button type="button" class="btn-secondary" id="note-link-cancel" style="margin-top:12px;width:100%">취소</button>
   </div>
 </dialog>
 
