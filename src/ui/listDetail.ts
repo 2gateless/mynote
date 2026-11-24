@@ -728,6 +728,9 @@ export function initListDetailModule(deps: ListDetailDeps): ListDetailApi {
     delModal.addEventListener('click', e => {
       if ((e.target as HTMLElement).id === 'del-modal') closeDialog(delModal);
     });
+    delModal.addEventListener('close', () => {
+      appState.deleteTargetId = null;
+    });
   }
 
   return {

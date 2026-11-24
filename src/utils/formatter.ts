@@ -56,10 +56,16 @@ export function toMillis(ts: any): number {
   return 0;
 }
 
+const koDateFormatter = new Intl.DateTimeFormat('ko-KR', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric'
+});
+
 export function fmtDate(ts: any) {
   const ms = toMillis(ts);
   if (!ms) return '';
-  return new Date(ms).toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' });
+  return koDateFormatter.format(ms);
 }
 
 export function stopAllVideos() {

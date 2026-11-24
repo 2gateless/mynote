@@ -458,19 +458,37 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     }
   }
 
-  function syncNoteModalViewportHeight() {
+  let lastAppliedVvHeight = 0;
+  let lastAppliedVvOffsetTop = -1;
+  let lastAppliedLinkVvHeight = 0;
+
+  function syncNoteModalViewportHeight(force = false) {
     const vv = window.visualViewport;
     if (vv && isDialogOpen(noteLinkModal)) {
+      const nextH = Math.floor(vv.height);
+      if (!force && Math.abs(nextH - lastAppliedLinkVvHeight) < 1) return;
+      lastAppliedLinkVvHeight = nextH;
       const linkBox = noteLinkModal?.querySelector('.note-link-modal') as HTMLElement | null;
       if (linkBox) {
-        linkBox.style.maxHeight = `${Math.max(220, Math.floor(vv.height - 20))}px`;
+        linkBox.style.maxHeight = `${Math.max(220, nextH - 20)}px`;
       }
       return;
     }
     const overlay = $('note-modal');
     if (!overlay || !isDialogOpen(overlay)) return;
-    const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
     if (vv) {
+      // 타이핑·커서 이동 중 visualViewport scroll 이벤트가 연속 발생해도 실제 치수가 같으면 강제 리플로우 차단
+      if (
+        !force &&
+        Math.abs(vv.height - lastAppliedVvHeight) < 1 &&
+        Math.abs(vv.offsetTop - lastAppliedVvOffsetTop) < 1
+      ) {
+        return;
+      }
+      lastAppliedVvHeight = vv.height;
+      lastAppliedVvOffsetTop = vv.offsetTop;
+
+      const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
       const prevHeight = lastViewportHeight;
       const prevScrollTop = modalBox ? modalBox.scrollTop : 0;
       lastViewportHeight = vv.height;
@@ -496,6 +514,9 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function resetNoteModalViewportStyle() {
+    lastAppliedVvHeight = 0;
+    lastAppliedVvOffsetTop = -1;
+    lastAppliedLinkVvHeight = 0;
     const overlay = $('note-modal');
     if (!overlay) return;
     overlay.style.height = '';
@@ -506,13 +527,14 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   if (typeof window !== 'undefined' && window.visualViewport) {
-    window.visualViewport.addEventListener('resize', syncNoteModalViewportHeight);
-    window.visualViewport.addEventListener('scroll', syncNoteModalViewportHeight);
+    const onViewportChange = () => syncNoteModalViewportHeight(false);
+    window.visualViewport.addEventListener('resize', onViewportChange, { passive: true });
+    window.visualViewport.addEventListener('scroll', onViewportChange, { passive: true });
   }
 
   function showNoteModalOverlay() {
     openDialog('note-modal');
-    syncNoteModalViewportHeight();
+    syncNoteModalViewportHeight(true);
     const modalBox = $('note-modal')?.querySelector('.modal') as HTMLElement | null;
     if (modalBox) modalBox.scrollTop = 0;
   }
@@ -738,7 +760,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     if (noteLinkList) noteLinkList.scrollTop = 0;
     renderNoteLinkList('');
     openDialog(noteLinkModal);
-    syncNoteModalViewportHeight();
+    syncNoteModalViewportHeight(true);
     requestAnimationFrame(() => {
       noteLinkSearchInput?.focus({ preventScroll: true });
     });
@@ -747,6 +769,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   function closeNoteLinkModal(restoreBodyFocus = true) {
     if (noteLinkSearchTimer) clearTimeout(noteLinkSearchTimer);
     isNoteLinkComposing = false;
+    lastAppliedLinkVvHeight = 0;
     const linkBox = noteLinkModal?.querySelector('.note-link-modal') as HTMLElement | null;
     if (linkBox) linkBox.style.maxHeight = '';
     closeDialog(noteLinkModal);

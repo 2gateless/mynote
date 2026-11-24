@@ -129,7 +129,6 @@ interface LocalVectorRecord {
   model?: string; // EMBEDDING_VERSION (구버전 레코드에는 없음 → 로드 시 폐기)
   body?: string; // 상위 매칭된 메모의 본문 캐시 (반복 조회 시 읽기 비용 0, 잠금 메모는 저장하지 않음)
   normVec?: Float32Array; // 런타임 코사인 유사도 고속 계산용 단위 벡터 (IndexedDB 미저장)
-  bodyLower?: string; // 런타임 하이브리드 키워드 매칭용 본문 소문자 캐시 (IndexedDB 미저장)
 }
 
 // Firestore 메모 데이터 → 로컬 벡터 레코드 (현재 버전 임베딩이 아니면 null, 잠금 메모는 본문 미보관)
@@ -278,7 +277,7 @@ async function putVectorsToIdb(records: LocalVectorRecord[]): Promise<void> {
             ? r.embedding
             : (r.normVec && r.normVec.length === EMBEDDING_DIM ? Array.from(r.normVec) : []);
         if (embToStore.length !== EMBEDDING_DIM) continue;
-        // 런타임 전용 캐시(normVec, bodyLower)는 제외하고 직렬화 가능한 필드만 IndexedDB에 저장
+        // 런타임 전용 캐시(normVec)는 제외하고 직렬화 가능한 필드만 IndexedDB에 저장
         store.put({
           id: r.id,
           uid: r.uid,
@@ -966,8 +965,7 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
 
       // 잠금 메모에 평문 본문이 남아 있으면 즉시 제거 (보안 강화)
       if (localRec && item.locked && localRec.body !== undefined) {
-        delete localRec.body;
-        delete localRec.bodyLower;
+        localRec.body = undefined;
         lockedSanitizedRecords.push(localRec);
       }
 
@@ -1004,7 +1002,11 @@ async function doEnsureLocalVectorsSynced(): Promise<Map<string, LocalVectorReco
     for (let i = 0; i < staleNoteIds.length; i += FETCH_CONCURRENCY) {
       const chunk = staleNoteIds.slice(i, i + FETCH_CONCURRENCY);
       try {
-        const qDocs = query(collection(db, 'notes'), where(documentId(), 'in', chunk));
+        const qDocs = query(
+          collection(db, 'notes'),
+          where('uid', '==', uid),
+          where(documentId(), 'in', chunk)
+        );
         const snap = await getDocs(qDocs);
         snap.docs.forEach(d => {
           const rec = toVectorRecord(d.id, uid, d.data());
@@ -1076,7 +1078,6 @@ export async function hydrateTopSearchResults(
       if ((n.body || '').length < 200) {
         if (vecRec) {
           vecRec.body = n.body;
-          delete vecRec.bodyLower;
           updatedForIdb.push(vecRec);
         }
         return;
@@ -1090,8 +1091,7 @@ export async function hydrateTopSearchResults(
             n.locked = true;
             n.body = '';
             if (vecRec) {
-              delete vecRec.body;
-              delete vecRec.bodyLower;
+              vecRec.body = undefined;
               updatedForIdb.push(vecRec);
             }
             return;
@@ -1099,7 +1099,6 @@ export async function hydrateTopSearchResults(
           n.body = fullNote.body;
           if (vecRec) {
             vecRec.body = fullNote.body;
-            delete vecRec.bodyLower;
             updatedForIdb.push(vecRec);
           } else if (isCurrentEmbedding(fullNote.embeddingModel, fullNote.embedding)) {
             const newRec: LocalVectorRecord = {
@@ -1323,8 +1322,7 @@ export async function semanticSearchNotes(
 
     // 보안: 잠금 메모에 혹시라도 로컬 본문 캐시가 남아 있다면 즉시 삭제
     if (isLocked && vecRec && vecRec.body !== undefined) {
-      delete vecRec.body;
-      delete vecRec.bodyLower;
+      vecRec.body = undefined;
       sanitizedLockedForIdb.push(vecRec);
     }
 
@@ -2113,7 +2111,11 @@ export async function backfillMissingEmbeddings(
       const chunk = missingIds.slice(i, i + FETCH_CONCURRENCY);
       let docs: (Note | null)[] = [];
       try {
-        const qDocs = query(collection(db, 'notes'), where(documentId(), 'in', chunk));
+        const qDocs = query(
+          collection(db, 'notes'),
+          where('uid', '==', uid),
+          where(documentId(), 'in', chunk)
+        );
         const snap = await getDocs(qDocs);
         docs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Note));
       } catch (e) {

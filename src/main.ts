@@ -366,6 +366,9 @@ listDetailApi = initListDetailModule({
       isSearchIndexDirty = true;
       isNotesByTitleDirty = true;
       appState.sortedNotesByTitle = null;
+      if (!notesUnsubscribe) {
+        schedulePersistSearchCache(appState.allNotesCache);
+      }
     }
     searchApi.syncSearchResultOnNoteDeleted(noteId, detailFrom);
   },
@@ -393,12 +396,17 @@ function handleCacheNoteUpdated(
         tags: updated.tags ?? prev.tags,
         keywords: updated.keywords ?? prev.keywords,
         pinned: updated.pinned ?? prev.pinned,
+        pinnedAt: updated.pinnedAt !== undefined ? updated.pinnedAt : prev.pinnedAt,
+        updatedAt: updated.updatedAt !== undefined ? updated.updatedAt : prev.updatedAt,
         locked: updated.locked ?? prev.locked,
         snippet: updated.locked ? '' : (typeof updated.body === 'string' ? updated.body.substring(0, 200) : prev.snippet),
       };
       isSearchIndexDirty = true;
       isNotesByTitleDirty = true;
       appState.sortedNotesByTitle = null;
+      if (!notesUnsubscribe) {
+        schedulePersistSearchCache(appState.allNotesCache);
+      }
     }
   }
   searchApi.syncSearchResultOnNoteUpdated(noteId, updated, detailFrom);
@@ -436,7 +444,9 @@ function applyEarlyCache() {
     if (rawCounts) {
       lastCounts = JSON.parse(rawCounts);
     }
-    renderFoldersList(lastCounts);
+    if (!foldersList?.querySelector('.folder-row')) {
+      renderFoldersList(lastCounts);
+    }
     applyCounts(lastCounts);
 
     const rawUser = localStorage.getItem('mynote_user_cache');
@@ -654,8 +664,24 @@ window.addEventListener('online', () => {
 });
 
 // ── PC 사용자를 위한 전역 키보드 단축키 (Ctrl+S 저장, Ctrl+K 또는 / 검색, Esc 닫기/뒤로가기)
+const DIALOG_SCREENS: Record<string, string> = {
+  'ai-config-modal': 'ai-config-modal',
+  'pin-modal': 'pin-modal',
+  'img-viewer': 'img-viewer',
+  'note-link-modal': 'note-link-modal',
+  modal: 'note-modal',
+  'del-modal': 'del-modal',
+};
+
 document.addEventListener('keydown', (e: KeyboardEvent) => {
+  // 한글 IME 조합 중이거나 일반 문자 타이핑 시에는 DOM 조회(currentScreen) 없이 0ms 즉시 종료
+  if (e.isComposing || e.keyCode === 229) return;
+  const key = e.key;
+  const hasCmdOrCtrl = e.ctrlKey || e.metaKey;
+  const isModShortcut = hasCmdOrCtrl && (key === 's' || key === 'S' || key === 'k' || key === 'K');
+  if (!isModShortcut && key !== '/' && key !== 'Escape') return;
   if (!appState.currentUser) return;
+
   const screen = currentScreen();
   const target = e.target as HTMLElement | null;
   const isTypingInInput = Boolean(
@@ -663,7 +689,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   );
 
   // Ctrl+S / Cmd+S: 메모 작성·수정 모달에서 즉시 저장
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+  if (hasCmdOrCtrl && (key === 's' || key === 'S')) {
     if (screen === 'modal') {
       e.preventDefault();
       const saveBtn = $('btn-save') as HTMLButtonElement | null;
@@ -673,7 +699,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   // Ctrl+K / Cmd+K: 검색창 즉시 열기 및 포커스
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+  if (hasCmdOrCtrl && (key === 'k' || key === 'K')) {
     if (screen === 'home' || screen === 'list' || screen === 'detail') {
       e.preventDefault();
       if (screen === 'list' && appState.currentCat) {
@@ -692,7 +718,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   // '/' 키: 입력 중이 아닐 때 홈·목록 화면에서 검색창 열기
-  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingInInput) {
+  if (key === '/' && !hasCmdOrCtrl && !e.altKey && !isTypingInInput) {
     if (screen === 'home' || screen === 'list') {
       e.preventDefault();
       if (screen === 'list' && appState.currentCat) {
@@ -707,7 +733,15 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   // Esc: 모달 닫기 또는 상세 화면 뒤로가기
-  if (e.key === 'Escape') {
+  // (네이티브 HTMLDialogElement가 열려 있는 경우에는 브라우저 고유 cancel/close 이벤트가 단독 처리하도록 중복 호출 방지)
+  if (key === 'Escape') {
+    const dialogId = DIALOG_SCREENS[screen];
+    if (dialogId) {
+      const dialogEl = $(dialogId);
+      if (typeof HTMLDialogElement !== 'undefined' && dialogEl instanceof HTMLDialogElement) {
+        return;
+      }
+    }
     if (screen === 'ai-config-modal') {
       e.preventDefault();
       searchApi.closeAiConfigModal();
