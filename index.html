@@ -398,8 +398,11 @@
 <!-- Image Viewer (Native <dialog>) -->
 <dialog class="img-viewer-overlay" id="img-viewer" closedby="any" aria-label="이미지 크게 보기">
   <div class="img-viewer-topbar">
-    <div class="img-viewer-zoom-badge" id="img-viewer-zoom-badge">100%</div>
-    <div class="img-viewer-hint">💡 더블클릭하면 2배 확대 · 드래그로 이동</div>
+    <div class="img-viewer-status">
+      <div class="img-viewer-counter" id="img-viewer-counter" style="display:none">1 / 1</div>
+      <div class="img-viewer-zoom-badge" id="img-viewer-zoom-badge">100%</div>
+    </div>
+    <div class="img-viewer-hint" id="img-viewer-hint">💡 좌우로 쓸어 넘기기 · 더블클릭 2배 확대</div>
     <div class="img-viewer-tools">
       <button type="button" class="img-viewer-tool-btn" id="img-viewer-zoom-in" title="확대 (+)" aria-label="이미지 확대">🔍+</button>
       <button type="button" class="img-viewer-tool-btn" id="img-viewer-zoom-out" title="축소 (−)" aria-label="이미지 축소">🔍−</button>
@@ -409,7 +412,9 @@
     </div>
   </div>
   <div class="img-viewer-viewport" id="img-viewer-viewport">
+    <button type="button" class="img-viewer-nav prev" id="img-viewer-prev" title="이전 이미지 (←)" aria-label="이전 이미지" style="display:none">‹</button>
     <img class="img-viewer-img" id="img-viewer-img" src="" alt="크게 보기 이미지" draggable="false">
+    <button type="button" class="img-viewer-nav next" id="img-viewer-next" title="다음 이미지 (→)" aria-label="다음 이미지" style="display:none">›</button>
   </div>
   <div class="img-viewer-bottombar">
     <button type="button" class="img-viewer-download" id="img-viewer-download">⬇️ 이미지 저장</button>

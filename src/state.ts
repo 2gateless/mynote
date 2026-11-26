@@ -28,7 +28,7 @@ export interface AppState {
   handleNoteLinkClick: ((el: HTMLElement) => void) | null;
   getNotesByTitle: (() => Map<string, NoteIndexItem>) | null;
   openList: ((catId: string, tag?: string | null) => void) | null;
-  openImageViewer: ((url: string, initialScale?: number) => void) | null;
+  openImageViewer: ((url: string, initialScale?: number, galleryUrls?: string[], startIndex?: number) => void) | null;
   closeImageViewer: (() => void) | null;
 }
 
