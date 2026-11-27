@@ -261,9 +261,13 @@
       <span class="form-label">태그 (복수 선택 가능 · 다시 누르면 해제)</span>
       <div id="tag-options" style="display:flex;gap:8px;flex-wrap:wrap"></div>
     </div>
-    <div class="form-group">
-      <label class="form-label" for="note-keywords">검색용 키워드 (쉼표로 구분)</label>
-      <input class="form-input" id="note-keywords" placeholder="예: 영수증, 출장, 중요" maxlength="100">
+    <div class="form-group" id="keywords-form-group">
+      <div class="form-label-row">
+        <label class="form-label" for="note-keywords" style="margin-bottom:0">검색용 키워드 (쉼표 또는 엔터로 구분)</label>
+        <button type="button" class="btn-keyword-append" id="btn-keyword-append" title="맨 뒤에 새 키워드 이어서 추가">+ 추가</button>
+      </div>
+      <textarea class="form-input keyword-textarea" id="note-keywords" rows="1" enterkeyhint="done" placeholder="예: 영수증, 출장, 중요 (엔터로 쉼표 자동 입력)" maxlength="150"></textarea>
+      <div class="keyword-chips-preview" id="keyword-chips-preview" style="display:none"></div>
     </div>
     <div class="form-group" style="margin-bottom:8px">
       <label class="form-label" for="note-body">내용</label>

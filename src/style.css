@@ -829,6 +829,8 @@
   .modal {
     background: var(--white); border-radius: 24px 24px 0 0; padding: 28px 24px 40px;
     width: 100%; max-width: 640px; max-height: 96vh; max-height: 96dvh; overflow-y: auto;
+    scroll-padding-top: 16px;
+    scroll-padding-bottom: 132px;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
     box-shadow: 0 -8px 40px rgba(90,144,176,0.2);
@@ -873,6 +875,38 @@
   }
   .form-input:focus, .form-textarea:focus { border-color: var(--sky-dark); background: white; }
   .form-textarea { min-height: 390px; resize: vertical; }
+  .form-label-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 7px;
+  }
+  .btn-keyword-append {
+    padding: 3px 10px; border-radius: 999px;
+    border: 1.5px solid var(--sky-dark); background: var(--sky-pale);
+    color: var(--sky-deep); font-size: 12px; font-weight: 700;
+    cursor: pointer; font-family: inherit; line-height: 1.3;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn-keyword-append:hover { background: var(--sky-light); }
+  .btn-keyword-append:active { transform: scale(0.96); }
+  .keyword-textarea {
+    min-height: 46px; max-height: 120px; resize: none;
+    line-height: 1.45; overflow-y: auto;
+    word-break: break-word; overflow-wrap: break-word;
+  }
+  .keyword-chips-preview {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px;
+  }
+  .keyword-chip-item {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 9px; border-radius: 999px;
+    background: var(--bg-base); border: 1px solid var(--sky-mid);
+    color: var(--text); font-size: 12.5px; font-weight: 600;
+    font-family: inherit; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .keyword-chip-item:hover { background: #FDEAEA; border-color: var(--danger); color: var(--danger); }
+  .keyword-chip-remove { font-size: 11px; color: var(--text-light); font-weight: 800; }
+  .keyword-chip-item:hover .keyword-chip-remove { color: var(--danger); }
 
   .img-upload-area {
     border: 2px dashed var(--sky); border-radius: 12px; padding: 18px;

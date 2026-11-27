@@ -72,6 +72,9 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   const inlineImgBtn = $('inline-img-btn') as HTMLButtonElement | null;
   const inlineImgInput = $('inline-img-input') as HTMLInputElement | null;
   const noteBodyEl = $('note-body') as HTMLTextAreaElement | null;
+  const noteKeywordsEl = $('note-keywords') as (HTMLTextAreaElement | HTMLInputElement) | null;
+  const keywordChipsPreviewEl = $('keyword-chips-preview') as HTMLElement | null;
+  const btnKeywordAppend = $('btn-keyword-append') as HTMLButtonElement | null;
 
   let noteLinkRenderLimit = 80;
   let activeNoteLinkIndex = -1;
@@ -206,27 +209,64 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     }
   }
 
+  function normalizeKeywordsString(raw: string): string {
+    return raw
+      .split(',')
+      .map(k => k.trim())
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  function autoResizeKeywordInput() {
+    if (!noteKeywordsEl || !(noteKeywordsEl instanceof HTMLTextAreaElement)) return;
+    noteKeywordsEl.style.height = 'auto';
+    const nextH = Math.min(120, Math.max(46, noteKeywordsEl.scrollHeight));
+    noteKeywordsEl.style.height = `${nextH}px`;
+  }
+
+  function renderKeywordChipsPreview() {
+    if (!keywordChipsPreviewEl || !noteKeywordsEl) return;
+    const items = noteKeywordsEl.value
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (items.length === 0) {
+      keywordChipsPreviewEl.style.display = 'none';
+      keywordChipsPreviewEl.innerHTML = '';
+      return;
+    }
+    keywordChipsPreviewEl.style.display = 'flex';
+    keywordChipsPreviewEl.innerHTML = items
+      .map((kw, idx) =>
+        `<button type="button" class="keyword-chip-item" data-kw-idx="${idx}" title="탭하여 '${escHtml(kw)}' 키워드 삭제">` +
+        `<span>${escHtml(kw)}</span><span class="keyword-chip-remove" aria-hidden="true">✕</span></button>`
+      )
+      .join('');
+  }
+
   function fillNoteForm(title: string, body: string, keywords: string, modalTitleText: string) {
     const titleEl = $('note-title') as HTMLInputElement | null;
     const bodyEl = $('note-body') as HTMLTextAreaElement | null;
-    const keywordsEl = $('note-keywords') as HTMLInputElement | null;
+    const keywordsEl = $('note-keywords') as (HTMLInputElement | HTMLTextAreaElement) | null;
     const modalTitle = $('modal-title');
     if (titleEl) titleEl.value = title;
     if (bodyEl) bodyEl.value = body;
     if (keywordsEl) keywordsEl.value = keywords;
     if (modalTitle) modalTitle.textContent = modalTitleText;
+    autoResizeKeywordInput();
+    renderKeywordChipsPreview();
   }
 
   function takeCurrentFormSnapshot(): NoteFormSnapshot {
     const titleEl = $('note-title') as HTMLInputElement | null;
     const bodyEl = $('note-body') as HTMLTextAreaElement | null;
-    const keywordsEl = $('note-keywords') as HTMLInputElement | null;
+    const keywordsEl = $('note-keywords') as (HTMLInputElement | HTMLTextAreaElement) | null;
     const pinnedEl = $('note-pinned') as HTMLInputElement | null;
     const lockedEl = $('note-locked') as HTMLInputElement | null;
     return {
       title: (titleEl?.value || '').trim(),
       body: (bodyEl?.value || '').trim(),
-      keywords: (keywordsEl?.value || '').trim(),
+      keywords: normalizeKeywordsString(keywordsEl?.value || ''),
       pinned: !!pinnedEl?.checked,
       locked: !!lockedEl?.checked,
       categories: getSelectedCategoriesFromUI(),
@@ -334,11 +374,33 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   } | null = null;
   let lastViewportHeight = typeof window !== 'undefined' ? (window.visualViewport?.height || window.innerHeight) : 0;
 
+  let focusVisibilityTimers: ReturnType<typeof setTimeout>[] = [];
+  function clearFocusVisibilityTimers() {
+    for (const t of focusVisibilityTimers) clearTimeout(t);
+    focusVisibilityTimers = [];
+  }
+
+  function scheduleActiveFieldVisibilityCheck(fieldEl: HTMLElement) {
+    clearFocusVisibilityTimers();
+    const runCheck = () => {
+      const overlay = $('note-modal');
+      if (!overlay || !isDialogOpen(overlay) || isDialogOpen(noteLinkModal)) return;
+      if (document.activeElement !== fieldEl) return;
+      const modalBox = overlay.querySelector('.modal') as HTMLElement | null;
+      if (modalBox) ensureActiveFieldVisibleInModal(modalBox, fieldEl);
+    };
+    requestAnimationFrame(runCheck);
+    // 모바일 소프트 키보드 슬라이드업 애니메이션 진행 중 및 완료 시점에 걸쳐 가시성 보장
+    focusVisibilityTimers.push(setTimeout(runCheck, 120));
+    focusVisibilityTimers.push(setTimeout(runCheck, 280));
+  }
+
   ['note-title', 'note-body', 'note-keywords'].forEach(id => {
     const el = $(id);
     if (el) {
       el.addEventListener('focus', () => {
         lastFocusedFieldId = id;
+        scheduleActiveFieldVisibilityCheck(el);
       });
     }
   });
@@ -468,18 +530,41 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
   }
 
   function ensureActiveFieldVisibleInModal(modalBox: HTMLElement, fieldEl: HTMLElement, preferEnd = false) {
-    if (fieldEl instanceof HTMLTextAreaElement) {
+    // 본문(#note-body)처럼 긴 멀티라인 에디터는 커서 줄 기준으로만 최소 이동
+    if (fieldEl instanceof HTMLTextAreaElement && fieldEl.id === 'note-body') {
       const pos = preferEnd ? fieldEl.value.length : (fieldEl.selectionEnd ?? fieldEl.value.length);
       scrollTextareaCaretIntoView(modalBox, fieldEl, pos);
       return;
     }
+
+    // 제목(#note-title) · 검색용 키워드(#note-keywords) 등 상단 폼 필드:
+    // scrollIntoView('nearest')는 하단 고정 바(#note-modal-footer) 높이를 무시하여 키보드/푸터 뒤에 가려지므로
+    // 실제 가시 영역(visibleTop ~ visibleBottom) 기준으로 modalBox.scrollTop을 직접 정밀 보정
     const boxRect = modalBox.getBoundingClientRect();
     const fieldRect = fieldEl.getBoundingClientRect();
     const footerEl = $('note-modal-footer');
-    const footerHeight = footerEl ? footerEl.offsetHeight : 76;
-    const visibleBottom = boxRect.bottom - footerHeight;
-    if (fieldRect.bottom < boxRect.top + 20 || fieldRect.top > visibleBottom - 20) {
-      fieldEl.scrollIntoView({ block: 'nearest' });
+    const footerHeight = footerEl ? footerEl.offsetHeight : 96;
+    const visibleTop = boxRect.top + 16;
+    const visibleBottom = boxRect.bottom - footerHeight - 16;
+
+    if (visibleBottom <= visibleTop) return;
+
+    // 키워드 필드는 아래쪽 키워드 칩 프리뷰까지 함께 보이도록 그룹 하단을 우선 고려
+    const groupEl = fieldEl.id === 'note-keywords'
+      ? (fieldEl.closest('.form-group') as HTMLElement | null)
+      : null;
+    const targetBottom = groupEl ? Math.min(groupEl.getBoundingClientRect().bottom, fieldRect.bottom + 44) : fieldRect.bottom;
+    const targetTop = groupEl ? groupEl.getBoundingClientRect().top : fieldRect.top - 24;
+
+    if (targetBottom > visibleBottom) {
+      const minNeeded = (targetBottom - visibleBottom) + 16;
+      const idealTopAlign = targetTop - (boxRect.top + 14);
+      // 라벨이 화면 위로 잘리지 않는 선에서 입력창과 커서를 가시 영역 상단으로 시원하게 끌어올림
+      const delta = idealTopAlign > minNeeded ? Math.min(idealTopAlign, minNeeded + 48) : minNeeded;
+      modalBox.scrollTop += Math.max(0, delta);
+    } else if (fieldRect.top < visibleTop) {
+      const topTarget = Math.min(fieldRect.top, targetTop);
+      modalBox.scrollTop = Math.max(0, modalBox.scrollTop - (visibleTop - topTarget) - 12);
     }
   }
 
@@ -625,8 +710,8 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
       if (prevScrollTop > 0 && modalBox.scrollTop === 0) {
         modalBox.scrollTop = prevScrollTop;
       }
-      // 메모 링크 모달이 닫혀 있고 키보드가 새로 올라왔을 때만 실제 커서 줄 가시성 보정
-      if (!isDialogOpen(noteLinkModal) && prevHeight - vv.height > 80) {
+      // 메모 링크 모달이 닫혀 있고 키보드가 올라오며 뷰포트가 줄어드는 매 프레임마다 활성 입력칸 가시성 보정
+      if (!isDialogOpen(noteLinkModal) && prevHeight - vv.height > 1) {
         const activeEl = document.activeElement as HTMLElement | null;
         if (activeEl && (activeEl.id === 'note-body' || activeEl.id === 'note-title' || activeEl.id === 'note-keywords')) {
           requestAnimationFrame(() => ensureActiveFieldVisibleInModal(modalBox, activeEl));
@@ -670,12 +755,14 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     lastKnownBodySelection = { start: 0, end: 0, scrollTop: 0 };
     openDialog('note-modal');
     syncNoteModalViewportHeight(true);
+    autoResizeKeywordInput();
     const modalBox = $('note-modal')?.querySelector('.modal') as HTMLElement | null;
     if (modalBox) modalBox.scrollTop = 0;
   }
 
   function closeModal(saved = false) {
     modalSessionToken++;
+    clearFocusVisibilityTimers();
     initialNoteFormSnapshot = null;
     savedEditCursor = null;
     savedNoteLinkPosition = null;
@@ -1131,7 +1218,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     const bodyEl = $('note-body') as HTMLTextAreaElement | null;
     const pinnedEl = $('note-pinned') as HTMLInputElement | null;
     const lockedEl = $('note-locked') as HTMLInputElement | null;
-    const keywordsEl = $('note-keywords') as HTMLInputElement | null;
+    const keywordsEl = $('note-keywords') as (HTMLInputElement | HTMLTextAreaElement) | null;
 
     const title = titleEl ? titleEl.value.trim() : '';
     const body = bodyEl ? bodyEl.value.trim() : '';
@@ -1144,7 +1231,7 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
       ? pinnedEl.checked
       : (appState.editingNoteId ? !!appState.currentNote?.pinned : false);
     const locked = lockedEl ? lockedEl.checked : false;
-    const keywords = keywordsEl ? keywordsEl.value.trim() : '';
+    const keywords = keywordsEl ? normalizeKeywordsString(keywordsEl.value) : '';
 
     if (!title) { showToast('제목을 입력해주세요'); return; }
     isSaving = true;
@@ -1458,6 +1545,112 @@ export function initNoteModalModule(deps: NoteModalDeps): NoteModalApi {
     const el = $(id);
     if (el) el.addEventListener('input', () => scheduleSaveDraft());
   });
+
+  // ── 검색용 키워드 손쉬운 추가·수정·개별 삭제 및 키보드 가시성 보정
+  if (noteKeywordsEl) {
+    const insertCommaSeparator = () => {
+      const val = noteKeywordsEl.value;
+      const start = noteKeywordsEl.selectionStart ?? val.length;
+      const end = noteKeywordsEl.selectionEnd ?? val.length;
+      const before = val.slice(0, start);
+      const after = val.slice(end);
+      // 이미 앞쪽이 쉼표로 끝나거나 비어 있으면 불필요한 중복 쉼표 방지
+      if (!before.trim() || /,\s*$/.test(before)) {
+        const cleanedBefore = before.replace(/,\s*$/, ', ');
+        noteKeywordsEl.value = cleanedBefore + after;
+        const pos = cleanedBefore.length;
+        noteKeywordsEl.setSelectionRange(pos, pos);
+      } else {
+        const sep = after.startsWith(' ') ? ',' : ', ';
+        noteKeywordsEl.value = before + sep + after;
+        const pos = before.length + sep.length;
+        noteKeywordsEl.setSelectionRange(pos, pos);
+      }
+      autoResizeKeywordInput();
+      renderKeywordChipsPreview();
+      scheduleSaveDraft();
+      scheduleActiveFieldVisibilityCheck(noteKeywordsEl);
+    };
+
+    noteKeywordsEl.addEventListener('beforeinput', (e: Event) => {
+      const ie = e as InputEvent;
+      if (ie.inputType === 'insertLineBreak' || ie.inputType === 'insertParagraph') {
+        e.preventDefault();
+        insertCommaSeparator();
+      }
+    });
+
+    noteKeywordsEl.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        insertCommaSeparator();
+      }
+    });
+
+    noteKeywordsEl.addEventListener('click', () => {
+      scheduleActiveFieldVisibilityCheck(noteKeywordsEl);
+    });
+
+    noteKeywordsEl.addEventListener('input', () => {
+      // 붙여넣기 등으로 줄바꿈이 들어온 경우에도 쉼표로 자동 치환
+      if (noteKeywordsEl.value.includes('\n')) {
+        const pos = noteKeywordsEl.selectionStart ?? noteKeywordsEl.value.length;
+        noteKeywordsEl.value = noteKeywordsEl.value.replace(/\r?\n+/g, ', ');
+        const safePos = Math.min(pos + 1, noteKeywordsEl.value.length);
+        noteKeywordsEl.setSelectionRange(safePos, safePos);
+      }
+      autoResizeKeywordInput();
+      renderKeywordChipsPreview();
+      const modalBox = $('note-modal')?.querySelector('.modal') as HTMLElement | null;
+      if (modalBox) ensureActiveFieldVisibleInModal(modalBox, noteKeywordsEl);
+    });
+  }
+
+  if (btnKeywordAppend && noteKeywordsEl) {
+    btnKeywordAppend.addEventListener('mousedown', e => e.preventDefault());
+    btnKeywordAppend.addEventListener('click', () => {
+      const trimmed = normalizeKeywordsString(noteKeywordsEl.value);
+      noteKeywordsEl.value = trimmed ? `${trimmed}, ` : '';
+      autoResizeKeywordInput();
+      renderKeywordChipsPreview();
+      noteKeywordsEl.focus({ preventScroll: true });
+      const endPos = noteKeywordsEl.value.length;
+      noteKeywordsEl.setSelectionRange(endPos, endPos);
+      scheduleActiveFieldVisibilityCheck(noteKeywordsEl);
+    });
+  }
+
+  if (keywordChipsPreviewEl && noteKeywordsEl) {
+    keywordChipsPreviewEl.addEventListener('mousedown', e => {
+      if ((e.target as HTMLElement).closest('.keyword-chip-item')) {
+        e.preventDefault();
+      }
+    });
+    keywordChipsPreviewEl.addEventListener('click', e => {
+      const chip = (e.target as HTMLElement).closest('.keyword-chip-item') as HTMLElement | null;
+      if (!chip) return;
+      const idx = Number(chip.dataset.kwIdx);
+      if (!Number.isInteger(idx) || idx < 0) return;
+      const items = noteKeywordsEl.value
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (idx >= items.length) return;
+      const [removed] = items.splice(idx, 1);
+      const hadTrailingComma = /,\s*$/.test(noteKeywordsEl.value);
+      noteKeywordsEl.value = items.length > 0
+        ? (hadTrailingComma ? `${items.join(', ')}, ` : items.join(', '))
+        : '';
+      autoResizeKeywordInput();
+      renderKeywordChipsPreview();
+      scheduleSaveDraft();
+      if (document.activeElement === noteKeywordsEl) {
+        const endPos = noteKeywordsEl.value.length;
+        noteKeywordsEl.setSelectionRange(endPos, endPos);
+      }
+      showToast(`'${removed}' 키워드를 삭제했어요`);
+    });
+  }
 
   if (inlineImgBtn) {
     inlineImgBtn.onclick = () => inlineImgInput?.click();
