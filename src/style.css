@@ -1517,6 +1517,30 @@
     .detail-content { max-width: 640px; margin: 0 auto; }
   }
 
+  /* 모바일 가로 모드(Landscape) 최적화: 낮은 화면 높이에서도 이미지 뷰어·모달이 쾌적하게 표시되도록 보정 */
+  @media (orientation: landscape) and (max-height: 540px) {
+    .img-viewer-hint { display: none; }
+    .img-viewer-topbar {
+      height: 44px;
+      padding: 0 max(14px, env(safe-area-inset-right, 0px)) 0 max(14px, env(safe-area-inset-left, 0px));
+    }
+    .img-viewer-img {
+      max-width: 94vw;
+      max-height: 92dvh;
+    }
+    .img-viewer-nav.prev { left: max(10px, env(safe-area-inset-left, 0px)); }
+    .img-viewer-nav.next { right: max(10px, env(safe-area-inset-right, 0px)); }
+    .img-viewer-bottombar { bottom: 10px; }
+    .img-viewer-download { padding: 7px 18px; font-size: 13px; }
+    .del-modal, .pin-modal-box {
+      max-height: 94dvh;
+      overflow-y: auto;
+      padding-top: 18px;
+      padding-bottom: 20px;
+    }
+    .pin-key { height: 42px; font-size: 18px; }
+  }
+
   /* ── 키보드 포커스 링 (접근성) ── */
   button:focus-visible,
   [role="button"]:focus-visible,

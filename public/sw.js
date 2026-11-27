@@ -1,7 +1,7 @@
 // MyNote 오프라인 앱 셸 캐싱용 서비스 워커
 // - Vite 해시 에셋(/assets/*): Cache-First (불변 파일이므로 즉시 응답)
 // - HTML/기타 동일 출처 요청: Network-First + 오프라인 캐시 폴백
-const CACHE_NAME = 'mynote-shell-v2';
+const CACHE_NAME = 'mynote-shell-v3';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
