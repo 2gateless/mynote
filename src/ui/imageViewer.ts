@@ -14,27 +14,215 @@ export function computeWrappedGalleryIndex(currentIndex: number, delta: number, 
   return ((currentIndex + delta) % total + total) % total;
 }
 
-export async function downloadImage(url: string) {
-  showToast('이미지 저장 중...');
+let imageModPromise: Promise<typeof import('../utils/image')> | null = null;
+function getImageMod() {
+  if (!imageModPromise) imageModPromise = import('../utils/image');
+  return imageModPromise;
+}
+
+// 뷰어 열림 중 미리 받아둔 이미지 Blob 캐시 (버튼 클릭 시 네트워크 대기 0ms -> 모바일 User Activation 만료 방지)
+const viewerBlobCache = new Map<string, Blob>();
+const viewerBlobInflight = new Map<string, Promise<Blob>>();
+const attachmentReadyUrls = new Set<string>();
+let isDownloadBusy = false;
+
+function isIosDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /iPad|iPhone|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function isAndroidDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Android/i.test(navigator.userAgent || '');
+}
+
+function isMobileDevice(): boolean {
+  return isIosDevice() || isAndroidDevice();
+}
+
+function isStandalonePwa(): boolean {
+  if (typeof window === 'undefined') return false;
+  return Boolean(
+    window.matchMedia?.('(display-mode: standalone)').matches ||
+    (navigator as any).standalone === true
+  );
+}
+
+function inferImageExt(url: string, mimeType?: string): string {
+  const m = (mimeType || '').toLowerCase();
+  if (m.includes('png')) return 'png';
+  if (m.includes('gif')) return 'gif';
+  if (m.includes('webp')) return 'webp';
+  if (m.includes('heic')) return 'heic';
+  if (m.includes('heif')) return 'heif';
+  if (m.includes('jpeg') || m.includes('jpg')) return 'jpg';
+  const clean = url.split('?')[0].toLowerCase();
+  if (clean.endsWith('.png')) return 'png';
+  if (clean.endsWith('.gif')) return 'gif';
+  if (clean.endsWith('.webp')) return 'webp';
+  return 'jpg';
+}
+
+function makeDownloadFileName(url: string, mimeType?: string): string {
+  const ext = inferImageExt(url, mimeType);
+  return `mynote_image_${Date.now()}.${ext}`;
+}
+
+function mimeFromExt(ext: string): string {
+  if (ext === 'png') return 'image/png';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+function rememberViewerBlob(url: string, blob: Blob) {
+  if (!url || blob.size === 0) return;
+  if (viewerBlobCache.has(url)) viewerBlobCache.delete(url);
+  viewerBlobCache.set(url, blob);
+  if (viewerBlobCache.size > 4) {
+    const oldest = viewerBlobCache.keys().next().value;
+    if (oldest) viewerBlobCache.delete(oldest);
+  }
+}
+
+async function getOrFetchViewerBlob(url: string): Promise<Blob> {
+  const cached = viewerBlobCache.get(url);
+  if (cached) return cached;
+  const inflight = viewerBlobInflight.get(url);
+  if (inflight) return inflight;
+
+  const p = (async () => {
+    const imgMod = await getImageMod();
+    const blob = await imgMod.fetchImageBlobSafe(url);
+    rememberViewerBlob(url, blob);
+    return blob;
+  })();
+
+  viewerBlobInflight.set(url, p);
   try {
-    const signal = typeof AbortSignal !== 'undefined' && typeof (AbortSignal as any).timeout === 'function'
-      ? (AbortSignal as any).timeout(15000)
-      : undefined;
-    const response = await fetch(url, signal ? { signal } : undefined);
-    const blob = await response.blob();
+    return await p;
+  } finally {
+    viewerBlobInflight.delete(url);
+  }
+}
+
+function prefetchViewerAssetForSave(url: string) {
+  if (!url) return;
+  if (!viewerBlobCache.has(url) && !viewerBlobInflight.has(url)) {
+    getOrFetchViewerBlob(url).catch(() => {});
+  }
+  // 모바일 Android PWA에서 직접 다운로드 시에도 인라인 열림 없이 즉시 파일로 저장되도록 메타데이터 선행 준비
+  if (isAndroidDevice() && !attachmentReadyUrls.has(url)) {
+    getImageMod()
+      .then(async m => {
+        if (!m.isFirebaseStorageUrl(url)) return;
+        const ok = await m.ensureStorageAttachmentMetadata(url, makeDownloadFileName(url));
+        if (ok) attachmentReadyUrls.add(url);
+      })
+      .catch(() => {});
+  }
+}
+
+function triggerAnchorDownload(href: string, fileName: string, revokeObjectUrlAfterMs = 0) {
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = fileName;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    if (a.parentNode) a.parentNode.removeChild(a);
+  }, 300);
+  if (revokeObjectUrlAfterMs > 0) {
+    // 모바일 다운로드 매니저 인계 및 중복 파일 확인 창 대기 시간을 위해 충분히 길게(60초) 유지
+    setTimeout(() => URL.revokeObjectURL(href), revokeObjectUrlAfterMs);
+  }
+}
+
+export async function shareImageFile(url: string): Promise<boolean> {
+  if (!url || typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+    return false;
+  }
+  try {
+    const blob = viewerBlobCache.get(url) || await getOrFetchViewerBlob(url);
+    const fileName = makeDownloadFileName(url, blob.type);
+    const mime = blob.type || mimeFromExt(inferImageExt(url));
+    const file = new File([blob], fileName, { type: mime });
+    if (typeof navigator.canShare === 'function' && !navigator.canShare({ files: [file] })) {
+      return false;
+    }
+    await navigator.share({ files: [file], title: 'MyNote 이미지' });
+    return true;
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      // 사용자가 공유/저장 시트를 스스로 닫은 경우 정상 종료로 간주
+      return true;
+    }
+    return false;
+  }
+}
+
+export async function downloadImage(url: string) {
+  if (!url || isDownloadBusy) return;
+  isDownloadBusy = true;
+
+  const dlBtn = document.getElementById('img-viewer-download') as HTMLButtonElement | null;
+  if (dlBtn) dlBtn.disabled = true;
+
+  try {
+    // 1) iOS(아이폰/아이패드): <a download>는 사진첩(갤러리)에 저장되지 않으므로 네이티브 공유 시트('이미지 저장') 우선 실행
+    if (isIosDevice() && typeof navigator.share === 'function') {
+      const shared = await shareImageFile(url);
+      if (shared) return;
+    }
+
+    // 2) Android 홈 화면 설치 PWA(Standalone): blob: 스킴이 시스템 DownloadManager에서 차단되는 기기 대응
+    if (isAndroidDevice() && isStandalonePwa()) {
+      const imgMod = await getImageMod();
+      if (imgMod.isFirebaseStorageUrl(url)) {
+        const fileName = makeDownloadFileName(url, viewerBlobCache.get(url)?.type);
+        let ready = attachmentReadyUrls.has(url);
+        if (!ready) {
+          showToast('이미지 저장 준비 중...');
+          ready = await imgMod.ensureStorageAttachmentMetadata(url, fileName);
+          if (ready) attachmentReadyUrls.add(url);
+        }
+        if (ready) {
+          triggerAnchorDownload(url, fileName, 0);
+          showToast('다운로드 폴더(갤러리)에 이미지를 저장하고 있어요 ⬇️');
+          return;
+        }
+      }
+    }
+
+    // 3) 표준 CORS-안전 Blob 다운로드 (선행 캐시 히트 시 0ms 즉시 실행, 60초간 ObjectURL 유지)
+    if (!viewerBlobCache.has(url)) {
+      showToast('이미지 저장 중...');
+    }
+    const blob = viewerBlobCache.get(url) || await getOrFetchViewerBlob(url);
+    const fileName = makeDownloadFileName(url, blob.type);
     const blobUrl = URL.createObjectURL(blob);
+    triggerAnchorDownload(blobUrl, fileName, 60000);
+    showToast('이미지가 저장되었어요 ✅');
+  } catch (e) {
+    // 4) Blob 추출 실패 시 모바일 친화 폴백: 공유 시트 시도 후 새 창 열기
+    if (isMobileDevice()) {
+      const shared = await shareImageFile(url);
+      if (shared) return;
+    }
     const a = document.createElement('a');
-    const ext = blob.type.includes('png') ? 'png' : blob.type.includes('gif') ? 'gif' : blob.type.includes('webp') ? 'webp' : 'jpg';
-    a.href = blobUrl;
-    a.download = `mynote_image_${Date.now()}.${ext}`;
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-    showToast('이미지가 저장되었어요 ✅');
-  } catch (e) {
-    window.open(url, '_blank');
-    showToast('새 탭에서 이미지를 길게 눌러 저장하세요');
+    showToast('열린 화면에서 이미지를 길게 눌러 저장하세요');
+  } finally {
+    isDownloadBusy = false;
+    if (dlBtn) dlBtn.disabled = false;
   }
 }
 
@@ -73,7 +261,12 @@ export function initImageViewer() {
   const viewerZoomInBtn = document.getElementById('img-viewer-zoom-in');
   const viewerZoomOutBtn = document.getElementById('img-viewer-zoom-out');
   const viewerCloseBtn = document.getElementById('img-viewer-close');
-  const viewerDownloadBtn = document.getElementById('img-viewer-download') as HTMLElement | null;
+  const viewerDownloadBtn = document.getElementById('img-viewer-download') as HTMLButtonElement | null;
+  const viewerShareBtn = document.getElementById('img-viewer-share') as HTMLButtonElement | null;
+
+  if (viewerShareBtn && isMobileDevice() && typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    viewerShareBtn.style.display = 'flex';
+  }
 
   /**
    * 현재 열려 있는 상세 메모(#detail-content)의 첨부 이미지 목록과 클릭된 이미지의 인덱스를 수집합니다.
@@ -190,6 +383,7 @@ export function initImageViewer() {
     if (viewerDownloadBtn) viewerDownloadBtn.dataset.url = nextUrl;
     syncGalleryControlsUI();
     preloadAdjacentImages();
+    prefetchViewerAssetForSave(nextUrl);
 
     const prefersReducedMotion =
       typeof window !== 'undefined' &&
@@ -241,6 +435,7 @@ export function initImageViewer() {
     isPanning = false;
     isSwipingGallery = false;
     swipeAxis = null;
+    viewerBlobCache.clear();
     resetViewerZoom(false);
   }
 
@@ -277,6 +472,7 @@ export function initImageViewer() {
     viewerPanY = 0;
     updateViewerTransform(false);
     preloadAdjacentImages();
+    prefetchViewerAssetForSave(activeUrl);
   };
 
   function openViewerFromElement(img: HTMLImageElement, initialScale = 1) {
@@ -320,6 +516,22 @@ export function initImageViewer() {
     viewerDownloadBtn.onclick = () => {
       const url = viewerDownloadBtn.dataset.url;
       if (url) downloadImage(url);
+    };
+  }
+
+  if (viewerShareBtn) {
+    viewerShareBtn.onclick = async () => {
+      const url = viewerDownloadBtn?.dataset.url;
+      if (!url) return;
+      viewerShareBtn.disabled = true;
+      try {
+        const ok = await shareImageFile(url);
+        if (!ok) {
+          showToast('이 기기에서는 공유 기능을 사용할 수 없어요');
+        }
+      } finally {
+        viewerShareBtn.disabled = false;
+      }
     };
   }
 
@@ -568,6 +780,7 @@ export function initImageViewer() {
       isPanning = false;
       isSwipingGallery = false;
       swipeAxis = null;
+      viewerBlobCache.clear();
       resetViewerZoom(false);
     });
   }

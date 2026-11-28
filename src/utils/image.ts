@@ -1,4 +1,4 @@
-import { getStorage, ref, uploadString, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { getStorage, ref, uploadString, uploadBytes, getDownloadURL, deleteObject, getBlob, updateMetadata } from 'firebase/storage';
 import { app, auth } from '../services/firebase';
 import { appState } from '../state';
 
@@ -148,12 +148,17 @@ export async function uploadImageToStorage(data: Blob | string, fileName: string
   const sRef = ref(storage, path);
 
   const doUpload = async () => {
+    const safeDispositionName = fileName.replace(/["\\\r\n]/g, '_');
+    const contentDisposition = `attachment; filename="${safeDispositionName}"`;
     if (typeof data === 'string') {
-      await uploadString(sRef, data, 'data_url');
+      await uploadString(sRef, data, 'data_url', { contentDisposition });
     } else {
       // Blob 대신 순수 메모리 바이트(Uint8Array)로 전달하여 XHR multipart Blob 스트림 멈춤 방지
       const bytes = new Uint8Array(await data.arrayBuffer());
-      await uploadBytes(sRef, bytes, { contentType: data.type || 'image/jpeg' });
+      await uploadBytes(sRef, bytes, {
+        contentType: data.type || 'image/jpeg',
+        contentDisposition
+      });
     }
     const url = await getDownloadURL(sRef);
     return { url, path };
@@ -177,6 +182,79 @@ export async function deleteImageFromStorage(pathOrUrl: string) {
 // 여러 이미지를 병렬로 삭제 (개별 실패는 deleteImageFromStorage 내부에서 처리)
 export async function deleteImagesFromStorage(paths: string[]) {
   await Promise.all(paths.map(p => deleteImageFromStorage(p)));
+}
+
+export function isFirebaseStorageUrl(url: string): boolean {
+  return Boolean(url && (url.includes('firebasestorage.googleapis.com') || url.includes('.firebasestorage.app')));
+}
+
+/**
+ * 모바일 브라우저에서 <img> 태그가 먼저 캐시한 비-CORS 응답과의 충돌(CORS Cache Poisoning)을 우회하여
+ * 안전하게 이미지 Blob을 가져옵니다.
+ */
+export async function fetchImageBlobSafe(url: string): Promise<Blob> {
+  const makeSignal = (ms: number) =>
+    typeof AbortSignal !== 'undefined' && typeof (AbortSignal as any).timeout === 'function'
+      ? (AbortSignal as any).timeout(ms)
+      : undefined;
+
+  // 1차: 브라우저 HTTP 캐시의 비-CORS 엔트리를 건너뛰고 깨끗한 CORS 응답 요청
+  try {
+    const res = await fetch(url, {
+      mode: 'cors',
+      cache: 'no-store',
+      credentials: 'omit',
+      signal: makeSignal(15000)
+    });
+    if (res.ok) {
+      const b = await res.blob();
+      if (b.size > 0) return b;
+    }
+  } catch {
+    // 아래 폴백으로 진행
+  }
+
+  // 2차: Firebase Storage URL인 경우 공식 SDK의 getBlob으로 조회
+  if (isFirebaseStorageUrl(url)) {
+    try {
+      const b = await withTimeout(getBlob(ref(storage, url)), 15000, 'Storage 이미지 다운로드 시간 초과');
+      if (b.size > 0) return b;
+    } catch {
+      // 아래 폴백으로 진행
+    }
+  }
+
+  // 3차: 오프라인 캐시 등 일반 fetch 시도
+  const fallbackRes = await fetch(url, { signal: makeSignal(12000) });
+  if (!fallbackRes.ok) {
+    throw new Error(`HTTP ${fallbackRes.status}`);
+  }
+  const fallbackBlob = await fallbackRes.blob();
+  if (fallbackBlob.size === 0) {
+    throw new Error('빈 이미지 데이터');
+  }
+  return fallbackBlob;
+}
+
+/**
+ * 구버전 업로드 이미지에 Content-Disposition: attachment 메타데이터를 보강하여
+ * 직접 URL 다운로드 시에도 브라우저가 인라인 열기 대신 파일 저장을 수행하도록 합니다.
+ */
+export async function ensureStorageAttachmentMetadata(url: string, fileName: string): Promise<boolean> {
+  if (!isFirebaseStorageUrl(url)) return false;
+  try {
+    const safeName = fileName.replace(/["\\\r\n]/g, '_');
+    await withTimeout(
+      updateMetadata(ref(storage, url), {
+        contentDisposition: `attachment; filename="${safeName}"`
+      }),
+      6000,
+      '메타데이터 갱신 시간 초과'
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // 메모에서 삭제 대상 이미지 경로 수집은 경량 모듈(imagePaths.ts)에서 재사용
